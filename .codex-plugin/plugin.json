@@ -1,7 +1,7 @@
 {
   "name": "dev-tools",
   "version": "0.1.0",
-  "description": "Code and Rust reviews, test-writing guidance, backporting, security audits, and project scaffolding.",
+  "description": "Code and Rust reviews, test-writing guidance, backporting, security audits, project scaffolding, and documentation figures.",
   "author": {
     "name": "Agent IX",
     "url": "https://github.com/agent-ix"
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Dev Tools",
     "shortDescription": "Focused engineering review and development methods.",
-    "longDescription": "Code and Rust reviews, test-writing guidance, backporting, security audits, and project scaffolding.",
+    "longDescription": "Code and Rust reviews, test-writing guidance, backporting, security audits, project scaffolding, and documentation figures.",
     "developerName": "Agent IX",
     "category": "Productivity",
     "capabilities": [

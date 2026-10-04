@@ -3,7 +3,7 @@
 [![Agent IX Plugins](https://github.com/agent-ix/agent-plugins/raw/refs/heads/main/assets/agent-ix-plugins.svg)](https://github.com/agent-ix/agent-plugins)
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/k8DVhuYBR2)
 
-Focused review, code guidance, security, backporting, and scaffolding skills.
+Focused review, code guidance, security, backporting, scaffolding, and documentation figure skills.
 
 ## Skills
 
@@ -20,6 +20,7 @@ Focused review, code guidance, security, backporting, and scaffolding skills.
 | `backport-code` | Carry a fix across specifications, templates, and downstream repositories. |
 | `security-deepsec` | Run a DeepSec security review and track remediation. |
 | `new-project` | Scaffold and prepare a new repository from an Agent IX template. |
+| `docs-figures` | Draw transparent light/dark SVG diagrams, charts and CSS animations for GitHub docs. |
 
 Each skill states its own external prerequisites. Quoin is used for formal specification and evidence artifacts when installed; DeepSec is required for its named audit workflow. The `new-project` skill currently offers a public Rust scaffold through [rust-lib-cookiecutter](https://github.com/agent-ix/rust-lib-cookiecutter). Its other named Agent IX templates require separate authenticated access and are not part of the public support promise. `new-project` applies its own AGPL policy to generated projects; that does not change this plugin's MIT license.
 

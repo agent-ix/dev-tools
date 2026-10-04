@@ -16,6 +16,21 @@
       ]
     },
     {
+      "name": "docs-figures",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md",
+        "assets/starter_figures.py",
+        "references/api.md",
+        "references/design.md",
+        "references/github.md",
+        "scripts/docs_figures.py",
+        "scripts/preview.py",
+        "scripts/render.py",
+        "styles/ix-docs.json"
+      ]
+    },
+    {
       "name": "new-project",
       "version": "0.1.0",
       "files": [
