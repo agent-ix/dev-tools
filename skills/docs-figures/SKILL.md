@@ -53,11 +53,16 @@ People without the plugin regenerate from a clone of `agent-ix/dev-tools`.
 
 ## Styles
 
-`ix-docs` (default): thin coloured boxes with tinted fills, IBM Plex Sans
-Condensed titles and IBM Plex Mono labels. A definitions file selects a style
-with `STYLE = "name"`. To add a style, copy `styles/ix-docs.json` to
-`styles/<name>.json` and change its fonts, sizes and per-theme palette; keep
-every role key. Fonts must be woff or ttf files that fontTools can read.
+- `ix-docs` (default): thin coloured boxes with tinted fills, IBM Plex Sans
+  Condensed titles and IBM Plex Mono labels.
+- `pencil`: hand-sketched. Wobbly double-traced strokes with a subtle tremor,
+  open arrowheads, pencil hatching and Kalam handwriting; graphite and coloured
+  pencil on light pages, chalk on dark.
+
+A definitions file selects a style with `STYLE = "name"`; `--style` overrides
+it. Figures laid out for one style fit the other, so switching is one line.
+To add a style, copy a file in `styles/` and change its fonts, sizes, palette
+or renderer; keep every role key. See [api.md](references/api.md#styles).
 
 ## References
 

@@ -102,6 +102,27 @@ what readers who prefer reduced motion see.
 - `NAME-THEME@SECONDS.png`: animation frames from inline copies seeked to each time.
 - Set `CHROME` when Chrome or Chromium is not on the usual paths.
 
+## Styles
+
+A style is `styles/NAME.json`:
+
+- `fonts`: `mono` and `title`, each a font URL or a list of URLs. Later fonts
+  supply characters the first lacks (handwriting fonts often lack `≥ ≤ →`).
+  Files must be woff or ttf.
+- `sizes`: `title`, `label`, `small` and `margin` in pixels.
+- `themes`: `light` and `dark`, each mapping every role to a colour, plus
+  `tint` (box fill opacity) and, for sketch styles, `hatch` (hatching opacity).
+- `render` (optional): omit for clean vector drawing. For hand-drawn strokes:
+  `{"mode": "sketch", "roughness", "box_roughness", "box_overshoot", "passes",
+  "pressure", "hatch_gap", "hatch_angle", "tremor": {"frequency", "scale"}}`.
+  `roughness` scales the wobble of lines and arrows, `box_roughness` and
+  `box_overshoot` (pixels past each corner) that of box edges;
+  `passes` traces each stroke that many times with the `pressure` opacities;
+  `tremor` adds a fixed-seed displacement filter to strokes, never to text.
+
+Sketch jitter is seeded by the figure name, so both themes share one drawing
+and rendering stays deterministic.
+
 ## Fonts
 
 Fonts download once into `$DOCS_FIGURES_CACHE` (default `~/.cache/docs-figures`).
