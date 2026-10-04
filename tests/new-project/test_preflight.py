@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import importlib.util
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).parents[1] / "scripts" / "preflight.py"
+SPEC = importlib.util.spec_from_file_location("new_project_preflight", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+PREFLIGHT = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(PREFLIGHT)
+SYNTHETIC_LICENSE = (
+    "GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3, 19 November 2007\n"
+)
+
+
+@pytest.fixture(autouse=True)
+def _accept_synthetic_license(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        PREFLIGHT,
+        "AGPL_SHA256",
+        hashlib.sha256(SYNTHETIC_LICENSE.encode()).hexdigest(),
+    )
+
+
+def _project(tmp_path: Path) -> Path:
+    (tmp_path / "LICENSE").write_text(SYNTHETIC_LICENSE)
+    (tmp_path / "CONTENT_RIGHTS.md").write_text("Project owner: platform-team\n")
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "synthetic-project", "license": "AGPL-3.0-or-later"})
+    )
+    (tmp_path / "src.ts").write_text("export const answer = 42;\n")
+    return tmp_path
+
+
+def test_accepts_rights_clean_agpl_project(tmp_path: Path) -> None:
+    assert PREFLIGHT.check(_project(tmp_path)) == []
+
+
+def test_requires_agpl_and_completed_rights_policy(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    (project / "LICENSE").write_text("MIT\n")
+    (project / "CONTENT_RIGHTS.md").write_text("REPLACE_WITH_OWNER\n")
+    (project / "package.json").write_text(
+        json.dumps({"name": "synthetic-project", "license": "MIT"})
+    )
+    (project / "Cargo.toml").write_text('[package]\nname = "synthetic"\nlicense = "MIT"\n')
+    assert PREFLIGHT.check(project) == [
+        "CONTENT_RIGHTS.md: replace the project-owner placeholder",
+        "Cargo.toml: license must be AGPL-3.0-or-later",
+        "LICENSE: canonical GNU AGPL version 3 text is required",
+        "package.json: license must be AGPL-3.0-or-later",
+    ]
+
+
+def test_requires_manifest_license_declarations(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    (project / "package.json").write_text(json.dumps({"name": "synthetic-project"}))
+    (project / "pyproject.toml").write_text('[project]\nname = "synthetic"\n')
+    assert PREFLIGHT.check(project) == [
+        "package.json: license must be AGPL-3.0-or-later",
+        "pyproject.toml: license must be AGPL-3.0-or-later",
+    ]
+
+
+def test_rejects_protected_files_and_local_paths(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    (project / "source.pdf").write_bytes(b"synthetic")
+    local_path = "/" + "home/example/work/research.txt"
+    (project / "notes.md").write_text(local_path)
+    assert PREFLIGHT.check(project) == [
+        "notes.md: absolute workstation path",
+        "source.pdf: protected source file type is not allowed",
+    ]
+
+
+def test_registry_urls_are_not_workstation_paths(tmp_path: Path) -> None:
+    """A path segment inside a URL belongs to the host, not to this workstation.
+
+    Regression for #22: an unanchored root-user segment matched the devpi
+    registry URL used throughout the skills, so correct files were refused.
+    """
+    project = _project(tmp_path)
+    # Split so this file does not itself contain the patterns under test.
+    host = "http://pypi.ix"
+    root_index = "/" + "root" + "/"
+    home_index = "/" + "home" + "/"
+    (project / "registry.md").write_text(
+        f'url = "{host}{root_index}dev/+simple/"\n'
+        f'mirror = "{host}{home_index}team/dist/"\n'
+    )
+    assert PREFLIGHT.check(project) == []
+
+
+def test_still_rejects_workstation_paths_behind_a_file_url(tmp_path: Path) -> None:
+    """The URL guard must not open a hole: file: URLs still carry real paths."""
+    project = _project(tmp_path)
+    local_path = "/" + "home/example/x/SKILL.md"
+    (project / "links.md").write_text(f"[skill](file://{local_path})\n")
+    assert PREFLIGHT.check(project) == ["links.md: absolute workstation path"]
+
+
+def test_preflight_does_not_match_its_own_source() -> None:
+    """The scanner must not flag the file that defines its patterns.
+
+    Regression for #22. The marker constants are split for this reason; the
+    path patterns were not, so running the check over its own repository
+    reported the script itself.
+    """
+    source = Path(PREFLIGHT.__file__).read_text()
+    for label, pattern in PREFLIGHT.FORBIDDEN_TEXT.items():
+        assert not pattern.search(source), f"{label} matches preflight.py itself"
+
+
+def test_ignores_python_bytecode_cache(tmp_path: Path) -> None:
+    """__pycache__ is a build artifact, like the other ignored cache dirs."""
+    project = _project(tmp_path)
+    cache = project / "__pycache__"
+    cache.mkdir()
+    (cache / "mod.cpython-310.pyc").write_bytes(b"\x00\x01synthetic")
+    assert PREFLIGHT.check(project) == []
+
+
+def test_rejects_unreviewed_and_non_text_files(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    (project / "archive.zip").write_bytes(b"synthetic")
+    (project / "source.js").write_bytes(b"\xff\xfe")
+    assert PREFLIGHT.check(project) == [
+        "archive.zip: unreviewed file type is not allowed",
+        "source.js: declared text file is not UTF-8",
+    ]

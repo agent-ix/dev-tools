@@ -1,0 +1,15 @@
+{
+  "name": "agent-ix-dev-tools",
+  "description": "Agent IX dev-tools plugin",
+  "owner": {
+    "name": "Agent IX"
+  },
+  "plugins": [
+    {
+      "name": "dev-tools",
+      "source": "./",
+      "description": "Code and Rust reviews, test-writing guidance, backporting, security audits, and project scaffolding.",
+      "version": "0.1.0"
+    }
+  ]
+}

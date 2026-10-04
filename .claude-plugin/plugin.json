@@ -1,0 +1,11 @@
+{
+  "name": "dev-tools",
+  "version": "0.1.0",
+  "description": "Code and Rust reviews, test-writing guidance, backporting, security audits, and project scaffolding.",
+  "author": {
+    "name": "Agent IX"
+  },
+  "homepage": "https://github.com/agent-ix/dev-tools",
+  "repository": "https://github.com/agent-ix/dev-tools",
+  "license": "MIT"
+}

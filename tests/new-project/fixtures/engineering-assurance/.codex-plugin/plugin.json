@@ -1,0 +1,6 @@
+{
+  "name": "engineering-assurance",
+  "version": "0.2.0",
+  "description": "Minimal fixture plugin for the generic handoff contract.",
+  "skills": "./skills/"
+}

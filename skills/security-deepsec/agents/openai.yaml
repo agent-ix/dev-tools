@@ -1,0 +1,4 @@
+interface:
+  display_name: "Security DeepSec"
+  short_description: "DeepSec security audit workflow"
+  default_prompt: "Use $security-deepsec to run a DeepSec-backed security review and produce local artifacts plus GitHub remediation issues."

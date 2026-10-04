@@ -1,0 +1,93 @@
+{
+  "skills": [
+    {
+      "name": "backport-code",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "code-review",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md",
+        "references/assurance-context.md"
+      ]
+    },
+    {
+      "name": "new-project",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md",
+        "assets/CLA.md",
+        "assets/CONTENT_RIGHTS.md",
+        "assets/CONTRIBUTING.md",
+        "assets/cla-workflow.yml",
+        "references/assurance-onboarding-handoff.md",
+        "scripts/preflight.py"
+      ]
+    },
+    {
+      "name": "review-react",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "rust-review",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "rust-style",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "security-deepsec",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md",
+        "agents/openai.yaml",
+        "references/artifact-templates.md",
+        "references/checksite-catalog.md"
+      ]
+    },
+    {
+      "name": "writing-tests-pg-data",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "writing-tests-python",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "writing-tests-react",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md",
+        "references/jest-rtl.md",
+        "references/storybook.md"
+      ]
+    },
+    {
+      "name": "writing-tests-typescript",
+      "version": "0.1.0",
+      "files": [
+        "SKILL.md"
+      ]
+    }
+  ]
+}

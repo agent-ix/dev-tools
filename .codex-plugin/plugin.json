@@ -1,0 +1,37 @@
+{
+  "name": "dev-tools",
+  "version": "0.1.0",
+  "description": "Code and Rust reviews, test-writing guidance, backporting, security audits, and project scaffolding.",
+  "author": {
+    "name": "Agent IX",
+    "url": "https://github.com/agent-ix"
+  },
+  "homepage": "https://github.com/agent-ix/dev-tools",
+  "repository": "https://github.com/agent-ix/dev-tools",
+  "license": "MIT",
+  "keywords": [
+    "review",
+    "testing",
+    "rust",
+    "security",
+    "scaffolding"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Dev Tools",
+    "shortDescription": "Focused engineering review and development methods.",
+    "longDescription": "Code and Rust reviews, test-writing guidance, backporting, security audits, and project scaffolding.",
+    "developerName": "Agent IX",
+    "category": "Productivity",
+    "capabilities": [
+      "Skills",
+      "Review",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Review this Rust change.",
+      "Write tests for this behavior.",
+      "Audit this repository with DeepSec."
+    ]
+  }
+}
