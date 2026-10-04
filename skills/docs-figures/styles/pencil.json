@@ -19,9 +19,9 @@
   },
   "render": {
     "mode": "sketch",
-    "roughness": 1.1,
-    "box_roughness": 0.6,
-    "box_overshoot": 1.5,
+    "roughness": 0.8,
+    "box_roughness": 0.45,
+    "box_overshoot": 1.2,
     "passes": 2,
     "pressure": [
       0.9,
@@ -31,7 +31,7 @@
     "hatch_angle": -41,
     "tremor": {
       "frequency": 0.035,
-      "scale": 1.6
+      "scale": 1.2
     }
   },
   "roles": {
