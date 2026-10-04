@@ -27,7 +27,8 @@
         "scripts/docs_figures.py",
         "scripts/preview.py",
         "scripts/render.py",
-        "styles/ix-docs.json"
+        "styles/ix-docs.json",
+        "styles/pencil.json"
       ]
     },
     {

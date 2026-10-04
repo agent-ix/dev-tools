@@ -5,14 +5,18 @@ fonts) shows the same lettering everywhere. Figures may animate with CSS,
 which plays inside <img>; an animated figure also gets a NAME-still pair, its
 resting state. Readers who prefer reduced motion see the resting state.
 
-A style (styles/NAME.json) supplies fonts, sizes and a palette per theme.
+A style (styles/NAME.json) supplies fonts, sizes, a palette per theme and,
+optionally, a sketch renderer that draws every stroke by hand.
 Call use_style() before building figures; render.py does this for you.
 Requires fontTools. Fonts download once into $DOCS_FIGURES_CACHE
 (default ~/.cache/docs-figures).
 """
 
+import hashlib
 import json
+import math
 import os
+import random
 import re
 import urllib.request
 from pathlib import Path
@@ -63,6 +67,41 @@ class Font:
         return self._outlines[name]
 
 
+class FontChain:
+    """A font with fallbacks for characters it lacks, measured and drawn per glyph."""
+
+    def __init__(self, key, fonts):
+        self.key = key
+        self.fonts = fonts
+        self.upem = fonts[0].upem
+
+    def pick(self, ch):
+        for index, font in enumerate(self.fonts):
+            if ord(ch) in font.cmap:
+                return index, font
+        raise ValueError(f"{self.key} has no glyph for {ch!r}")
+
+    def width(self, text, size):
+        if len(self.fonts) == 1:
+            return self.fonts[0].width(text, size)
+        total = 0
+        for ch in text:
+            _, font = self.pick(ch)
+            total += font.advance(ch) * size / font.upem
+        return total
+
+    def runs(self, text):
+        """Consecutive (font index, font, characters) runs."""
+        out = []
+        for ch in text:
+            index, font = self.pick(ch)
+            if out and out[-1][0] == index:
+                out[-1][2].append(ch)
+            else:
+                out.append((index, font, [ch]))
+        return [(index, font, "".join(chars)) for index, font, chars in out]
+
+
 def use_style(name="ix-docs"):
     """Activate a style: load its palette and sizes and download its fonts."""
     global STYLE, THEMES, TITLE, LABEL, SMALL, MARGIN
@@ -70,18 +109,128 @@ def use_style(name="ix-docs"):
     if not path.exists():
         raise ValueError(f"unknown style {name!r}; available: {sorted(p.stem for p in STYLES.glob('*.json'))}")
     STYLE = json.loads(path.read_text(encoding="utf-8"))
+    STYLE.setdefault("render", {"mode": "clean"})
     THEMES = STYLE["themes"]
     sizes = STYLE["sizes"]
     TITLE, LABEL, SMALL, MARGIN = sizes["title"], sizes["label"], sizes["small"], sizes["margin"]
     CACHE.mkdir(parents=True, exist_ok=True)
     FONTS.clear()
-    for key, url in STYLE["fonts"].items():
-        font = CACHE / url.rsplit("/", 1)[1]
-        if not font.exists():
-            with urllib.request.urlopen(url, timeout=60) as response:
-                font.write_bytes(response.read())
-        FONTS[key] = Font(key, font)
+    for key, urls in STYLE["fonts"].items():
+        faces = []
+        for url in [urls] if isinstance(urls, str) else urls:
+            font = CACHE / url.rsplit("/", 1)[1]
+            if not font.exists():
+                with urllib.request.urlopen(url, timeout=60) as response:
+                    font.write_bytes(response.read())
+            faces.append(Font(key, font))
+        FONTS[key] = FontChain(key, faces)
     return STYLE
+
+
+class Sketch:
+    """Hand-drawn strokes. Jitter is seeded by the figure name, so a figure
+    draws the same wobble in every theme and on every run."""
+
+    def __init__(self, seed, settings):
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        self.rng = random.Random(int(digest[:16], 16))
+        self.rough = settings.get("roughness", 1.0)
+        self.passes = settings.get("passes", 2)
+        self.pressure = settings.get("pressure", [0.9, 0.55])
+        self.gap = settings.get("hatch_gap", 6)
+        self.angle = math.radians(settings.get("hatch_angle", -41))
+
+    def _j(self, amount):
+        return self.rng.uniform(-amount, amount)
+
+    def segment(self, a, b, rough=None, overshoot=0.0):
+        """One pen stroke from a to b: endpoints wander, the middle bows."""
+        rough = self.rough if rough is None else rough
+        (ax, ay), (bx, by) = a, b
+        length = math.hypot(bx - ax, by - ay) or 1.0
+        ux, uy = (bx - ax) / length, (by - ay) / length
+        nx, ny = -uy, ux
+        start = overshoot * self.rng.uniform(0.2, 1.0)
+        end = overshoot * self.rng.uniform(0.2, 1.0)
+        wander = rough * min(1.4, 0.35 + length / 80)
+        o1, o2 = self._j(wander), self._j(wander)
+        x1, y1 = ax - ux * start + nx * o1, ay - uy * start + ny * o1
+        x2, y2 = bx + ux * end + nx * o2, by + uy * end + ny * o2
+        bow = self._j(rough * min(2.6, length / 40))
+        c1 = (x1 + (x2 - x1) * 0.3 + nx * bow * self.rng.uniform(0.6, 1.2),
+              y1 + (y2 - y1) * 0.3 + ny * bow * self.rng.uniform(0.6, 1.2))
+        c2 = (x1 + (x2 - x1) * 0.7 + nx * bow * self.rng.uniform(0.6, 1.2),
+              y1 + (y2 - y1) * 0.7 + ny * bow * self.rng.uniform(0.6, 1.2))
+        return (f"M{num(x1)},{num(y1)} C{num(c1[0])},{num(c1[1])} "
+                f"{num(c2[0])},{num(c2[1])} {num(x2)},{num(y2)}")
+
+    def strokes(self, segments, overshoot=0.0):
+        """Every segment traced once per pass; returns (pass, path data) pairs."""
+        out = []
+        for index in range(self.passes):
+            rough = self.rough * (1 + 0.35 * index)
+            for a, b in segments:
+                out.append((index, self.segment(a, b, rough, overshoot)))
+        return out
+
+    def outline(self, x, y, w, h):
+        corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+        return self.strokes(list(zip(corners, corners[1:] + corners[:1])), overshoot=2.5)
+
+    def polyline(self, points):
+        return self.strokes(list(zip(points, points[1:])), overshoot=1.0)
+
+    def arrowhead(self, points, weight):
+        """An open V at the last point, aligned with the final segment."""
+        (px, py), (tx, ty) = points[-2], points[-1]
+        length = math.hypot(tx - px, ty - py) or 1.0
+        ux, uy = (tx - px) / length, (ty - py) / length
+        size = 6.5 + 1.5 * weight
+        wings = []
+        for side in (1, -1):
+            angle = math.radians(27 + self._j(4)) * side
+            wx = tx - size * (ux * math.cos(angle) - uy * math.sin(angle))
+            wy = ty - size * (uy * math.cos(angle) + ux * math.sin(angle))
+            wings.append(((tx, ty), (wx, wy)))
+        return [(i % self.passes, self.segment(a, b, 0.25)) for i, (a, b) in enumerate(wings * self.passes)]
+
+    def hatch(self, x, y, w, h, gap=None):
+        """Parallel pencil strokes clipped to the rectangle."""
+        gap = gap or self.gap
+        dx, dy = math.cos(self.angle), math.sin(self.angle)
+        nx, ny = -dy, dx
+        corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
+        reach = [cx * nx + cy * ny for cx, cy in corners]
+        lines = []
+        offset = min(reach) + gap * self.rng.uniform(0.3, 0.7)
+        while offset < max(reach):
+            lo, hi = -1e9, 1e9
+            px, py = offset * nx, offset * ny
+            for p, d, low, high in ((px, dx, x + 1.5, x + w - 1.5), (py, dy, y + 1.5, y + h - 1.5)):
+                if abs(d) < 1e-9:
+                    if not low <= p <= high:
+                        lo, hi = 1, 0
+                    continue
+                t1, t2 = (low - p) / d, (high - p) / d
+                lo, hi = max(lo, min(t1, t2)), min(hi, max(t1, t2))
+            if hi - lo > 2:
+                a = (px + dx * lo, py + dy * lo)
+                b = (px + dx * hi, py + dy * hi)
+                lines.append((0, self.segment(a, b, self.rough * 0.4)))
+            offset += gap * self.rng.uniform(0.85, 1.15)
+        return lines
+
+    def circle(self, cx, cy, r):
+        out = []
+        for index in range(self.passes):
+            rx, ry = r * (1 + self._j(0.1)), r * (1 + self._j(0.1))
+            start = self.rng.uniform(0, 2 * math.pi)
+            x0, y0 = cx + rx * math.cos(start), cy + ry * math.sin(start)
+            x1, y1 = cx - rx * math.cos(start), cy - ry * math.sin(start)
+            rot = num(math.degrees(start))
+            out.append((index, f"M{num(x0)},{num(y0)} A{num(rx)},{num(ry)} {rot} 1 1 {num(x1)},{num(y1)} "
+                               f"A{num(rx)},{num(ry)} {rot} 1 1 {num(x0 + self._j(1))},{num(y0 + self._j(1))}"))
+        return out
 
 
 def num(v):
@@ -226,6 +375,46 @@ class Figure:
         hidden = spec[0] == "token" or (spec[0] == "appear" and not spec[2])
         return f' class="a{idx}"' + (' opacity="0"' if hidden else "")
 
+    def _sketched(self, sketch, item, pal, cls):
+        """A rect, line, dot or bar drawn as pencil strokes in one group."""
+        kind, paths = item[0], []
+
+        def stroke(strokes, colour, width, dashed=False, opacity=None):
+            dash = ' stroke-dasharray="5 4"' if dashed else ""
+            for index, d in strokes:
+                alpha = opacity if opacity is not None else sketch.pressure[min(index, len(sketch.pressure) - 1)]
+                paths.append(f'<path d="{d}" stroke="{colour}" stroke-width="{num(width)}" stroke-opacity="{alpha}"{dash}/>')
+
+        hatch_alpha = pal.get("hatch", pal["tint"])
+        if kind == "rect":
+            _, x, y, w, h, role, dashed, fill, has_stroke, weight, opacity, rx = item
+            c = pal[role]
+            if fill and has_stroke:
+                stroke(sketch.hatch(x, y, w, h), c, 0.9, opacity=hatch_alpha)
+            elif fill:
+                solid = (opacity if opacity is not None else pal["tint"]) >= 0.9
+                alpha = 1 if solid else min(1, (opacity if opacity is not None else pal["tint"]) * 2.2)
+                stroke(sketch.hatch(x, y, w, h, gap=2.5 if solid else 7), c, 0.9, opacity=alpha)
+            if has_stroke:
+                stroke(sketch.outline(x, y, w, h), c, weight or (1.2 if role == "ink" else 1.5), dashed)
+        elif kind == "line":
+            _, points, role, weight, dashed, arrow = item
+            stroke(sketch.polyline(points), pal[role], weight * 0.85, dashed)
+            if arrow:
+                stroke(sketch.arrowhead(points, weight), pal[role], weight * 0.85)
+        elif kind == "bar":
+            _, x, y, w, h, role = item
+            stroke(sketch.hatch(x, y, w, h, gap=2.5), pal[role], 0.9, opacity=0.9)
+            stroke(sketch.outline(x, y, w, h), pal[role], 1.2)
+        else:
+            _, cx, cy, r, role, filled = item
+            for index, d in sketch.circle(cx, cy, r):
+                fill = f' fill="{pal[role]}"' if filled and index == 0 else ""
+                alpha = sketch.pressure[min(index, len(sketch.pressure) - 1)]
+                paths.append(f'<path d="{d}"{fill} stroke="{pal[role]}" stroke-width="1.3" stroke-opacity="{alpha}"/>')
+        tremor = ' filter="url(#tremor)"' if STYLE["render"].get("tremor") else ""
+        return f'<g{cls}{tremor} fill="none" stroke-linecap="round">{"".join(paths)}</g>'
+
     # ---- rendering -------------------------------------------------------
     def render(self, theme, still=False):
         """SVG text; `still` drops the animation, leaving its resting state."""
@@ -233,10 +422,13 @@ class Figure:
         used = {}
         body = []
         markers = set()
+        sketch = Sketch(self.name, STYLE["render"]) if STYLE["render"].get("mode") == "sketch" else None
         for idx, item in enumerate(self.items):
             kind = item[0]
             cls = self._cls(idx)
-            if kind == "rect":
+            if sketch and kind in ("rect", "line", "dot", "bar"):
+                body.append(self._sketched(sketch, item, pal, cls))
+            elif kind == "rect":
                 _, x, y, w, h, role, dashed, fill, stroke, weight, opacity, rx = item
                 c = pal[role]
                 attrs = [f'x="{num(x)}" y="{num(y)}" width="{num(w)}" height="{num(h)}" rx="{rx}"']
@@ -277,27 +469,46 @@ class Figure:
                 body.append(f'<path d="{d}" fill="{pal[role]}"/>')
             else:
                 _, x, y, s, role, font, size = item
-                f = FONTS[font]
-                k = size / f.upem
-                uses = []
-                adv = 0
-                for ch in s:
-                    name = f.glyph(ch)
-                    if f.outline(name):
-                        gid = re.sub(r"[^A-Za-z0-9]", "_", f"{font}-{name}")
-                        used[gid] = f.outline(name)
-                        uses.append(f'<use href="#{gid}" x="{adv}"/>')
-                    adv += f.advance(ch)
-                body.append(
-                    f'<g{cls} fill="{pal[role]}" transform="translate({num(x)},{num(y)}) '
-                    f'scale({k:.5f},{-k:.5f})">{"".join(uses)}</g>'
-                )
+                groups, cursor = [], x
+                for index, face, chars in FONTS[font].runs(s):
+                    k = size / face.upem
+                    prefix = font if index == 0 else f"{font}{index}"
+                    uses, adv = [], 0
+                    for ch in chars:
+                        name = face.glyph(ch)
+                        if face.outline(name):
+                            gid = re.sub(r"[^A-Za-z0-9]", "_", f"{prefix}-{name}")
+                            used[gid] = face.outline(name)
+                            uses.append(f'<use href="#{gid}" x="{adv}"/>')
+                        adv += face.advance(ch)
+                    groups.append((cursor, k, uses))
+                    cursor += adv * k
+                if len(groups) == 1:
+                    gx, k, uses = groups[0]
+                    body.append(
+                        f'<g{cls} fill="{pal[role]}" transform="translate({num(gx)},{num(y)}) '
+                        f'scale({k:.5f},{-k:.5f})">{"".join(uses)}</g>'
+                    )
+                else:
+                    inner = "".join(
+                        f'<g transform="translate({num(gx)},{num(y)}) scale({k:.5f},{-k:.5f})">{"".join(uses)}</g>'
+                        for gx, k, uses in groups
+                    )
+                    body.append(f'<g{cls} fill="{pal[role]}">{inner}</g>')
         defs = [f'<path id="{gid}" d="{d}"/>' for gid, d in sorted(used.items())]
         for role in sorted(markers):
             defs.append(
                 f'<marker id="ah-{role}" viewBox="0 0 10 10" refX="9" refY="5" '
                 f'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
                 f'<path d="M0,0 L10,5 L0,10 z" fill="{pal[role]}"/></marker>'
+            )
+        tremor = STYLE["render"].get("tremor") if sketch else None
+        if tremor:
+            defs.append(
+                f'<filter id="tremor" x="-5%" y="-5%" width="110%" height="110%">'
+                f'<feTurbulence type="fractalNoise" baseFrequency="{tremor["frequency"]}" numOctaves="2" seed="7"/>'
+                f'<feDisplacementMap in="SourceGraphic" scale="{tremor["scale"]}" xChannelSelector="R" yChannelSelector="G"/>'
+                f"</filter>"
             )
         style = ""
         if self.anim and not still:

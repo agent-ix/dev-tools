@@ -1,0 +1,68 @@
+{
+  "name": "pencil",
+  "description": "Hand-sketched: wobbly double-traced pen strokes, open arrowheads, pencil hatching and Kalam handwriting. Graphite and coloured pencil on light pages, chalk on dark. Transparent.",
+  "fonts": {
+    "mono": [
+      "https://cdn.jsdelivr.net/npm/@fontsource/kalam@5.3.0/files/kalam-latin-400-normal.woff",
+      "https://cdn.jsdelivr.net/npm/@ibm/plex-mono@2.5.0/fonts/complete/woff/IBMPlexMono-Regular.woff"
+    ],
+    "title": [
+      "https://cdn.jsdelivr.net/npm/@fontsource/kalam@5.3.0/files/kalam-latin-700-normal.woff",
+      "https://cdn.jsdelivr.net/npm/@ibm/plex-sans-condensed@2.0.0/fonts/complete/woff/IBMPlexSansCondensed-SemiBold.woff"
+    ]
+  },
+  "sizes": {
+    "title": 14,
+    "label": 14,
+    "small": 13,
+    "margin": 8
+  },
+  "render": {
+    "mode": "sketch",
+    "roughness": 1.4,
+    "passes": 2,
+    "pressure": [
+      0.9,
+      0.5
+    ],
+    "hatch_gap": 7,
+    "hatch_angle": -41,
+    "tremor": {
+      "frequency": 0.035,
+      "scale": 2.2
+    }
+  },
+  "roles": {
+    "ink": "Inputs, decisions and plain nodes",
+    "muted": "Sub-labels, axes and legends",
+    "model": "Model questions and answers",
+    "logic": "Rules, logic and comparisons",
+    "code": "Your code and supplied facts",
+    "evidence": "Evidence, labels, recordings; dashed means optional or skipped",
+    "faint": "Chart tracks and rules"
+  },
+  "themes": {
+    "light": {
+      "ink": "#2e2e2e",
+      "muted": "#66665f",
+      "model": "#1d7c76",
+      "logic": "#5546b5",
+      "code": "#a5660b",
+      "evidence": "#b12a45",
+      "faint": "#a9a9a3",
+      "tint": 0.1,
+      "hatch": 0.3
+    },
+    "dark": {
+      "ink": "#f1efe6",
+      "muted": "#b8b5a8",
+      "model": "#79d3cc",
+      "logic": "#b6abf5",
+      "code": "#efc37b",
+      "evidence": "#f19ab0",
+      "faint": "#5a5a55",
+      "tint": 0.14,
+      "hatch": 0.28
+    }
+  }
+}

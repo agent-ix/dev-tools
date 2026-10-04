@@ -95,3 +95,36 @@ def test_unknown_style_lists_available_styles() -> None:
     with pytest.raises(ValueError, match="ix-docs"):
         docs_figures.use_style("missing")
     docs_figures.use_style("ix-docs")
+
+
+def test_pencil_style_sketches_strokes_deterministically(figures: Path, tmp_path: Path) -> None:
+    out = tmp_path / "pencil"
+    out.mkdir()
+    try:
+        assert RENDER.main([str(figures), "--style", "pencil", "--out", str(out)]) == 0
+        first = {p.name: p.read_bytes() for p in out.glob("*.svg")}
+        RENDER.main([str(figures), "--style", "pencil", "--out", str(out)])
+        assert {p.name: p.read_bytes() for p in out.glob("*.svg")} == first
+        flow = (out / "flow-light.svg").read_text()
+        assert 'filter id="tremor"' in flow and "<marker" not in flow  # hand-drawn arrowheads
+        assert " C" in flow  # strokes are curves, not straight lines
+        assert docs_figures.THEMES["light"]["model"] in flow
+    finally:
+        docs_figures.use_style("ix-docs")
+
+
+def test_clean_style_draws_no_sketch(figures: Path) -> None:
+    RENDER.main([str(figures)])
+    flow = (figures.parent / "flow-light.svg").read_text()
+    assert "tremor" not in flow and "<marker" in flow
+
+
+def test_missing_glyphs_fall_back_to_the_next_font() -> None:
+    try:
+        docs_figures.use_style("pencil")
+        figure = docs_figures.Figure("fallback", 300, 60, "Fallback.")
+        figure.text(0, 30, "x ≥ 0.7", "ink", "mono", 14)
+        svg = figure.render("light")
+        assert 'id="mono_' in svg and 'id="mono1_' in svg  # Kalam plus the Plex fallback for ≥
+    finally:
+        docs_figures.use_style("ix-docs")
