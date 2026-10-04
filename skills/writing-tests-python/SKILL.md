@@ -5,6 +5,8 @@ description: Instructions for writing Python tests (pytest), including mocking, 
 
 # Writing Python Tests
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 This skill provides generic guidelines for writing Python tests using `pytest`, compliant with the Agent-IX Golden Path.
 
 **Source Spec**: Standard Python best practices and Agent-IX conventions.

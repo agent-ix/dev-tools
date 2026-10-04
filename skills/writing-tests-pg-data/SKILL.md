@@ -5,6 +5,8 @@ description: Instructions for writing tests for PG Data services, likely involvi
 
 # Writing PG Data Tests
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 This skill provides guidelines for writing tests for services using `SQLModel` and `postgres`, aligned with the Agent-IX Golden Path.
 
 **Source Spec**: Derived from `pg-data-service` (SQLModel, Alembic).

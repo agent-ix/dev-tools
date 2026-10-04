@@ -5,6 +5,14 @@
 
 Focused review, code guidance, security, backporting, scaffolding, and documentation figure skills.
 
+## Setup
+
+If this plugin is uninitialized or a command fails, follow the [plugin setup guide](setup.md) for its required CLIs, configuration, and local diagnosis.
+
+## Community help
+
+If the setup checks leave a reproducible Agent IX dev-tools bug that blocks progress, [join the Agent IX Discord](https://discord.gg/k8DVhuYBR2). Community help is a last resort for Agent IX product bugs, not a help desk for local credentials, machine setup, third party tools, or unrelated projects. See [setup.md](setup.md#community-help) for what to include.
+
 ## Skills
 
 | Skill | Action |
@@ -32,8 +40,8 @@ The repository is one plugin. The same `skills/` tree is used by all four hosts.
 
 | Host | Install |
 | --- | --- |
-| Claude Code | `claude plugin marketplace add agent-ix/agent-plugins` then `claude plugin install dev-tools@agent-ix-public` |
-| Codex | `codex plugin marketplace add agent-ix/agent-plugins` then `codex plugin add dev-tools@agent-ix-public` |
+| Claude Code | `claude plugin marketplace add agent-ix/agent-plugins` then `claude plugin install dev-tools@agent-ix` |
+| Codex | `codex plugin marketplace add agent-ix/agent-plugins` then `codex plugin add dev-tools@agent-ix` |
 | GitHub Copilot CLI | `copilot plugin install agent-ix/dev-tools` |
 | OpenCode | Add `"https://raw.githubusercontent.com/agent-ix/dev-tools/main/skills/"` to the `skills` array in your `opencode.jsonc`; the URL serves this repository's `skills/index.json` catalog. |
 

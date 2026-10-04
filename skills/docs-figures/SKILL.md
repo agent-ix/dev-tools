@@ -6,6 +6,8 @@ compatibility: Python 3.9+ with fontTools. Downloads the style's fonts once (net
 
 # Docs Figures
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 The engine lives only in this skill. A repository keeps its figure definitions
 (`docs/images/figures.py`) and the generated SVGs, never a copy of the engine.
 People without the plugin regenerate from a clone of `agent-ix/dev-tools`.
