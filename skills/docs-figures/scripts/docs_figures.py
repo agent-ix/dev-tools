@@ -145,35 +145,54 @@ class Sketch:
     def _j(self, amount):
         return self.rng.uniform(-amount, amount)
 
-    def segment(self, a, b, rough=None, overshoot=0.0):
-        """One pen stroke from a to b: endpoints wander, the middle bows."""
-        rough = self.rough if rough is None else rough
+    def _curve(self, a, b, rough, overshoot=0.0, wander_ends=(True, True)):
+        """Geometry of one pen stroke from a to b: endpoints wander, the middle bows."""
         (ax, ay), (bx, by) = a, b
         length = math.hypot(bx - ax, by - ay) or 1.0
         ux, uy = (bx - ax) / length, (by - ay) / length
         nx, ny = -uy, ux
         start = overshoot * self.rng.uniform(0.2, 1.0)
         end = overshoot * self.rng.uniform(0.2, 1.0)
-        wander = rough * min(1.4, 0.35 + length / 80)
-        o1, o2 = self._j(wander), self._j(wander)
-        x1, y1 = ax - ux * start + nx * o1, ay - uy * start + ny * o1
-        x2, y2 = bx + ux * end + nx * o2, by + uy * end + ny * o2
-        bow = self._j(rough * min(2.6, length / 40))
-        c1 = (x1 + (x2 - x1) * 0.3 + nx * bow * self.rng.uniform(0.6, 1.2),
-              y1 + (y2 - y1) * 0.3 + ny * bow * self.rng.uniform(0.6, 1.2))
-        c2 = (x1 + (x2 - x1) * 0.7 + nx * bow * self.rng.uniform(0.6, 1.2),
-              y1 + (y2 - y1) * 0.7 + ny * bow * self.rng.uniform(0.6, 1.2))
-        return (f"M{num(x1)},{num(y1)} C{num(c1[0])},{num(c1[1])} "
-                f"{num(c2[0])},{num(c2[1])} {num(x2)},{num(y2)}")
+        wander = rough * min(1.2, 0.3 + length / 100)
+        o1 = self._j(wander) if wander_ends[0] else 0.0
+        o2 = self._j(wander) if wander_ends[1] else 0.0
+        p1 = (ax - ux * start + nx * o1, ay - uy * start + ny * o1)
+        p2 = (bx + ux * end + nx * o2, by + uy * end + ny * o2)
+        bow = self._j(rough * min(2.0, length / 50))
+        c1 = (p1[0] + (p2[0] - p1[0]) * 0.3 + nx * bow * self.rng.uniform(0.7, 1.1),
+              p1[1] + (p2[1] - p1[1]) * 0.3 + ny * bow * self.rng.uniform(0.7, 1.1))
+        c2 = (p1[0] + (p2[0] - p1[0]) * 0.7 + nx * bow * self.rng.uniform(0.7, 1.1),
+              p1[1] + (p2[1] - p1[1]) * 0.7 + ny * bow * self.rng.uniform(0.7, 1.1))
+        return [p1, c1, c2, p2]
+
+    def _retrace(self, points, amount, pinned=()):
+        """A second pass that follows the first closely, as a hand re-tracing would."""
+        return [p if i in pinned else (p[0] + self._j(amount), p[1] + self._j(amount)) for i, p in enumerate(points)]
+
+    @staticmethod
+    def _path(points):
+        """Path data for a start point followed by cubic segments (3 points each)."""
+        head, rest = points[0], points[1:]
+        curves = " ".join(
+            f"C{num(rest[i][0])},{num(rest[i][1])} {num(rest[i + 1][0])},{num(rest[i + 1][1])} "
+            f"{num(rest[i + 2][0])},{num(rest[i + 2][1])}"
+            for i in range(0, len(rest), 3)
+        )
+        return f"M{num(head[0])},{num(head[1])} {curves}"
+
+    def segment(self, a, b, rough=None, overshoot=0.0):
+        """One pen stroke from a to b, as path data."""
+        return self._path(self._curve(a, b, self.rough if rough is None else rough, overshoot))
 
     def strokes(self, segments, overshoot=0.0, rough=None):
-        """Every segment traced once per pass; returns (pass, path data) pairs."""
-        base = self.rough if rough is None else rough
+        """Each segment as a stroke plus close re-traces; returns (pass, path data) pairs."""
+        rough = self.rough if rough is None else rough
         out = []
-        for index in range(self.passes):
-            rough = base * (1 + 0.35 * index)
-            for a, b in segments:
-                out.append((index, self.segment(a, b, rough, overshoot)))
+        for a, b in segments:
+            first = self._curve(a, b, rough, overshoot)
+            out.append((0, self._path(first)))
+            for index in range(1, self.passes):
+                out.append((index, self._path(self._retrace(first, 0.35 + 0.45 * rough))))
         return out
 
     def outline(self, x, y, w, h):
@@ -181,7 +200,17 @@ class Sketch:
         return self.strokes(list(zip(corners, corners[1:] + corners[:1])), self.overshoot, self.box_rough)
 
     def polyline(self, points):
-        return self.strokes(list(zip(points, points[1:])), overshoot=1.0)
+        """A bent edge drawn in one continuous stroke that ends exactly on its last point."""
+        joints = [points[0]] + [(x + self._j(0.4), y + self._j(0.4)) for x, y in points[1:-1]] + [points[-1]]
+        first = [joints[0]]
+        for i, (a, b) in enumerate(zip(joints, joints[1:])):
+            curve = self._curve(a, b, self.rough, wander_ends=(False, False))
+            first += curve[1:]
+        out = [(0, self._path(first))]
+        last = len(first) - 1
+        for index in range(1, self.passes):
+            out.append((index, self._path(self._retrace(first, 0.3 + 0.35 * self.rough, pinned=(last,)))))
+        return out
 
     def arrowhead(self, points, weight):
         """An open V at the last point, aligned with the final segment."""
