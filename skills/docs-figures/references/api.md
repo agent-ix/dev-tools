@@ -113,8 +113,10 @@ A style is `styles/NAME.json`:
 - `themes`: `light` and `dark`, each mapping every role to a colour, plus
   `tint` (box fill opacity) and, for sketch styles, `hatch` (hatching opacity).
 - `render` (optional): omit for clean vector drawing. For hand-drawn strokes:
-  `{"mode": "sketch", "roughness", "passes", "pressure", "hatch_gap",
-  "hatch_angle", "tremor": {"frequency", "scale"}}`. `roughness` scales wobble;
+  `{"mode": "sketch", "roughness", "box_roughness", "box_overshoot", "passes",
+  "pressure", "hatch_gap", "hatch_angle", "tremor": {"frequency", "scale"}}`.
+  `roughness` scales the wobble of lines and arrows, `box_roughness` and
+  `box_overshoot` (pixels past each corner) that of box edges;
   `passes` traces each stroke that many times with the `pressure` opacities;
   `tremor` adds a fixed-seed displacement filter to strokes, never to text.
 

@@ -135,6 +135,8 @@ class Sketch:
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
         self.rng = random.Random(int(digest[:16], 16))
         self.rough = settings.get("roughness", 1.0)
+        self.box_rough = settings.get("box_roughness", self.rough)
+        self.overshoot = settings.get("box_overshoot", 2.5)
         self.passes = settings.get("passes", 2)
         self.pressure = settings.get("pressure", [0.9, 0.55])
         self.gap = settings.get("hatch_gap", 6)
@@ -164,18 +166,19 @@ class Sketch:
         return (f"M{num(x1)},{num(y1)} C{num(c1[0])},{num(c1[1])} "
                 f"{num(c2[0])},{num(c2[1])} {num(x2)},{num(y2)}")
 
-    def strokes(self, segments, overshoot=0.0):
+    def strokes(self, segments, overshoot=0.0, rough=None):
         """Every segment traced once per pass; returns (pass, path data) pairs."""
+        base = self.rough if rough is None else rough
         out = []
         for index in range(self.passes):
-            rough = self.rough * (1 + 0.35 * index)
+            rough = base * (1 + 0.35 * index)
             for a, b in segments:
                 out.append((index, self.segment(a, b, rough, overshoot)))
         return out
 
     def outline(self, x, y, w, h):
         corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-        return self.strokes(list(zip(corners, corners[1:] + corners[:1])), overshoot=2.5)
+        return self.strokes(list(zip(corners, corners[1:] + corners[:1])), self.overshoot, self.box_rough)
 
     def polyline(self, points):
         return self.strokes(list(zip(points, points[1:])), overshoot=1.0)

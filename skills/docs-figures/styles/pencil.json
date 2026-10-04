@@ -19,17 +19,19 @@
   },
   "render": {
     "mode": "sketch",
-    "roughness": 1.4,
+    "roughness": 1.1,
+    "box_roughness": 0.6,
+    "box_overshoot": 1.5,
     "passes": 2,
     "pressure": [
       0.9,
       0.5
     ],
-    "hatch_gap": 7,
+    "hatch_gap": 8,
     "hatch_angle": -41,
     "tremor": {
       "frequency": 0.035,
-      "scale": 2.2
+      "scale": 1.6
     }
   },
   "roles": {
@@ -51,7 +53,7 @@
       "evidence": "#b12a45",
       "faint": "#a9a9a3",
       "tint": 0.1,
-      "hatch": 0.3
+      "hatch": 0.2
     },
     "dark": {
       "ink": "#f1efe6",
@@ -62,7 +64,7 @@
       "evidence": "#f19ab0",
       "faint": "#5a5a55",
       "tint": 0.14,
-      "hatch": 0.28
+      "hatch": 0.18
     }
   }
 }
