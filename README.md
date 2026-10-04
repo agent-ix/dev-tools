@@ -1,14 +1,25 @@
 # dev-tools
 
 [![Agent IX Plugins](https://github.com/agent-ix/agent-plugins/raw/refs/heads/main/assets/agent-ix-plugins.svg)](https://github.com/agent-ix/agent-plugins)
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/k8DVhuYBR2)
 
 Focused review, code guidance, security, backporting, and scaffolding skills.
 
 ## Skills
 
-- `code-review`, `rust-review`, `review-react`, `rust-style`
-- `writing-tests-python`, `writing-tests-typescript`, `writing-tests-react`, `writing-tests-pg-data`
-- `backport-code`, `security-deepsec`, `new-project`
+| Skill | Action |
+| --- | --- |
+| `code-review` | Review code and tests against Agent IX conventions, routing language specific checks. |
+| `rust-review` | Review Rust code for idioms, safety, test coverage, and required gates. |
+| `review-react` | Review React tests and Storybook coverage against requirements. |
+| `rust-style` | Apply documented Rust idioms when a repository has no local style rules. |
+| `writing-tests-python` | Write pytest tests using fixture, mocking, and coverage conventions. |
+| `writing-tests-typescript` | Write TypeScript tests with typed mocks and behavior checks. |
+| `writing-tests-react` | Use the React testing guides for component and story coverage. |
+| `writing-tests-pg-data` | Write PG Data tests with database fixtures and integration coverage. |
+| `backport-code` | Carry a fix across specifications, templates, and downstream repositories. |
+| `security-deepsec` | Run a DeepSec security review and track remediation. |
+| `new-project` | Scaffold and prepare a new repository from an Agent IX template. |
 
 Each skill states its own external prerequisites. Quoin is used for formal specification and evidence artifacts when installed; DeepSec is required for its named audit workflow. The `new-project` skill currently offers a public Rust scaffold through [rust-lib-cookiecutter](https://github.com/agent-ix/rust-lib-cookiecutter). Its other named Agent IX templates require separate authenticated access and are not part of the public support promise. `new-project` applies its own AGPL policy to generated projects; that does not change this plugin's MIT license.
 
