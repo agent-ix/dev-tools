@@ -1,0 +1,28 @@
+{
+  "name": "ix-docs",
+  "description": "Thin coloured boxes with tinted fills, IBM Plex Sans Condensed titles, IBM Plex Mono labels, orthogonal labelled edges, dashed optional paths. Transparent; light and dark palettes.",
+  "fonts": {
+    "mono": "https://cdn.jsdelivr.net/npm/@ibm/plex-mono@2.5.0/fonts/complete/woff/IBMPlexMono-Regular.woff",
+    "title": "https://cdn.jsdelivr.net/npm/@ibm/plex-sans-condensed@2.0.0/fonts/complete/woff/IBMPlexSansCondensed-SemiBold.woff"
+  },
+  "sizes": {"title": 14, "label": 13, "small": 12, "margin": 6},
+  "roles": {
+    "ink": "Inputs, decisions and plain nodes",
+    "muted": "Sub-labels, axes and legends",
+    "model": "Model questions and answers",
+    "logic": "Rules, logic and comparisons",
+    "code": "Your code and supplied facts",
+    "evidence": "Evidence, labels, recordings; dashed means optional or skipped",
+    "faint": "Chart tracks and rules"
+  },
+  "themes": {
+    "light": {
+      "ink": "#161a24", "muted": "#586072", "model": "#0b7a78", "logic": "#4a3db0",
+      "code": "#9a6208", "evidence": "#a3123f", "faint": "#c3c8d2", "tint": 0.10
+    },
+    "dark": {
+      "ink": "#e3e6ee", "muted": "#9aa1b3", "model": "#3ec5c1", "logic": "#a59bf7",
+      "code": "#e5a94b", "evidence": "#f06a93", "faint": "#3d4453", "tint": 0.14
+    }
+  }
+}
