@@ -5,6 +5,8 @@ description: A skill for systematically backporting bug fixes and features acros
 
 # Backport Code
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 This skill provides a structured workflow for backporting fixes and features across the IX ecosystem, ensuring changes propagate correctly from specs to templates to downstream repos.
 
 ## Scope Definitions

@@ -5,6 +5,8 @@ description: Review Rust code — idiomatic-Rust conformance and repo idioms, te
 
 # Rust Review
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 The Rust half of `code-review`. Everything here is stated in Rust terms —
 `pytest`/`mocker`/`pass` checks do not apply and must not be transliterated
 into false findings ("this file has no test classes" is not a Rust finding).

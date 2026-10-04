@@ -5,6 +5,8 @@ description: Run a generic DeepSec-backed security review and remediation burndo
 
 # Security DeepSec
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 Run a DeepSec-assisted audit as an evidence-first security review. Treat DeepSec as a candidate generator and investigation accelerator, not as the whole audit. The required output is a durable, traceable burndown: local artifacts for complete coverage plus GitHub issues for promoted findings.
 
 ## Core Rules

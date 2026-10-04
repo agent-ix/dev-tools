@@ -5,6 +5,8 @@ description: Review React components for test coverage, including unit tests and
 
 # React Code Review
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 React component review with separate trace checks for unit tests and Storybook stories.
 Tests and stories bind to acceptance criteria by criterion id; the Test Matrix is
 computed from those tags by `quire matrix`, never written by hand.

@@ -5,6 +5,8 @@ description: Instructions for writing TypeScript tests (Jest), including typed m
 
 # Writing TypeScript Tests
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 This skill provides guidelines and patterns for writing TypeScript tests using `jest`, compliant with the Agent-IX Golden Path.
 
 **Source Spec**: Derived from `typescript-lib-cookiecutter` and `nodejs-lib` patterns.

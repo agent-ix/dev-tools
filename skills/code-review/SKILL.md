@@ -5,6 +5,8 @@ description: Review code for Agent-IX Golden Path compliance, focusing on test s
 
 # Code Review
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 Perform the following checks on the codebase.
 
 ## Language Dispatch (do this first)

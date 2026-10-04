@@ -5,6 +5,8 @@ description: Scaffold a new repository from an Agent IX template, verify it loca
 
 # New Project Initialization
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 Create a working local project before creating any remote repository. Treat the first
 push as a publication boundary even when the GitHub repository is private.
 

@@ -5,6 +5,8 @@ description: Default Rust code-style idioms — error envelopes with stable code
 
 # Rust Style
 
+If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
+
 Default idioms for a Rust codebase. This skill teaches the idioms; the *enforced*
 gates (forbid-unsafe, clippy `-D warnings`, cargo-deny/audit, unsafe-comment audit,
 a PR tier that finishes in minutes) belong in the repo's own CI config.
