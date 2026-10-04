@@ -1,5 +1,7 @@
 # dev-tools
 
+[![Agent IX Plugins](https://github.com/agent-ix/agent-plugins/raw/refs/heads/main/assets/agent-ix-plugins.svg)](https://github.com/agent-ix/agent-plugins)
+
 Focused review, code guidance, security, backporting, and scaffolding skills.
 
 ## Skills
@@ -18,12 +20,12 @@ The repository is one plugin. The same `skills/` tree is used by all four hosts.
 
 | Host | Install |
 | --- | --- |
-| Claude Code | `claude plugin marketplace add agent-ix/dev-tools` then `claude plugin install dev-tools@agent-ix-dev-tools` |
-| Codex | `codex plugin marketplace add agent-ix/dev-tools` then `codex plugin add dev-tools@agent-ix-dev-tools` |
+| Claude Code | `claude plugin marketplace add agent-ix/agent-plugins` then `claude plugin install dev-tools@agent-ix-public` |
+| Codex | `codex plugin marketplace add agent-ix/agent-plugins` then `codex plugin add dev-tools@agent-ix-public` |
 | GitHub Copilot CLI | `copilot plugin install agent-ix/dev-tools` |
 | OpenCode | Add `"https://raw.githubusercontent.com/agent-ix/dev-tools/main/skills/"` to the `skills` array in your `opencode.jsonc`; the URL serves this repository's `skills/index.json` catalog. |
 
-Claude uses `.claude-plugin/plugin.json`, Codex and Copilot use the root portable `plugin.json`, and OpenCode uses the remote skill catalog. The `.codex-plugin/plugin.json` file supports older Codex plugin loaders. No host-specific copy of a skill is maintained.
+Claude uses `.claude-plugin/plugin.json`, Codex and Copilot use the root portable `plugin.json`, and OpenCode uses the remote skill catalog. The [Agent IX public marketplace](https://github.com/agent-ix/agent-plugins) pins reviewed versions for Claude and Codex. The `.codex-plugin/plugin.json` file supports older Codex plugin loaders. No host-specific copy of a skill is maintained.
 
 ## License
 
