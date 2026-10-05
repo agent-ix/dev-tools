@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "preflight.py"
+SCRIPT = Path(__file__).parents[2] / "skills" / "new-project" / "scripts" / "preflight.py"
 SPEC = importlib.util.spec_from_file_location("new_project_preflight", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 PREFLIGHT = importlib.util.module_from_spec(SPEC)
