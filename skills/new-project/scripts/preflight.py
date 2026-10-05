@@ -12,6 +12,10 @@ from pathlib import Path
 AGPL_SPDX = "AGPL-3.0-or-later"
 AGPL_SHA256 = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
 PROTECTED_SUFFIXES = {".doc", ".docx", ".pdf", ".xls", ".xlsx"}
+# Formats read as UTF-8 and scanned for FORBIDDEN_TEXT. "" is a file with no
+# suffix (LICENSE, Makefile, dotfiles); a binary one fails the UTF-8 read.
+# ".lock" admits the Cargo.lock that rust-lib-cookiecutter renders and ".svg"
+# the figures the docs-figures skill draws; both are plain text.
 TEXT_SUFFIXES = {
     "",
     ".css",
@@ -19,11 +23,13 @@ TEXT_SUFFIXES = {
     ".js",
     ".json",
     ".jsx",
+    ".lock",
     ".md",
     ".mjs",
     ".py",
     ".rs",
     ".sh",
+    ".svg",
     ".toml",
     ".ts",
     ".tsx",
