@@ -9,7 +9,7 @@
       "name": "dev-tools",
       "source": "./",
       "description": "Code and Rust reviews, test-writing guidance, backporting, security audits, and project scaffolding.",
-      "version": "0.1.0"
+      "version": "0.1.2"
     }
   ]
 }
