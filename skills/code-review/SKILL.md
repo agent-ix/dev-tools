@@ -443,8 +443,10 @@ Do not invent a second review format and call it validated.
 
 ### Fetch the template, then author
 
+Run this from the repository that will contain the review artifact:
+
 ```
-quoin write --types SpecReview
+quoin write . --types SpecReview
 ```
 
 If `quoin write` is unavailable, use an installed Quoin `SpecReview` template if one
