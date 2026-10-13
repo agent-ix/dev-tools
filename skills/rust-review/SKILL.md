@@ -289,9 +289,7 @@ discards the exit code — a failed suite reads as green.
 Findings as a table, most severe first, each with `file:line`, a severity
 (Critical/High/Medium/Low), and a concrete failure scenario — inputs or a
 sequence that produces the wrong result. A finding with no scenario is a
-style note; label it as such. Every `file:line` is against the exact commit
-sha you reviewed; if the branch moves before the finding is resolved, that
-`file:line` needs re-verifying against the new sha rather than being reused.
+style note; label it as such.
 
 When run as `code-review`'s Rust lane, fold this table into that skill's one
 `SpecReview` artifact under `code-review`'s own `SR-NNN` id — Rust findings do
@@ -302,12 +300,12 @@ document per analysis skill). When run standalone, follow
 the `code-review` skill's Output section for the artifact itself: allocate the id
 by checking every existing `SR-` id in the repo first (including quoted ids,
 `id: "SR-014"`, which a naive grep misses), record full scope (crates and
-files examined, including ones with no findings, and the reviewed sha), and
+files examined, including ones with no findings), and
 never write a placeholder row per clean check — one document-level
 `No findings (placeholder)` row at most (`low` severity; there is no `info`
 level in the schema), with the "clean" conclusion stated in `## Verdict`.
 
-Each finding eventually gets an explicit outcome — `fixed <sha>`,
+Each finding eventually gets an explicit outcome — `fixed`,
 `rejected: <reason>`, `deferred: <reason>`, or `accepted-no-change` — recorded
 in a separate `## Dispositions` section once the fix round lands, never by
 editing the original finding row. The finding's wording is what was found;

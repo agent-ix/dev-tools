@@ -68,6 +68,3 @@ labels, and `muted` for sub-lines, axes and legends.
 
 - Compute every value from the repository's data in the definitions file:
   recordings, datasets and command outputs.
-- When a figure shows a measured result (a score, a count), have the
-  repository's own documentation check pin the same number. Then a data change
-  breaks the check instead of leaving a stale figure.
