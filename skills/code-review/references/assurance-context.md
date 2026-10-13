@@ -4,7 +4,7 @@ Use this reference only when an `AssuranceProfile` applies to the reviewed chang
 profile selects context for the existing code-review judgement; it does not replace the
 rubric in `SKILL.md` or make analyzer output self-interpreting.
 
-## Establish applicability and baseline
+## Establish applicability
 
 Read the profile's `scope`, impact scenarios, relationships, selected practices, and
 exceptions. Record:
@@ -57,6 +57,6 @@ finding when both describe the same defect. Tool exit status, a high numeric val
 profile impact tier does not directly choose the finding severity or verdict.
 
 Add an `## Assurance Context` section to the existing `SpecReview` when a profile
-applies. It should identify the profile and baseline, summarize what was evaluated, list
+applies. It should identify the profile, summarize what was evaluated, list
 unavailable or stale inputs, and retain active exceptions. Keep the existing validated
 `analysis: code-review`, findings table, and verdict rules.

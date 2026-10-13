@@ -53,8 +53,7 @@ exists, continue with the ordinary review below unchanged.
 When a profile applies, read
 [references/assurance-context.md](references/assurance-context.md). Use that context to
 focus the existing checks and findings; it is not a second checklist. Name the profile
-in the review artifact, and state explicitly when
-selected architecture, impact, measurement, exception, independence, structural-gap, or
+in the review artifact, and state explicitly when selected architecture, impact, measurement, exception, independence, structural-gap, or
 producer-reliance evidence is unavailable. The durable artifact MUST contain an exact
 `## Assurance Context` heading whenever a profile applies; discussing the profile only in
 the summary, findings, or chat does not satisfy this requirement.
@@ -531,8 +530,8 @@ A code-review finding usually has a file and a line — put them in `Refs` as
 
 ### Dispositions — never overwrite a finding to close it
 
-Every finding eventually needs an explicit outcome: `fixed`, `rejected: <reason>` (concretely why it is not a defect — a
-rejection with no reason is not a disposition), `deferred: <reason>` (a
+Every finding eventually needs an explicit outcome: `fixed`, `rejected: <reason>`
+(concretely why it is not a defect — a rejection with no reason is not a disposition), `deferred: <reason>` (a
 follow-up ticket id, or why it's out of scope for this change), or
 `accepted-no-change` (a real finding the team decided, with a stated reason, to
 ship without changing — distinct from `rejected`, which means it was never a
