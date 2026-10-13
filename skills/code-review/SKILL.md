@@ -53,7 +53,7 @@ exists, continue with the ordinary review below unchanged.
 When a profile applies, read
 [references/assurance-context.md](references/assurance-context.md). Use that context to
 focus the existing checks and findings; it is not a second checklist. Name the profile
-and evaluated source revision/baseline in the review artifact, and state explicitly when
+in the review artifact, and state explicitly when
 selected architecture, impact, measurement, exception, independence, structural-gap, or
 producer-reliance evidence is unavailable. The durable artifact MUST contain an exact
 `## Assurance Context` heading whenever a profile applies; discussing the profile only in
@@ -436,7 +436,7 @@ for a tracked ticket, the `dev-team` `reviewer` role posts this same artifact's
 findings (and, later, dispositions) to the ticket with a machine-readable
 marker — use it for that posting step rather than inventing another format.
 Keep the review artifact with the target repository so its findings survive
-the conversation and can be tied to the reviewed revision.
+the conversation.
 
 Use the installed Quoin `SpecReview` schema and template when available.
 Do not invent a second review format and call it validated.
@@ -478,7 +478,7 @@ id: SR-NNN                  # ^[A-Z]{2,4}-[0-9]+$ — the next unused id, from t
 title: "Code review — <component> <scope>"
 type: SpecReview
 analysis: code-review       # requires spec-artifacts-process >= the release adding it
-scope: "<repo>@<reviewed-sha>; src/, tests/"   # every file/artifact examined, not only the ones with findings
+scope: "<repo>; src/, tests/"   # every file/artifact examined, not only the ones with findings
 review_set: subset
 ---
 ```
@@ -498,8 +498,8 @@ review_set: subset
 
 ## Assurance Context
 
-<!-- Include only when an AssuranceProfile applies. Name the profile, evaluated
-revision/baseline, context examined, unavailable context, and active exceptions. -->
+<!-- Include only when an AssuranceProfile applies. Name the profile,
+context examined, unavailable context, and active exceptions. -->
 
 ## Findings
 
@@ -511,11 +511,7 @@ revision/baseline, context examined, unavailable context, and active exceptions.
 ```
 
 A code-review finding usually has a file and a line — put them in `Refs` as
-`path:line`. Record the exact commit sha you reviewed once, in the frontmatter
-`scope` line (`<repo>@<sha>`) — every `Refs` entry is implicitly against that
-sha. If the branch moves before the finding is resolved, re-review before
-reusing an old `Refs` line against the new sha; a stale sha in `Refs` is itself
-a finding.
+`path:line`.
 
 ### Findings table contract (validated)
 
@@ -535,13 +531,12 @@ a finding.
 
 ### Dispositions — never overwrite a finding to close it
 
-Every finding eventually needs an explicit outcome: `fixed <sha>` (the commit
-that fixed it), `rejected: <reason>` (concretely why it is not a defect — a
+Every finding eventually needs an explicit outcome: `fixed`, `rejected: <reason>` (concretely why it is not a defect — a
 rejection with no reason is not a disposition), `deferred: <reason>` (a
 follow-up ticket id, or why it's out of scope for this change), or
 `accepted-no-change` (a real finding the team decided, with a stated reason, to
 ship without changing — distinct from `rejected`, which means it was never a
-defect). Record that outcome in a separate `## Dispositions` section — `FND | outcome | sha/reason`
+defect). Record that outcome in a separate `## Dispositions` section — `FND | outcome | reason`
 — appended once the fix round lands. **Never edit the original `## Findings`
 row to add or imply the outcome.** The finding's wording is the record of what
 was found; the disposition is a separate, later fact about what happened to it.
@@ -568,13 +563,11 @@ When an AssuranceProfile applied, perform one final artifact check before report
 
 1. the exact `## Assurance Context` heading is present;
 2. it names the profile id and path;
-3. it records the evaluated source revision or explicit baseline;
-4. it states unavailable or stale selected context and active exceptions, including
+3. it states unavailable or stale selected context and active exceptions, including
    explicit `none` statements where applicable.
 
 A review that used assurance context while omitting any of these disclosures is
-incomplete even when `quire validate` passes, because structural validation cannot prove
-that the review preserved its evaluation provenance.
+incomplete even when `quire validate` passes.
 
 Each check above contributes findings: style violations, boundary violations,
 completeness issues (TODOs, `pass`), code-test alignment issues, detected

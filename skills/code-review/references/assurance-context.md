@@ -10,7 +10,7 @@ Read the profile's `scope`, impact scenarios, relationships, selected practices,
 exceptions. Record:
 
 - profile id and path;
-- source revision, comparison base, and changed paths actually reviewed;
+- changed paths actually reviewed;
 - the concern and project-owned impact tier that make the profile applicable;
 - linked assurance artifacts and records that were available;
 - selected context that was unavailable or stale.

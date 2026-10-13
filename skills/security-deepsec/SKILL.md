@@ -18,7 +18,7 @@ Run a DeepSec-assisted audit as an evidence-first security review. Treat DeepSec
 - Record every reviewed checksite, including negative review results. A complete audit includes "checked and no finding" evidence, not only promoted findings.
 - Promote a finding only when file evidence, reachable behavior, impact, and remediation are clear enough to survive code review.
 - For every finding, decide whether it needs a spec update, acceptance criteria update, and new tests tagged with the criterion ids they assert (the test matrix is computed by `quire matrix`; do not hand-edit it).
-- Do not close GitHub issues until resolution comments include commit SHA, tag if any, and exact verification output.
+- Do not close GitHub issues until resolution comments include tag if any, and exact verification output.
 
 ## Workflow
 

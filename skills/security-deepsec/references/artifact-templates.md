@@ -147,7 +147,6 @@ Required labels: `security`, `ai-handled`, `deepsec`.
 Before closing an issue, add:
 
 - Repo and branch.
-- Commit SHA.
 - Stable tag, if pushed.
 - Summary of fix.
 - Tests/lint commands with exact pass output.
