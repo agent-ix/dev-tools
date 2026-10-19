@@ -371,6 +371,76 @@ class Figure:
             w = self.text(x + 17, y, s, "muted", "mono", SMALL)
             x += 17 + w + 24
 
+    def code(self, x, y, w, lines, *, title=None, callouts=None, line_height=None, pad=12, role="ink"):
+        """A source-code panel. A line is a string or a list of (text, role) spans.
+
+        `callouts` is a list of (line_index, number, role): a ringed number in
+        the right gutter. Returns {"height": panel height, "anchors": [(x, y)]},
+        one anchor per callout on the panel's right edge, for notes and lines.
+        """
+        lh = line_height or round(LABEL * 1.55)
+        gutter = 26 if callouts else 0
+        head = lh if title else 0
+        height = head + len(lines) * lh + 2 * pad - (lh - LABEL) // 2
+        spans = [[(ln, role)] if isinstance(ln, str) else list(ln) for ln in lines]
+        for line in spans:
+            need = sum(FONTS["mono"].width(s, LABEL) for s, _ in line) + 2 * pad + gutter
+            if need > w:
+                text = "".join(s for s, _ in line)
+                raise ValueError(f"{self.name}: code line {text.strip()!r} needs {need:.0f}px, panel is {w}px")
+        self.rect(x, y, w, height, "faint", weight=1.2)
+        top = y + pad
+        if title:
+            self.text(x + pad, top + SMALL, title, "muted", "mono", SMALL)
+            self.line([(x, top + lh), (x + w, top + lh)], "faint", 1, arrow=False)
+            top += lh
+        for i, line in enumerate(spans):
+            cx = x + pad
+            for s, r in line:
+                cx += self.text(cx, top + i * lh + LABEL, s, r, "mono", LABEL)
+        anchors = []
+        for index, number, r in callouts or []:
+            cy = top + index * lh + LABEL * 0.6
+            self.dot(x + w - pad - 6, cy, 9, r, filled=False)
+            self.text(x + w - pad - 6, cy + SMALL * 0.34, str(number), r, "mono", SMALL, "middle")
+            anchors.append((x + w, cy))
+        return {"height": height, "anchors": anchors}
+
+    def columns(self, x, y, w, h, values, *, labels=None, role="logic", ticks=None, value_labels=True, gap=None):
+        """A vertical column chart in the box (x, y, w, h), labels included.
+
+        `role` may be a list, one per column. `ticks` are values marked on the
+        left with faint guides. Returns {"baseline": y, "tops": [(cx, y)]},
+        the column centres at their tops.
+        """
+        mono = FONTS["mono"]
+        left = max((mono.width(f"{t:g}", SMALL) for t in ticks), default=-8) + 8 if ticks else 0
+        base = y + h - (SMALL + 8 if labels else 0)
+        top = y + (SMALL + 6 if value_labels else SMALL // 2 if ticks else 0)
+        scale = (base - top) / (max(list(values) + list(ticks or [])) or 1)
+        pitch = (w - left) / len(values)
+        gap = round(pitch * 0.3) if gap is None else gap
+        roles = role if isinstance(role, list) else [role] * len(values)
+        for t in ticks or []:
+            ty = base - t * scale
+            self.text(x + left - 8, ty + SMALL * 0.35, f"{t:g}", "muted", "mono", SMALL, "end")
+            self.line([(x + left, ty), (x + w, ty)], "faint", 1, arrow=False)
+        self.line([(x + left, base), (x + w, base)], "faint", 1.5, arrow=False)
+        tops = []
+        for i, (v, r) in enumerate(zip(values, roles)):
+            bx, cx = x + left + i * pitch + gap / 2, x + left + (i + 0.5) * pitch
+            if v > 0:
+                self.rect(bx, base - v * scale, pitch - gap, v * scale, r, stroke=False, opacity=1, rx=0)
+            tops.append((cx, base - v * scale))
+            if value_labels:
+                self.text(cx, base - v * scale - 5, f"{v:g}", "muted", "mono", SMALL, "middle")
+            if labels:
+                need = mono.width(labels[i], SMALL) + 4
+                if need > pitch:
+                    raise ValueError(f"{self.name}: label {labels[i]!r} needs {need:.0f}px, column is {pitch:.0f}px")
+                self.text(cx, base + SMALL + 4, labels[i], "muted", "mono", SMALL, "middle")
+        return {"baseline": base, "tops": tops}
+
     # ---- animation -------------------------------------------------------
     def _pct(self, t):
         return f"{100 * min(max(t, 0), self.cycle) / self.cycle:.3f}".rstrip("0").rstrip(".")

@@ -22,7 +22,8 @@ People without the plugin regenerate from a clone of `agent-ix/dev-tools`.
 2. **Write the definitions.** If the repository has no `docs/images/figures.py`,
    copy [assets/starter_figures.py](assets/starter_figures.py) there. Each figure
    is a function returning a `Figure`; list them in `FIGURES`. API:
-   [api.md](references/api.md).
+   [api.md](references/api.md). Besides boxes and notes it has `code()` for
+   source-code panels with numbered callouts and `columns()` for column charts.
 3. **Use real values.** Read numbers from the repository's own data
    (recordings, datasets, command output) in the definitions file. Never type a
    value that the repository can supply.

@@ -128,3 +128,49 @@ def test_missing_glyphs_fall_back_to_the_next_font() -> None:
         assert 'id="mono_' in svg and 'id="mono1_' in svg  # Kalam plus the Plex fallback for ≥
     finally:
         docs_figures.use_style("ix-docs")
+
+
+SNIPPET = [
+    [("language", "logic"), (' "ix:native" ', "ink"), ("edition", "logic"), (' "0-draft";', "code")],
+    '  profile "state-finite/0-draft";',
+    [("invariant", "logic"), (" NoCycle ", "ink"), ("on", "logic"), (" Config::Version ", "ink"), ("at", "logic"), (" current {", "ink")],
+    [("  not", "logic"), (" reaches(self, self, parent)", "ink")],
+]
+
+
+def _composite_figure() -> "docs_figures.Figure":
+    f = docs_figures.Figure("composite", 640, 330, "A code panel with two callouts above a column chart of four values.")
+    got = f.code(0, 0, 560, SNIPPET, title="parent.native", callouts=[(0, 1, "logic"), (2, 2, "code")])
+    assert len(got["anchors"]) == 2 and got["height"] > 4 * 20
+    f.columns(0, 150, 600, 170, [3, 7, 5, 9], labels=["a", "b", "c", "d"], ticks=[0, 5, 10], role=["logic", "model", "code", "evidence"])
+    return f
+
+
+def test_code_and_columns_are_deterministic_outline_only_and_themed() -> None:
+    first = _composite_figure().outputs()
+    assert first == _composite_figure().outputs()
+    assert all("<text" not in svg for svg in first.values())
+    for theme in ("light", "dark"):
+        svg = first[f"composite-{theme}.svg"]
+        for role in ("logic", "model", "code", "evidence", "faint"):
+            assert docs_figures.THEMES[theme][role] in svg
+
+
+def test_code_and_columns_refuse_content_that_does_not_fit() -> None:
+    f = docs_figures.Figure("tight", 400, 200, "Tight.")
+    with pytest.raises(ValueError, match="needs"):
+        f.code(0, 0, 200, ["x" * 60])
+    with pytest.raises(ValueError, match="needs"):
+        f.columns(0, 0, 200, 100, [1, 2], labels=["short", "a very long category label"])
+
+
+def test_code_and_columns_stay_deterministic_in_pencil_style() -> None:
+    try:
+        docs_figures.use_style("pencil")
+    except (urllib.error.URLError, TimeoutError) as error:
+        pytest.skip(f"fonts unavailable: {error}")
+    try:
+        first = _composite_figure().outputs()
+        assert first == _composite_figure().outputs()
+    finally:
+        docs_figures.use_style("ix-docs")
