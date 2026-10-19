@@ -58,6 +58,35 @@ have no fill; other roles get a tinted fill.
   50 to 56 for one sub-line, 62 to 68 for two, 78 for three.
 - `note(x, y, s, role, sub=None, anchor="start", anim=None)`: an edge label with
   an optional muted second line 16 px lower.
+- `code(x, y, w, lines, *, title=None, callouts=None, line_height=None, pad=12, role="ink")`:
+  a source-code panel (faint tinted box, optional muted title strip such as a
+  filename). A line is a string in `role` or a list of `(text, role)` spans laid
+  out left to right; leading spaces are kept. Raises ("needs") when a line,
+  plus the callout gutter, exceeds `w - 2 * pad`. `callouts` are
+  `(line_index, number, role)`: a ringed number in the right gutter. Returns
+  `{"height": panel height, "anchors": [(x, y), ...]}`, one anchor per callout
+  on the panel's right edge, to start a `line` or `note` from. `line_height`
+  defaults to `round(LABEL * 1.55)`.
+
+  ```python
+  r = f.code(0, 0, 540, [[("model", "logic"), (' Config = "x";', "ink")], "  plain"],
+             title="parent.native", callouts=[(0, 1, "logic")])
+  f.note(r["anchors"][0][0] + 12, r["anchors"][0][1] + 4, "the model", "muted")
+  ```
+
+- `columns(x, y, w, h, values, *, labels=None, role="logic", ticks=None, value_labels=True, gap=None)`:
+  a vertical column chart filling the box `(x, y, w, h)`, labels included.
+  Solid square-ended columns on a faint baseline; `role` may be a list, one per
+  column; `ticks` are values drawn muted on the left with faint guide lines;
+  `value_labels` puts the value above each column; `labels` go under, and each
+  must fit its column pitch or it raises ("needs"). `gap` is pixels between
+  columns (default 30% of the pitch). Returns
+  `{"baseline": y, "tops": [(cx, y), ...]}`, each column's centre at its top.
+
+  ```python
+  f.columns(0, 0, 600, 190, [3, 7, 5], labels=["a", "b", "c"], ticks=[0, 5, 10])
+  ```
+
 - `legend(x, y, entries)`: entries are `(role, text, kind)` where `kind` is
   `box`, `solid` or `dash`.
 
