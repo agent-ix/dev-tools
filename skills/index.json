@@ -55,14 +55,21 @@
       "name": "rust-review",
       "version": "0.1.0",
       "files": [
-        "SKILL.md"
+        "SKILL.md",
+        "references/review-checks.md"
       ]
     },
     {
       "name": "rust-style",
       "version": "0.1.0",
       "files": [
-        "SKILL.md"
+        "SKILL.md",
+        "references/api-design.md",
+        "references/implementation.md",
+        "references/safety-concurrency.md",
+        "references/wire-and-persistence.md",
+        "references/testing.md",
+        "references/tokio.md"
       ]
     },
     {
