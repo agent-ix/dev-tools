@@ -18,9 +18,9 @@ If the setup checks leave a reproducible Agent IX dev-tools bug that blocks prog
 | Skill | Action |
 | --- | --- |
 | `code-review` | Review code and tests against Agent IX conventions, routing language specific checks. |
-| `rust-review` | Review Rust code for idioms, safety, test coverage, and required gates. |
+| `rust-review` | Review Rust behavior, API contracts, safety, tests, and required gates using the Agent IX Rust style guide. |
 | `review-react` | Review React tests and Storybook coverage against requirements. |
-| `rust-style` | Apply documented Rust idioms when a repository has no local style rules. |
+| `rust-style` | Apply Agent IX Rust defaults to every Rust task, with focused API, implementation, safety, boundary, testing, and Tokio references. |
 | `writing-tests-python` | Write pytest tests using fixture, mocking, and coverage conventions. |
 | `writing-tests-typescript` | Write TypeScript tests with typed mocks and behavior checks. |
 | `writing-tests-react` | Use the React testing guides for component and story coverage. |
