@@ -72,6 +72,8 @@ tables, the shared ecosystem figure, a one-line license.
 8. Building and testing: the two or three commands a user runs.
 9. Contributing (CONTRIBUTING, CLA, CHANGELOG), License.
 
+A walkthrough section may be titled "A worked example" and opens with the task it solves in the first sentence ("A deadline requirement is false on a recorded trace. This page walks through finding out why…").
+
 Deeper material goes in `docs/`: `index.md`, `how-it-works.md`, `examples.md`,
 `api-reference.md`, and a worked scenario when the tool is used to debug
 something (what you are looking for at each step).
