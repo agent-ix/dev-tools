@@ -132,7 +132,9 @@ def test_accepts_cargo_lockfile_and_svg_figure(tmp_path: Path) -> None:
     assert PREFLIGHT.check(project) == []
 
 
-@pytest.mark.parametrize("name", ["figure.svg", "Cargo.lock"])
+@pytest.mark.parametrize(
+    "name", ["figure.svg", "Cargo.lock", "rule.native", "rule.qsl", "data.json.license"]
+)
 def test_scans_lockfile_and_svg_text_for_workstation_paths(
     tmp_path: Path, name: str
 ) -> None:
@@ -142,6 +144,14 @@ def test_scans_lockfile_and_svg_text_for_workstation_paths(
     local_path = "/" + "Users/someone/figures/source.py"
     (project / name).write_text(f"rendered from {local_path}\n")
     assert PREFLIGHT.check(project) == [f"{name}: absolute workstation path"]
+
+
+@pytest.mark.parametrize("name", ["rule.native", "rule.qsl", "data.json.license"])
+def test_admits_qsl_source_and_license_sidecars(tmp_path: Path, name: str) -> None:
+    """Quire source and REUSE sidecars are plain text under the repo license."""
+    project = _project(tmp_path)
+    (project / name).write_text("SPDX-License-Identifier: AGPL-3.0-or-later\n")
+    assert PREFLIGHT.check(project) == []
 
 
 def test_ignores_python_bytecode_cache(tmp_path: Path) -> None:
