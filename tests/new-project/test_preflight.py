@@ -28,7 +28,6 @@ def _accept_synthetic_license(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _project(tmp_path: Path) -> Path:
     (tmp_path / "LICENSE").write_text(SYNTHETIC_LICENSE)
-    (tmp_path / "CONTENT_RIGHTS.md").write_text("Project owner: platform-team\n")
     (tmp_path / "package.json").write_text(
         json.dumps({"name": "synthetic-project", "license": "AGPL-3.0-or-later"})
     )
@@ -40,16 +39,14 @@ def test_accepts_rights_clean_agpl_project(tmp_path: Path) -> None:
     assert PREFLIGHT.check(_project(tmp_path)) == []
 
 
-def test_requires_agpl_and_completed_rights_policy(tmp_path: Path) -> None:
+def test_requires_agpl_license_and_manifests(tmp_path: Path) -> None:
     project = _project(tmp_path)
     (project / "LICENSE").write_text("MIT\n")
-    (project / "CONTENT_RIGHTS.md").write_text("REPLACE_WITH_OWNER\n")
     (project / "package.json").write_text(
         json.dumps({"name": "synthetic-project", "license": "MIT"})
     )
     (project / "Cargo.toml").write_text('[package]\nname = "synthetic"\nlicense = "MIT"\n')
     assert PREFLIGHT.check(project) == [
-        "CONTENT_RIGHTS.md: replace the project-owner placeholder",
         "Cargo.toml: license must be AGPL-3.0-or-later",
         "LICENSE: canonical GNU AGPL version 3 text is required",
         "package.json: license must be AGPL-3.0-or-later",

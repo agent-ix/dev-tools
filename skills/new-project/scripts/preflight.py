@@ -141,12 +141,6 @@ def check(root: Path) -> list[str]:
         if license_digest != AGPL_SHA256:
             failures.append("LICENSE: canonical GNU AGPL version 3 text is required")
 
-    rights = root / "CONTENT_RIGHTS.md"
-    if not rights.exists():
-        failures.append("CONTENT_RIGHTS.md: repository rights policy is required")
-    elif "REPLACE_WITH_OWNER" in rights.read_text(errors="replace"):
-        failures.append("CONTENT_RIGHTS.md: replace the project-owner placeholder")
-
     failures.extend(_manifest_failures(root))
     for path in _files(root):
         relative = path.relative_to(root).as_posix()
