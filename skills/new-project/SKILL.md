@@ -43,10 +43,7 @@ Before the first commit or push:
 1. Replace any template license with the canonical GNU Affero General Public License
    version 3 text. Record `AGPL-3.0-or-later` in package manifests that declare a
    license. Licensing is necessary but does not authorize publication.
-2. Copy [assets/CONTENT_RIGHTS.md](assets/CONTENT_RIGHTS.md) into the repository root and
-   fill in the project owner. Keep the default prohibition on external source content
-   unless a human has approved a specific, attributable exception.
-3. Wire up the org CLA so it is in place before any outside contribution, not added
+2. Wire up the org CLA so it is in place before any outside contribution, not added
    after one shows up:
    - Copy [assets/CLA.md](assets/CLA.md) into the repository root byte-identical to the
      canonical copy in `agent-ix/.github` -- do not reword it.
@@ -59,22 +56,21 @@ Before the first commit or push:
      Lite workflow that lives once in `agent-ix/.github`; do not inline its logic.
    - `rust-lib-cookiecutter` already renders all three of these; for it, skip this step
      rather than overwriting the rendered files.
-4. Keep source material with unresolved distribution rights entirely outside the Git
+3. Keep source material with unresolved distribution rights entirely outside the Git
    working tree. Do not put it in ignored directories, Git LFS, issues, PR text, commit
    messages, CI artifacts, or a private GitHub repository.
-5. Run the deterministic preflight:
+4. Run the deterministic preflight:
 
    ```bash
    python <skill-directory>/scripts/preflight.py <generated-project>
    ```
 
-   Stop if it reports a missing license, inconsistent manifest license, missing rights
-   policy, protected or unreviewed file type, workstation path, or unresolved-rights marker.
+   Stop if it reports a missing license, inconsistent manifest license, protected or
+   unreviewed file type, workstation path, or unresolved-rights marker.
    Inspect any hit without echoing protected text into logs.
 
 Run the generated project's formatter, tests, and build. Initialize Git only after the
-tree passes the rights preflight. Make the initial commit include the AGPL license and
-content-rights policy.
+tree passes the rights preflight. Make the initial commit include the AGPL license.
 
 ## Create the private remote
 
