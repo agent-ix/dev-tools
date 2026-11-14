@@ -40,6 +40,12 @@ MAX_CODE_CELL_CHARS = 29
 MAX_TABLE_ROWS = 12
 
 PAGE_TYPE_SET = frozenset(PAGE_TYPES)
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+SVG_RE = re.compile(r"<svg\b.*?</svg\s*>", re.S | re.I)
+HTML_TAG_RE = re.compile(r"<(?:/?[A-Za-z][^<>]*)>", re.S)
+HTML_ALT_RE = re.compile(r"""\balt\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
 FIGURE_RE = re.compile(r"!\[|<img\b|<picture\b|<figure\b|<svg\b", re.I)
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
@@ -47,6 +53,44 @@ FENCE_CLOSE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
 DELIM_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 ORDERED_RE = re.compile(r"^\s*\d+[.)]\s+\S")
 STOPWORDS = {"the", "a", "an", "of", "and", "how", "to", "in", "for", "is", "what", "with", "on"}
+
+# Prose rules that also apply to the one-line frontmatter `description`, which Vale skips.
+# The patterns copy the tokens of the Vale rule with the same id; a test keeps them equal.
+DESCRIPTION_RULES: Dict[str, List[str]] = {
+    "page-self-reference": [
+        r"\bthis (page|section|chapter|document|guide) (covers|lists|documents|describes|explains|walks through|shows|maps|summarizes|introduces|contains|states)\b",
+        r"\b(on|in) this page\b",
+        r"\bthe page (badge|status) is\b",
+        r"\bthe (section|page) badge\b",
+        r"\bthe pages? (below|above) (cover|list|document|describe)\b",
+    ],
+    "lead-ins": [
+        r"^here (is|are|[\u2019']s)\b",
+        r"^below (is|are)\b",
+        r"^for example,",
+        r"^for instance,",
+        r"\bit is worth (noting|mentioning)\b",
+        r"\bit[\u2019']s worth (noting|mentioning)\b",
+        r"^note that\b",
+        r"\bread (it|them) top to bottom\b",
+        r"^let[\u2019']s\b",
+        r"^in this (section|guide|tutorial)\b",
+    ],
+    "contrast-framing": [
+        r", not ",
+        r"\brather than\b",
+        r"\binstead of\b",
+        r"\b(isn[\u2019']t|is not|aren[\u2019']t|are not|doesn[\u2019']t|does not)\b[^.;]{1,40}, (it[\u2019']s|it is|they[\u2019']re|they are)\b",
+        r"\bnot [^,.;]{1,40}\bbut\b",
+    ],
+}
+MAX_SENTENCE_WORDS = 30
+
+# Command lines in teaching pages that carry harness plumbing (rule: concept-no-harness).
+SHELL_LANGS = frozenset(("sh", "bash", "shell", "console", "zsh", "terminal", "shell-session", "shellsession"))
+JQ_RE = re.compile(r"\|\s*jq\b")
+EXIT_STATUS_RE = re.compile(r"\$\?")
+REDIRECT_RE = re.compile(r"(?:^|[\s\d])>{1,2}\s*[^\s>&|]")
 
 # Required sections per page type: (description, test over the list of headings).
 REQUIRED = {
@@ -116,6 +160,7 @@ class Page:
         self.path = path
         self.lines = path.read_text(encoding="utf-8-sig").splitlines()
         self.frontmatter: Dict[str, str] = {}
+        self.frontmatter_line: Dict[str, int] = {}
         self.body_start = 0
         self._split_frontmatter()
         self.in_fence = self._fence_mask()
@@ -134,10 +179,11 @@ class Page:
         if self.lines and self.lines[0].strip() == "---":
             for i in range(1, len(self.lines)):
                 if self.lines[i].strip() == "---":
-                    for raw in self.lines[1:i]:
+                    for offset, raw in enumerate(self.lines[1:i]):
                         m = re.match(r"^([A-Za-z_][\w-]*):\s*(.*?)\s*$", raw)
                         if m:
                             self.frontmatter[m.group(1)] = m.group(2).strip("\"'")
+                            self.frontmatter_line[m.group(1)] = offset + 2
                     self.body_start = i + 1
                     return
 
@@ -170,10 +216,26 @@ class Page:
         return ""
 
     def prose_words(self) -> int:
-        n = 0
-        for i in range(self.body_start, len(self.lines)):
-            if not self.in_fence[i]:
-                n += len(self.lines[i].split())
+        """Words a reader reads: outside code fences and frontmatter, with HTML markup
+        removed and each figure's alt text counted once, even when a light and a dark
+        image repeat it."""
+        text = "\n".join(self.lines[i] for i in range(self.body_start, len(self.lines)) if not self.in_fence[i])
+        # Keep angle brackets inside code spans (`Vec<T>`) away from the tag stripper.
+        text = CODE_SPAN_RE.sub(lambda m: m.group(0).replace("<", "\x00").replace(">", "\x01"), text)
+        text = HTML_COMMENT_RE.sub(" ", text)
+        text = SVG_RE.sub(" ", text)
+        alts: List[str] = []
+        for m in HTML_ALT_RE.finditer(text):
+            alts.append(m.group(1) if m.group(1) is not None else m.group(2))
+        text = MD_IMAGE_RE.sub(lambda m: (alts.append(m.group(1)), " ")[1], text)
+        text = HTML_TAG_RE.sub(" ", text)
+        seen = set()
+        n = len(text.split())
+        for alt in alts:
+            key = " ".join(alt.split()).lower()
+            if key and key not in seen:
+                seen.add(key)
+                n += len(key.split())
         return n
 
     def tables(self) -> List[Tuple[int, List[List[str]]]]:
@@ -260,6 +322,24 @@ def check_page(page: Page) -> List[Finding]:
         if words > budget:
             out.append(Finding(p, 1, "page-length-budget", "%d words; a %s page has a budget of %d" % (words, page.type, budget)))
 
+    # frontmatter description: Vale skips frontmatter, so the prose rules run here
+    desc = page.frontmatter.get("description", "")
+    if desc:
+        d_line = page.frontmatter_line.get("description", 1)
+        for sentence in re.split(r"(?<=[.!?])\s+", desc):
+            for rule_id, patterns in DESCRIPTION_RULES.items():
+                for pat in patterns:
+                    m = re.search(pat, sentence, re.I)
+                    if m:
+                        out.append(Finding(p, d_line, rule_id, "description: '%s'. %s" % (m.group(0), DESCRIPTION_HINTS[rule_id])))
+                        break
+            if len(re.findall(r"[\w\u2019'-]+", sentence)) > MAX_SENTENCE_WORDS:
+                out.append(Finding(p, d_line, "sentence-too-long", "description: sentence has more than %d words. Split it." % MAX_SENTENCE_WORDS))
+
+    # concept-no-harness
+    if page.type in ("concept", "tutorial"):
+        out.extend(harness_findings(page))
+
     # heading-level-skip
     prev = 1 if page.frontmatter.get("title") else 0
     for line_no, level, text in page.headings:
@@ -279,7 +359,7 @@ def check_page(page: Page) -> List[Finding]:
             line_no = start + offset + (1 if offset else 0)
             for cell in row:
                 if cell_words(cell) > MAX_CELL_WORDS:
-                    out.append(Finding(p, line_no, "table-cell-too-long", "cell has %d words; the limit is %d" % (cell_words(cell), MAX_CELL_WORDS)))
+                    out.append(Finding(p, line_no, "table-cell-too-long", "cell has %d words; the limit is %d. Use a definition list or a paragraph" % (cell_words(cell), MAX_CELL_WORDS)))
                 for code in re.findall(r"`([^`]+)`", cell):
                     if len(code) > MAX_CODE_CELL_CHARS:
                         out.append(Finding(p, line_no, "table-code-cell-long", "code span of %d characters in a cell" % len(code)))
@@ -292,6 +372,79 @@ def check_page(page: Page) -> List[Finding]:
             and prev_line.endswith((".", ":", "?"))
         if not ok:
             out.append(Finding(p, start, "table-without-intro", "table is not introduced by a sentence"))
+    return out
+
+
+DESCRIPTION_HINTS = {
+    "page-self-reference": "Say what the thing is; do not describe the page.",
+    "lead-ins": "Start with the fact.",
+    "contrast-framing": "Say what the thing is or does.",
+}
+
+
+def fenced_blocks(page: Page) -> List[Tuple[str, int, List[str]]]:
+    """Return (info string, first content line no, content lines) for each fenced block."""
+    blocks: List[Tuple[str, int, List[str]]] = []
+    i = page.body_start
+    n = len(page.lines)
+    while i < n:
+        if page.in_fence[i] and (i == page.body_start or not page.in_fence[i - 1]):
+            m = FENCE_OPEN_RE.match(page.lines[i])
+            info = (m.group(2).strip().split() or [""])[0].lower() if m else ""
+            j = i + 1
+            while j < n and page.in_fence[j]:
+                j += 1
+            closed = j > i + 1 and FENCE_CLOSE_RE.match(page.lines[j - 1])
+            blocks.append((info, i + 2, page.lines[i + 1:j - 1 if closed else j]))
+            i = j
+            continue
+        i += 1
+    return blocks
+
+
+def strip_quoted(line: str) -> str:
+    return re.sub(r"\"[^\"]*\"|'[^']*'", '""', line)
+
+
+def open_quote(text: str) -> bool:
+    """True when a single quote opened in text is not closed yet."""
+    return re.sub(r"\"[^\"]*\"", "", text).count("'") % 2 == 1
+
+
+def harness_findings(page: Page) -> List[Finding]:
+    """Flag shell plumbing in command examples: jq pipes, redirects to files, `$?`, multi-line filters."""
+    out: List[Finding] = []
+    p = str(page.path)
+    msg = "%s in a command example; show the command and a short result, and state the exit code in prose"
+    for info, first, lines in fenced_blocks(page):
+        prompted = any(l.lstrip().startswith("$ ") for l in lines)
+        if info not in SHELL_LANGS and not prompted:
+            continue
+        k = 0
+        while k < len(lines):
+            logical = lines[k].lstrip()
+            if prompted and not logical.startswith("$ "):
+                k += 1
+                continue
+            end = k
+            spanned_quote = False
+            while end + 1 < len(lines) and (logical.rstrip().endswith(("\\", "|")) or open_quote(logical)):
+                spanned_quote = spanned_quote or open_quote(logical)
+                end += 1
+                logical += "\n" + lines[end]
+            plain = re.sub(r"\d?>&\d?", " ", strip_quoted(logical))
+            hit = None
+            if JQ_RE.search(logical):
+                hit = "pipe into jq"
+            elif EXIT_STATUS_RE.search(logical):
+                hit = "exit status captured with $?"
+            elif REDIRECT_RE.search(plain):
+                hit = "output redirected to a file"
+            elif end > k and ("|" in plain or spanned_quote):
+                hit = "multi-line filter"
+            if hit:
+                out.append(Finding(p, first + k, "concept-no-harness", msg % hit))
+            k = end + 1
     return out
 
 

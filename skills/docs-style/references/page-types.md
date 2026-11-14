@@ -21,6 +21,13 @@ The table lists each type, the question its reader asks and the word budget.
 | reference | What exactly is the syntax, option or rule? | 2500 |
 | status | What runs today? | 3000 |
 
+The budget counts the words a reader reads. It skips code fences and
+frontmatter, strips HTML markup, and counts the alt text of a figure once even
+when a light and a dark image repeat it (rule: page-length-budget). The budget is
+a warning. A page over it often covers two topics; a page that answers one reader
+question may stay over it. A page that answers two reader questions is split
+whatever its length (rule: split-by-reader-question).
+
 Every page except status and reference states what the reader should know first,
 in a line near the top or in a `Before you start` section (rule: prerequisites-stated).
 Name the earlier pages: "You should know what a trace is" links to the page that
@@ -39,13 +46,21 @@ Required, in order:
 4. One small running example, under a heading that contains "Example".
 5. Next steps: links to the how-to, the tutorial and the reference.
 
-Between the figure and the example, add one step that names the likeliest wrong
-reading and corrects it (rule: common-misreading). A newcomer to formal methods
-reads "always" as "at some point" or "within 30" as "within 30 seconds". Say so
-once, in one short paragraph.
+Between the figure and the example, add one step that names a wrong reading a
+newcomer would make with this page's example, and corrects it (rule:
+common-misreading). Say so once, in one short paragraph. Find the misreading by
+running the example wrong once and reading what the tool says; write down a
+misreading you verified, never one you assume. A guess or a sentence from another
+page is not a finding.
 
-Banned: syntax tables, option lists, error codes, requirement ids, install steps,
-numbered procedures. Those belong on other pages (rule: one-type-per-page).
+A teaching page shows the command a reader types and a trimmed result that
+contains only fields the page has defined. It keeps shell pipelines and
+plumbing out of command examples: pipes into `jq`, output redirects to files,
+`$?` and multi-line filters (rule: concept-no-harness). State the exit code in
+prose.
+
+Banned: shell pipelines and test plumbing in command examples, syntax tables,
+option lists, error codes, requirement ids, install steps, numbered procedures. Those belong on other pages (rule: one-type-per-page).
 
 Bad opening, a definition buried in an inventory:
 
@@ -92,8 +107,9 @@ selects the positions numbered 0 to 3, counted from where the rule starts.
 
 ## A common misreading
 
-"Within 30" does not mean 30 seconds. It means 30 clock ticks, and the clock
-decides what one tick is.
+(One short paragraph. Name the wrong reading of this page's example that you
+found by running the example wrong once, then give the right reading in one
+sentence. Replace this paragraph; do not keep any wording from it.)
 
 ## Example: version updates
 
@@ -109,7 +125,8 @@ positions, the result: holds at position 0, fails at position 3.)
 ````
 
 Each section teaches one idea (rule: one-idea-per-section). The example is small
-enough to read in a minute.
+enough to read in a minute. Text in parentheses in a skeleton describes what goes
+there; replace it with content you verified.
 
 ## Tutorial
 

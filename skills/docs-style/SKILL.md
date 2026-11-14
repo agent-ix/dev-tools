@@ -1,6 +1,6 @@
 ---
 name: docs-style
-description: Write and review READMEs and docs pages in the Agent IX house style. Use when writing a README or docs page, when asked to review docs for filler, "Claude-ish" wording, sprawl, indirect framing or implementation status, or when a README or docs folder must be brought to the agent-ix standard. Gives a page-type guide, a rule catalog, a Vale style and a structure checker. Figures are made with docs-figures.
+description: Write and review READMEs and docs pages in the Agent IX house style. Use when writing a README or docs page. Use it when asked to review docs for filler, "Claude-ish" wording, sprawl, indirect framing or implementation status. Use it when a README or docs folder must be brought to the agent-ix standard. Gives a page-type guide, a rule catalog, a Vale style and a structure checker. Figures are made with docs-figures.
 compatibility: Python 3.9+ for scripts/docs_lint.py. Vale 3 for the prose rules (MDX also needs mdx2vast).
 ---
 
@@ -36,7 +36,8 @@ covers the words, the page types and the structure.
      Vale applies a rule to every page; the sample ini shows per-path sections for
      `applies_to`, for the `trust-words` and contrast rules, and for status pages.
    - Structure: `python3 <skill>/scripts/docs_lint.py --check <paths>`. It reads the
-     page type from frontmatter. `--type T` fills it in for files without one.
+     page type from frontmatter and runs the page-self-reference, lead-in,
+     contrast and sentence-length rules over the frontmatter `description`. `--type T` fills it in for files without one.
      `--level suggestion` shows everything; `--ignore ids` skips rules.
 4. **Judge the `review` rules** in the catalog (`check: review`). No tool checks
    them. Read the page as someone who has never heard of the project.
@@ -67,7 +68,11 @@ covers the words, the page types and the structure.
   how-to opens with the task, a tutorial with the result, a status page with what
   it lists. The second paragraph says what the reader can do, with no sourcing,
   version or release state.
-- Examples run: taken from tests, executed in CI, output generated.
+- Examples run: taken from tests, executed in CI, output generated. A teaching
+  page shows the command and a short result, with no shell plumbing, and never
+  presents a tool gap as a rule.
+- One vocabulary for results per page set; every term in shown output is defined
+  or cut.
 - A learning track introduces terms in order; each page says what to know first.
 - One fact per sentence, under 30 words. Literal headings. US spelling.
 - No figurative words, no contrast framing, no lead-ins, no page self-reference.
