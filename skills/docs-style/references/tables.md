@@ -37,7 +37,7 @@ Good: one table of Profile and Tick, and a second of Profile and End of trace.
 ## Short cells
 
 A cell is at most 12 words (rule: table-cell-too-long). A longer cell is a
-paragraph; move it under a heading.
+paragraph; move it under a heading or into a definition list.
 
 Bad: "One admitted semantic-event position of the authoritative sequence"
 
@@ -54,6 +54,29 @@ list:
 
 A tick is one event position.
 ```
+
+## Short names in the table, full identifiers above
+
+When rows are named by long identifiers, put the full identifiers once in a code
+block or a definition list above the table. Use a short name for each in the
+table. The reader reads the full id once and the table stays narrow.
+
+The code block gives each short name its full identifier:
+
+```text
+event   quire.temporal.event-position.false-extension/v1
+sample  quire.temporal.fixed-rate-sample.false-extension/v1
+```
+
+The table then uses the short names:
+
+| Profile | Tick |
+| --- | --- |
+| event | One event position |
+| sample | One sample |
+
+A cell that holds a sentence is a list item or a definition-list entry instead
+(rule: table-cell-too-long).
 
 ## One sentence introduces each table
 

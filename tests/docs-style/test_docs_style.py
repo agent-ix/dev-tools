@@ -218,6 +218,8 @@ def lint(tmp_path: Path, files: Dict[str, str], *extra: str) -> List[str]:
     return [line.split(": ")[1] for line in proc.stdout.splitlines()]
 
 
+DESC_PAGE_STRUCT = CONCEPT_OK.replace("type: concept\n", "type: concept\ndescription: %s\n")
+
 STRUCT_CASES = {
     "page-type-declared": ({"a.md": "---\ntitle: A\n---\n\nText.\n"}, {"a.md": "---\ntitle: A\ntype: reference\n---\n\nText.\n"}),
     "required-sections": ({"a.md": CONCEPT_OK.replace("## Next steps", "## More")}, {"a.md": CONCEPT_OK}),
@@ -237,6 +239,12 @@ STRUCT_CASES = {
                             {"a.md": CONCEPT_OK + "\n## Table\n\nThe table lists pairs.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n"}),
     "table-too-long": ({"a.md": CONCEPT_OK + "\nThe table:\n\n| a | b |\n| --- | --- |\n" + "| 1 | 2 |\n" * 15},
                        {"a.md": CONCEPT_OK + "\nThe table:\n\n| a | b |\n| --- | --- |\n" + "| 1 | 2 |\n" * 3}),
+    "page-self-reference": ({"a.md": DESC_PAGE_STRUCT % "This page covers clocks."}, {"a.md": DESC_PAGE_STRUCT % "A clock numbers positions."}),
+    "lead-ins": ({"a.md": DESC_PAGE_STRUCT % "Here is how time works."}, {"a.md": DESC_PAGE_STRUCT % "Time orders events."}),
+    "contrast-framing": ({"a.md": DESC_PAGE_STRUCT % "A clock is a rule, not a stopwatch."}, {"a.md": DESC_PAGE_STRUCT % "A clock numbers positions."}),
+    "sentence-too-long": ({"a.md": DESC_PAGE_STRUCT % LONG}, {"a.md": DESC_PAGE_STRUCT % "The compiler checks the rule."}),
+    "concept-no-harness": ({"a.md": CONCEPT_OK + "\n```bash\ncheck rule.native trace.json | jq .result\n```\n"},
+                           {"a.md": CONCEPT_OK + "\n```bash\ncheck rule.native trace.json\n```\n"}),
 }
 
 
@@ -592,3 +600,87 @@ def test_near_duplicate_by_shared_topic_headings(tmp_path: Path) -> None:
     def page(title: str) -> str:
         return "---\ntitle: %s\ntype: concept\n---\n\nText.\n\n## Clocks\n\n## Positions\n\n## Anchors\n" % title
     assert "near-duplicate-topic" in lint(tmp_path, {"a.md": page("Alpha"), "b.md": page("Beta")})
+
+
+# ---------------------------------------------------------------- word count, description, harness
+
+FIG_PAIR = ('<figure>\n<img src="a-light.svg" alt="A trace of five events with one interval marked." class="light">\n'
+            '<img src="a-dark.svg" alt="A trace of five events with one interval marked." class="dark">\n</figure>\n')
+
+
+def words_of(tmp_path: Path, body: str) -> int:
+    f = tmp_path / "w.md"
+    f.write_text("---\ntitle: T\ntype: concept\n---\n\n" + body, encoding="utf-8")
+    return docs_lint.Page(f, None).prose_words()
+
+
+def test_word_count_strips_html_and_counts_alt_once(tmp_path: Path) -> None:
+    alt_words = len("A trace of five events with one interval marked.".split())
+    assert words_of(tmp_path, "One two three.\n\n" + FIG_PAIR) == 3 + alt_words
+    assert words_of(tmp_path, "One two three.\n") == 3
+
+
+def test_word_count_handles_wrappers_svg_and_markdown_images(tmp_path: Path) -> None:
+    body = ('One two.\n\n<div class="wide">\n<picture>\n<source srcset="d.svg" media="(prefers-color-scheme: dark)">\n'
+            '<img src="l.svg"\n     alt="Two words">\n</picture>\n</div>\n<svg viewBox="0 0 1 1"><text>many many many</text></svg>\n'
+            '![Two words](x.svg)\n')
+    assert words_of(tmp_path, body) == 2 + 2
+
+
+def test_word_count_keeps_angle_brackets_in_code_spans(tmp_path: Path) -> None:
+    assert words_of(tmp_path, "A `Vec<T>` holds items of `T> x`.\n") == 7
+
+
+def test_figure_markup_no_longer_trips_the_budget(tmp_path: Path) -> None:
+    body = CONCEPT_OK + FIG_PAIR * 40
+    assert "page-length-budget" not in lint(tmp_path, {"a.md": body})
+
+
+DESC_PAGE = CONCEPT_OK.replace("type: concept\n", "type: concept\ndescription: %s\n")
+
+
+@pytest.mark.parametrize("rule_id,text", [
+    ("page-self-reference", "This page covers how time works."),
+    ("lead-ins", "Here is how time works."),
+    ("contrast-framing", "A clock is a rule, not a stopwatch."),
+    ("sentence-too-long", LONG),
+])
+def test_description_is_checked(rule_id: str, text: str, tmp_path: Path) -> None:
+    assert rule_id in lint(tmp_path, {"a.md": DESC_PAGE % text})
+    assert rule_id not in lint(_sub(tmp_path, "ok"), {"a.md": DESC_PAGE % "A clock numbers each position of a trace."})
+
+
+def test_description_finding_points_at_its_line(tmp_path: Path) -> None:
+    out = lint_lines(tmp_path, {"a.md": DESC_PAGE % "This page covers clocks."})
+    assert out["page-self-reference"] == 4
+
+
+def test_description_patterns_match_the_vale_tokens() -> None:
+    for rule_id, patterns in docs_lint.DESCRIPTION_RULES.items():
+        data = yaml.safe_load((SKILL / "vale" / "AgentIX" / (pascal(rule_id) + ".yml")).read_text(encoding="utf-8"))
+        assert patterns == [t.replace("[’'']", "[’']") for t in data["tokens"]] or \
+            [p.replace("\\u2019", "’") for p in patterns] == data["tokens"], rule_id
+
+
+HARNESS_BAD = {
+    "jq": "check rule.native trace.json | jq '.result'",
+    "redirect": "check rule.native trace.json > out.json",
+    "exit": 'check rule.native trace.json; echo "exit $?"',
+    "multi-line": "check rule.native trace.json \\\n  | jq -r '.a\n  | .b'",
+    "prompted": "$ check rule.native trace.json | jq .result\nviolated",
+}
+
+
+@pytest.mark.parametrize("kind", sorted(HARNESS_BAD))
+def test_harness_is_flagged_on_teaching_pages(kind: str, tmp_path: Path) -> None:
+    body = CONCEPT_OK + "\n```bash\n%s\n```\n" % HARNESS_BAD[kind]
+    assert "concept-no-harness" in lint(tmp_path, {"a.md": body})
+    tutorial = "---\ntitle: T\ntype: tutorial\n---\n\nIn this tutorial you check.\n\n## Before you start\n\nText.\n\n## Step 1: A\n\n```sh\n%s\n```\n\n## Step 2: B\n\nText.\n\n## Next steps\n\nText.\n" % HARNESS_BAD[kind]
+    assert "concept-no-harness" in lint(_sub(tmp_path, "t"), {"a.md": tutorial})
+
+
+def test_harness_allows_plain_commands_and_other_page_types(tmp_path: Path) -> None:
+    plain = CONCEPT_OK + "\n```bash\ncheck rule.native trace.json 2>&1\ncheck a \\\n  --trace b.json\n```\n\n```text\nviolated | at position 3 > 2\n```\n"
+    assert "concept-no-harness" not in lint(tmp_path, {"a.md": plain})
+    howto = HOWTO_OK + "\n```bash\ncheck rule.native trace.json | jq .result\n```\n"
+    assert "concept-no-harness" not in lint(_sub(tmp_path, "h"), {"a.md": howto})

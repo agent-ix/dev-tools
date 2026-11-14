@@ -3,7 +3,8 @@
 # check:     vale       a file in vale/AgentIX/ (kebab-case id -> PascalCase file name)
 #            structure  emitted by scripts/docs_lint.py
 #            review     judged by a reviewer; no tool checks it
-# backstop:  optional second line of defence; docs_lint.py also emits the id
+# backstop:  optional second line of defence; docs_lint.py also emits the id (for the
+#            prose rules it runs them over the frontmatter `description`, which Vale skips)
 # applies_to: page types (concept, tutorial, how-to, reference, status, readme) or all.
 #             docs_lint.py applies it itself. Vale cannot, so a repository applies it with
 #             per-glob sections in .vale.ini; `docs_lint.py --vale-sections` prints them.
@@ -15,6 +16,7 @@ rules:
   - id: contrast-framing
     severity: error
     check: vale
+    backstop: structure
     applies_to: [all]
     rationale: "A contrast makes the reader learn a wrong idea before the right one."
     bad: "A clock is a rule for positions, not a stopwatch."
@@ -36,6 +38,7 @@ rules:
   - id: lead-ins
     severity: error
     check: vale
+    backstop: structure
     applies_to: [all]
     rationale: "A lead-in delays the fact and adds no information."
     bad: "Here is an example. Note that the clause is checked first."
@@ -43,6 +46,7 @@ rules:
   - id: page-self-reference
     severity: error
     check: vale
+    backstop: structure
     applies_to: [all]
     rationale: "A page that describes itself says nothing about the subject."
     bad: "This page covers positions, clocks and the anchor."
@@ -57,6 +61,7 @@ rules:
   - id: sentence-too-long
     severity: warning
     check: vale
+    backstop: structure
     applies_to: [all]
     rationale: "A sentence over 30 words carries more than one fact."
     bad: "The compiler checks that the rule names only objects, fields and operations that exist in the domain model, and the evaluator then runs the rule on data from the system and reports whether the system follows it."
@@ -273,7 +278,7 @@ rules:
     severity: warning
     check: structure
     applies_to: [all]
-    rationale: "A page over its budget covers more than one topic."
+    rationale: "A page over its budget often covers more than one topic. The budget is a warning; a page that answers one reader question may stay over it, and a page that answers two is split at any length."
     bad: "A 4,000-word concept page."
     good: "A concept page under 900 words, with the rest linked."
   - id: heading-level-skip
@@ -338,7 +343,7 @@ rules:
     applies_to: [concept, tutorial]
     rationale: "Teaching from the smallest language to the full one keeps each step a small change."
     bad: "Starting with the timed profile."
-    good: "Event positions first, then samples, then timestamps, then dense time."
+    good: "The form the reader can run first, then one added capability per step, each step also runnable."
   - id: running-example
     severity: error
     check: review
@@ -378,16 +383,23 @@ rules:
     severity: suggestion
     check: review
     applies_to: [concept, tutorial]
-    rationale: "A newcomer reads familiar words with their everyday meaning; naming the likeliest wrong reading once prevents it."
-    bad: "A concept page that never mentions that 'within 30' counts ticks of the clock, not seconds."
-    good: "A short 'A common misreading' step: within 30 means 30 clock ticks."
+    rationale: "A newcomer reads familiar words with their everyday meaning; naming a wrong reading once prevents it. The misreading is one you verified by running the example wrong, not one you expect."
+    bad: "A concept page that gives its reader no wrong reading to avoid, or one that the author never ran."
+    good: "A short 'A common misreading' step naming an error a newcomer makes with this page's example, found by running the example wrong once."
   - id: notation-introduced
     severity: warning
     check: review
     applies_to: [concept, tutorial]
-    rationale: "A reader who can say a symbol aloud and has seen one use can remember the general form."
+    rationale: "A reader who can say a symbol aloud and has seen one use can remember the general form. The rule covers notation the page's running example uses; other notation goes to the reference page."
     bad: "The general grammar of an operator, followed by its use."
-    good: "The operator's name, how to read it aloud, one use, then the general form."
+    good: "The operator's name, how to read it aloud, one use (a figure may be that use), then the general form."
+  - id: concept-no-harness
+    severity: warning
+    check: structure
+    applies_to: [concept, tutorial]
+    rationale: "A teaching page shows the command a reader types and a trimmed result. Pipes into jq, redirects to files, exit-status captures and multi-line filters are test harness, and bury the idea."
+    bad: "A command example with a pipe into jq, an output redirect to a file and an echo of the exit status."
+    good: "The command the reader types, a short result with only fields the page has defined, and the exit code stated in prose."
   - id: examples-runnable
     severity: error
     check: review
@@ -395,6 +407,27 @@ rules:
     rationale: "An example that cannot run drifts from the tool; output that is pasted by hand goes stale."
     bad: "A code sample typed into the page, with its output pasted beside it."
     good: "An example taken from the tests, run in CI, with output generated by a script."
+  - id: gap-not-rule
+    severity: error
+    check: review
+    applies_to: [concept, tutorial]
+    rationale: "A teaching page teaches with examples that run. An implementation gap, such as a form the tool does not run yet, is not a property of the thing documented; presenting it as one teaches a false rule."
+    bad: "A rule of the language that is only the current tool refusing a form."
+    good: "Teach with the forms that run; put what does not run on the status page."
+  - id: output-terms-defined
+    severity: warning
+    check: review
+    applies_to: [concept, tutorial, how-to]
+    rationale: "A reader meets every word in shown output. A field or value the page never defines is a question the page left open."
+    bad: "A result block with a field the page never explains."
+    good: "Each term in the shown output is defined on the page, linked to its definition, or cut from the output."
+  - id: one-term-per-thing
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "One vocabulary for results and outcomes across a page set, defined once, lets the reader carry a word from page to page."
+    bad: "One page says holds and violated, the next says pass and fail, a third says true and false."
+    good: "One set of outcome words, defined once and used on every page."
   - id: prerequisites-stated
     severity: warning
     check: review

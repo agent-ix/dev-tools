@@ -45,15 +45,23 @@ once (rule: undefined-acronym): "the sequential probability ratio test (SPRT)".
 
 ## Introduce notation in three moves
 
-A symbol, operator or keyword gets three things in this order (rule:
-notation-introduced):
+A symbol, operator or keyword that the page's running example uses gets three
+things in this order (rule: notation-introduced):
 
 1. Its name, as a word.
 2. How to say it aloud: `always p` is read "p holds at every position".
-3. One use on a concrete example, before the general form.
+3. One use on a concrete example, before the general form. A figure of the
+   running example may be that use.
 
 Only then show the general syntax. A reader who can say a formula aloud can
-remember it.
+remember it. Notation the running example does not use stays off the page; the
+reference page lists it.
+
+## One vocabulary for results
+
+Pick one set of words for results and outcomes, define it once, and use it on
+every page of the set (rule: one-term-per-thing). A reader who meets "holds" on one
+page and "pass" on the next asks whether they differ.
 
 ## One new idea per section
 
@@ -63,9 +71,10 @@ one-idea-per-section). If a section needs two ideas, split it.
 ## Teach in order of rising expressive power
 
 Start with the smallest language that shows the idea and add power in steps.
-Forge teaches this way with language levels. In the specification-language
-example, time is taught as event positions, then samples, then timestamps, then
-dense time (rule: rising-expressive-power). Begin with the least general form.
+Forge teaches this way with language levels (rule: rising-expressive-power).
+Start from the form the reader can run today, then add one capability per step.
+Each step is a form that runs as well. Order the forms by what the reader can
+run, and teach a form that does not run yet on no page.
 
 ## Order a learning track across pages
 
@@ -92,6 +101,38 @@ An example in the docs is a program the reader can run. Take it from the
 repository's tests or examples folder, run it in CI, and generate the shown output
 with a script. Never paste output by hand; regenerate it when the tool changes
 (rule: examples-runnable).
+
+A teaching page teaches with examples that run. A form the tool cannot run yet is
+an implementation gap. A gap is never a rule of the thing the page documents.
+Leave the form out and let the status page carry it (rule: gap-not-rule).
+
+## Show the command and a trimmed result
+
+A teaching page shows the command a reader types and a trimmed result that
+contains only fields the page has defined (rules: concept-no-harness,
+output-terms-defined). Define each field or value in the result, or cut it. Pipes into `jq`, redirects
+to files, exit-status captures and multi-line filters are plumbing from a test
+harness. Keep them out of concept and tutorial pages. State the exit code in a sentence: "The command
+exits with status 1".
+
+Bad:
+
+```bash
+check rule.native trace.json > out.json; echo "exit $?"
+cat out.json | jq '.result'
+```
+
+Good:
+
+```bash
+check rule.native trace.json
+```
+
+```text
+violated at position 3
+```
+
+The command exits with status 1.
 
 ## One figure, one claim
 
