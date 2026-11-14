@@ -1,0 +1,18 @@
+extends: existence
+message: "Release or implementation state in prose ('%s'). Put it in the status page or a badge."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: warning
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '\bpre-?release\b'
+  - '\b(api|language|syntax) is not (yet )?stable\b'
+  - '\bbreaking changes are expected\b'
+  - '\bis still changing\b'
+  - '\bspecified only\b'
+  - '\bnot yet (built|implemented|shipped|released)\b'
+  - '\bnot built\b'
+  - '\bspecified\b[^.]{0,20}\bnot (yet )?(built|implemented)\b'
+  - '\bwork in progress\b'
+  - '^status:'

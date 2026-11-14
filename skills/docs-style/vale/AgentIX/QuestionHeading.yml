@@ -1,0 +1,9 @@
+extends: existence
+message: "Question or clever heading '%s'. Use a literal heading."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: suggestion
+nonword: true
+scope: heading
+tokens:
+  - '\?$'
+  - '^(Why|How come|So what)\b.*\?'

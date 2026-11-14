@@ -1,0 +1,9 @@
+extends: existence
+message: "Version pin '%s' in prose. It goes stale; state it once in an install line or not at all."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: warning
+nonword: true
+scope: text
+tokens:
+  - '\b(documents|covers|describes|as of|since|requires|version) [A-Za-z][\w-]*( [A-Z][\w-]*)? ?v?\d+\.\d+(\.\d+)?\b'
+  - '\b[A-Z][A-Za-z]+ v?\d+\.\d+\.\d+\b'

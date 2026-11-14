@@ -1,0 +1,9 @@
+extends: existence
+message: "Stacked hedges ('%s'). State the fact, or state the condition."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: warning
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '\b(may|might|could|perhaps|possibly|generally|typically|usually|often|somewhat|arguably|potentially|in some cases|to some extent)\b([^.;]{0,50})\b(may|might|could|perhaps|possibly|generally|typically|usually|often|somewhat|arguably|potentially|in some cases|to some extent)\b'

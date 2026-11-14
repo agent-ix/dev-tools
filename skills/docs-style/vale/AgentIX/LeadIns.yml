@@ -1,0 +1,18 @@
+extends: existence
+message: "Lead-in ('%s'). Start with the fact."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: error
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '^here (is|are|[’'']s)\b'
+  - '^below (is|are)\b'
+  - '^for example,'
+  - '^for instance,'
+  - '\bit is worth (noting|mentioning)\b'
+  - '\bit[’'']s worth (noting|mentioning)\b'
+  - '^note that\b'
+  - '\bread (it|them) top to bottom\b'
+  - '^let[’'']s\b'
+  - '^in this (section|guide|tutorial)\b'

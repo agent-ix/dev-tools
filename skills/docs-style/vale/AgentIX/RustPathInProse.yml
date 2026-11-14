@@ -1,0 +1,8 @@
+extends: existence
+message: "Code path '%s' in prose. Describe the behavior; put paths in reference or source."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: warning
+nonword: true
+scope: text
+tokens:
+  - '\b[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_:]*'

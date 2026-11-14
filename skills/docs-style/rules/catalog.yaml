@@ -1,0 +1,447 @@
+# The single list of docs-style rules. Reviews, Vale and docs_lint.py all cite these ids.
+#
+# check:     vale       a file in vale/AgentIX/ (kebab-case id -> PascalCase file name)
+#            structure  emitted by scripts/docs_lint.py
+#            review     judged by a reviewer; no tool checks it
+# backstop:  optional second line of defence; docs_lint.py also emits the id
+# applies_to: page types (concept, tutorial, how-to, reference, status, readme) or all.
+#             docs_lint.py applies it itself. Vale cannot, so a repository applies it with
+#             per-glob sections in .vale.ini; `docs_lint.py --vale-sections` prints them.
+#
+# Keep one value per line and double-quoted text on one line: docs_lint.py reads
+# id, severity, check, backstop and applies_to with a small line parser.
+rules:
+  # ---- wording (phrasing.md) ----
+  - id: contrast-framing
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "A contrast makes the reader learn a wrong idea before the right one."
+    bad: "A clock is a rule for positions, not a stopwatch."
+    good: "A clock is the rule that gives each position in a trace a coordinate."
+  - id: figurative-words
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "Figurative words hide the claim; the literal word states it."
+    bad: "The foundation of the checker sits under the model, and a result is only as good as that model."
+    good: "The checker reports results for the model you give it."
+  - id: trust-words
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "Honest, trust and lie are figures of speech; a page that needs the literal word turns this one rule off for its path."
+    bad: "The honest answer is that you can trust the result."
+    good: "The result holds for the model you checked."
+  - id: lead-ins
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "A lead-in delays the fact and adds no information."
+    bad: "Here is an example. Note that the clause is checked first."
+    good: "The clause is checked first."
+  - id: page-self-reference
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "A page that describes itself says nothing about the subject."
+    bad: "This page covers positions, clocks and the anchor."
+    good: "A clock gives each position of a trace a coordinate."
+  - id: hedging-stack
+    severity: warning
+    check: vale
+    applies_to: [all]
+    rationale: "Two hedges in one sentence leave the reader without a claim."
+    bad: "A rule may generally be checked, and could often be reused."
+    good: "A rule is checked once per trace."
+  - id: sentence-too-long
+    severity: warning
+    check: vale
+    applies_to: [all]
+    rationale: "A sentence over 30 words carries more than one fact."
+    bad: "The compiler checks that the rule names only objects, fields and operations that exist in the domain model, and the evaluator then runs the rule on data from the system and reports whether the system follows it."
+    good: "The compiler checks that the rule names only things the model declares. The evaluator then runs the rule on data from the system."
+  - id: undefined-acronym
+    severity: suggestion
+    check: vale
+    applies_to: [all]
+    rationale: "A reader new to the field cannot look up an acronym that is never spelled out."
+    bad: "SPRT stops sampling early."
+    good: "The sequential probability ratio test (SPRT) stops sampling early."
+  - id: us-spelling
+    severity: warning
+    check: vale
+    applies_to: [all]
+    rationale: "One spelling across the docs keeps search and review simple."
+    bad: "The behaviour is recorded."
+    good: "The behavior is recorded."
+  - id: unconnected-systems
+    severity: warning
+    check: vale
+    applies_to: [all]
+    rationale: "A system the reader never asked about is noise; and disclaimers belong on a dedicated page."
+    bad: "The crate does not depend on Quire and does not certify anything."
+    good: "The crate parses and checks formulas."
+  - id: question-heading
+    severity: suggestion
+    check: vale
+    applies_to: [all]
+    rationale: "Literal headings let a reader scan and search."
+    bad: "## Why does time matter?"
+    good: "## The problem"
+  - id: negation-lists
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "A list of what the thing does not do states things the reader never expected."
+    bad: "It does not parse text, does not rewrite formulas and does not run R2U2."
+    good: "It evaluates a trace to true or false."
+  - id: restates-figure-or-table
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "A sentence that repeats a figure, a table or the previous sentence is cut, not kept."
+    bad: "The table lists five profiles. The five profiles are shown in the table."
+    good: "The table lists the five profiles."
+  - id: rule-of-three
+    severity: suggestion
+    check: review
+    applies_to: [all]
+    rationale: "Padding a list to three items adds a rhythm, not a fact."
+    bad: "It is fast, flexible and robust."
+    good: "It checks a 10,000-event trace in under a second."
+  - id: disclaimer-boilerplate
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "Compliance boilerplate in a page the reader uses to learn or act is noise."
+    bad: "Quoin does not qualify, validate, accredit or certify any product."
+    good: "(Delete it; put it on the Assurance page if it is needed.)"
+  # ---- internals and status (status-and-internals.md) ----
+  - id: maintainer-process
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "Maintainer workflow and gate tooling do not help a reader use the thing."
+    bad: "Hosted CI is manual-only. See AGENTS.md for the agent workflow."
+    good: "Run make test before you open a pull request."
+  - id: status-in-prose
+    severity: warning
+    check: vale
+    applies_to: [concept, tutorial, how-to, reference, readme]
+    rationale: "Release and build state goes stale and belongs on the status page or in a badge."
+    bad: "The exact engine is specified only; the API is not stable."
+    good: "The exact engine computes the probability over the whole model."
+  - id: requirement-id-in-prose
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "Requirement, test and decision ids are for maintainers; readers cannot use them."
+    bad: "The evaluator reads a trace of positions (FR-043, V1-TEMP-021)."
+    good: "The evaluator reads a trace of positions."
+  - id: issue-ref-in-prose
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "Ticket numbers go stale and mean nothing outside the tracker."
+    bad: "Fixed in quire-rs#123."
+    good: "(Say what the behavior is.)"
+  - id: rust-path-in-prose
+    severity: warning
+    check: vale
+    applies_to: [concept, tutorial, how-to, readme]
+    rationale: "Internal code paths describe the implementation, not the behavior."
+    bad: "Config::ConfigVersion is read by TemporalProfile::ALL."
+    good: "A configuration version is read by the profile catalog."
+  - id: crate-name-in-prose
+    severity: warning
+    check: vale
+    applies_to: [concept, tutorial, how-to]
+    rationale: "Package names are implementation detail; readers know the product names."
+    bad: "The `qsl-semantics` crate holds the catalog."
+    good: "The compiler holds the catalog."
+  - id: source-path-in-prose
+    severity: warning
+    check: vale
+    applies_to: [concept, tutorial, how-to]
+    rationale: "A source path in prose is a pointer to code the reader does not need to open."
+    bad: "The catalog is in `qsl-semantics/src/check/profile.rs`."
+    good: "The catalog lists five profiles."
+  - id: test-name-in-prose
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "An example needs no pointer to a test; test names are bookkeeping."
+    bad: "This mirrors `tests/reference.rs` and tc_084_roundtrip."
+    good: "(Remove the pointer.)"
+  - id: on-main-branch
+    severity: warning
+    check: vale
+    applies_to: [all]
+    rationale: "Docs describe what a reader gets, not the state of a branch."
+    bad: "The flag exists on main."
+    good: "The flag sets the output directory."
+  - id: version-pin
+    severity: warning
+    check: vale
+    applies_to: [concept, tutorial, reference]
+    rationale: "A version in prose is stale on the next release."
+    bad: "This section documents Quoin 0.29.1."
+    good: "(State the version once, in the install line.)"
+  - id: no-command-runs
+    severity: error
+    check: vale
+    applies_to: [all]
+    rationale: "Sentences about what does not run are status; they go on the status page."
+    bad: "No `quire-spec` command runs the clause."
+    good: "(Say what runs, or leave it to the status page.)"
+  - id: banned-heading
+    severity: error
+    check: vale
+    applies_to: [concept, tutorial, how-to, reference, readme]
+    rationale: "These headings announce bookkeeping; the content belongs elsewhere or nowhere."
+    bad: "## Status of this page"
+    good: "(Delete the section.)"
+  - id: no-test-section
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "A reader needs one example that works, not a list of tests."
+    bad: "A section listing test names that cover the page."
+    good: "One example taken from the tests."
+  # ---- tables (tables.md) ----
+  - id: table-too-wide
+    severity: error
+    check: vale
+    backstop: structure
+    applies_to: [all]
+    rationale: "A table of 5 or more columns does not fit a phone or a reader's eye."
+    bad: "| Profile | Badge | A tick is | Past the end | Intervals |"
+    good: "Two tables of 3 columns, or one section per profile."
+  - id: table-code-cell-long
+    severity: error
+    check: vale
+    backstop: structure
+    applies_to: [all]
+    rationale: "A 30-character identifier in a cell forces the column wide and breaks on narrow screens."
+    bad: "| `quire.temporal.event-position.false-extension/v1` | event |"
+    good: "A section per profile with the id as its heading."
+  - id: table-cell-too-long
+    severity: warning
+    check: structure
+    applies_to: [all]
+    rationale: "A cell of more than 12 words is a paragraph."
+    bad: "| A clock | The rule that assigns each position of a trace a coordinate and gives every interval of a formula its unit |"
+    good: "| A clock | Gives each position a coordinate |"
+  - id: table-without-intro
+    severity: warning
+    check: structure
+    applies_to: [all]
+    rationale: "A table needs one sentence saying what it shows."
+    bad: "## Profiles\\n\\n| Name | Tick |"
+    good: "## Profiles\\n\\nThe table lists each profile and its tick.\\n\\n| Name | Tick |"
+  - id: table-too-long
+    severity: suggestion
+    check: structure
+    applies_to: [concept, tutorial, how-to, readme]
+    rationale: "A long table in a teaching page is hard to scan; split it by theme. Reference tables may be long."
+    bad: "A table of 25 rows."
+    good: "Three tables of 8 rows, each introduced."
+  - id: table-two-dimensional
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "A table is for data with rows and columns both meaningful; a list or paragraph does the rest."
+    bad: "A two-column table of page names and descriptions."
+    good: "A bulleted list of links, each with one sentence."
+  # ---- structure (page-types.md, framing.md) ----
+  - id: page-type-declared
+    severity: error
+    check: structure
+    applies_to: [all]
+    rationale: "Every page has exactly one type, so it can be written and reviewed for that type."
+    bad: "A page with no `type:` in frontmatter."
+    good: "`type: concept`"
+  - id: required-sections
+    severity: error
+    check: structure
+    applies_to: [concept, tutorial, how-to, reference, status, readme]
+    rationale: "Each page type promises the reader a fixed set of parts."
+    bad: "A concept page with no example and no next steps."
+    good: "A concept page with an Example section and a Next steps section."
+  - id: page-length-budget
+    severity: warning
+    check: structure
+    applies_to: [all]
+    rationale: "A page over its budget covers more than one topic."
+    bad: "A 4,000-word concept page."
+    good: "A concept page under 900 words, with the rest linked."
+  - id: heading-level-skip
+    severity: error
+    check: structure
+    applies_to: [all]
+    rationale: "A skipped level breaks the outline for screen readers and navigation."
+    bad: "## Syntax followed by #### Forms"
+    good: "## Syntax followed by ### Forms"
+  - id: duplicate-title
+    severity: error
+    check: structure
+    applies_to: [all]
+    rationale: "A topic has one home page."
+    bad: "Two pages titled Temporal profiles."
+    good: "One page titled Temporal profiles."
+  - id: near-duplicate-topic
+    severity: warning
+    check: structure
+    applies_to: [all]
+    rationale: "Pages with nearly the same title or headings repeat each other."
+    bad: "Pages titled Time profiles and Temporal profiles with the same sections."
+    good: "One page, with the other deleted and redirected."
+  - id: one-type-per-page
+    severity: error
+    check: review
+    applies_to: [all]
+    rationale: "A page that is a tutorial and a reference serves neither reader."
+    bad: "A concept page with a syntax table and numbered setup steps."
+    good: "A concept page that links to a reference page and a how-to."
+  - id: lede-definition
+    severity: error
+    check: review
+    applies_to: [concept, reference, readme]
+    rationale: "The reader learns what the thing is from the first sentence."
+    bad: "Time is hard. Consider a rule that must hold within 30 seconds."
+    good: "A temporal profile is a named choice that fixes what a position and a tick mean."
+  - id: lede-reader-outcome
+    severity: error
+    check: review
+    applies_to: [concept, reference, readme]
+    rationale: "The second paragraph says what the reader can do, with no sourcing, version or release state."
+    bad: "This section documents Quoin 0.29.1. The facts come from running the executable."
+    good: "You can write a requirement as a rule and check it against a trace."
+  - id: define-term-once
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "Defining a term twice invites two meanings; define it once and link."
+    bad: "Each page restates what a trace is."
+    good: "One definition of trace, linked from every use."
+  - id: one-idea-per-section
+    severity: warning
+    check: review
+    applies_to: [concept, tutorial]
+    rationale: "A reader new to the field absorbs one idea at a time."
+    bad: "A section introducing clocks, intervals and fairness together."
+    good: "Three sections, in that order."
+  - id: rising-expressive-power
+    severity: warning
+    check: review
+    applies_to: [concept, tutorial]
+    rationale: "Teaching from the smallest language to the full one keeps each step a small change."
+    bad: "Starting with the timed profile."
+    good: "Event positions first, then samples, then timestamps, then dense time."
+  - id: running-example
+    severity: error
+    check: review
+    applies_to: [concept, tutorial]
+    rationale: "One small example across the pages lets a new reader see each idea in the same setting."
+    bad: "A different toy system on every page."
+    good: "The configuration-version system on every page."
+  - id: tutorial-builds-up
+    severity: warning
+    check: review
+    applies_to: [tutorial]
+    rationale: "Each step is a small change to the result of the previous step."
+    bad: "Step 3 starts a new unrelated file."
+    good: "Step 3 adds one rule to the file from step 2."
+  - id: how-to-single-task
+    severity: warning
+    check: review
+    applies_to: [how-to]
+    rationale: "A how-to serves a reader who already knows what they want to do."
+    bad: "A how-to that first explains what a trace is."
+    good: "Numbered steps and the expected output, with a link to the concept page."
+  - id: reference-example-per-form
+    severity: warning
+    check: review
+    applies_to: [reference]
+    rationale: "A reader checks a form against a minimal example."
+    bad: "A syntax table with no examples."
+    good: "Each form has a one-line example."
+  - id: figure-one-claim
+    severity: warning
+    check: review
+    applies_to: [concept, tutorial]
+    rationale: "A figure that makes more than one claim shows none of them."
+    bad: "A diagram of every engine."
+    good: "A diagram of how a rule is checked against a trace."
+  - id: common-misreading
+    severity: suggestion
+    check: review
+    applies_to: [concept, tutorial]
+    rationale: "A newcomer reads familiar words with their everyday meaning; naming the likeliest wrong reading once prevents it."
+    bad: "A concept page that never mentions that 'within 30' counts ticks of the clock, not seconds."
+    good: "A short 'A common misreading' step: within 30 means 30 clock ticks."
+  - id: notation-introduced
+    severity: warning
+    check: review
+    applies_to: [concept, tutorial]
+    rationale: "A reader who can say a symbol aloud and has seen one use can remember the general form."
+    bad: "The general grammar of an operator, followed by its use."
+    good: "The operator's name, how to read it aloud, one use, then the general form."
+  - id: examples-runnable
+    severity: error
+    check: review
+    applies_to: [concept, tutorial, how-to, reference, readme]
+    rationale: "An example that cannot run drifts from the tool; output that is pasted by hand goes stale."
+    bad: "A code sample typed into the page, with its output pasted beside it."
+    good: "An example taken from the tests, run in CI, with output generated by a script."
+  - id: prerequisites-stated
+    severity: warning
+    check: review
+    applies_to: [concept, tutorial, how-to]
+    rationale: "A reader who lacks a prerequisite needs to know where to learn it before they read on."
+    bad: "A tutorial that uses 'trace' without saying where it is defined."
+    good: "A 'Before you start' section: you should know what a trace is (link)."
+  - id: learning-track-order
+    severity: warning
+    check: review
+    applies_to: [concept, tutorial]
+    rationale: "A page in a track may use only terms that earlier pages introduced."
+    bad: "Page 2 of a track uses 'fairness', which is defined on page 7."
+    good: "Each page lists terms it uses, and each term is defined on the same or an earlier page."
+  - id: split-by-reader-question
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "Two reader questions need two pages, whatever the length; the length budget only catches size."
+    bad: "A 600-word page that defines profiles and also tells you how to pick one."
+    good: "A concept page for what a profile is and a how-to for how to pick one."
+  # ---- navigation (navigation.md) ----
+  - id: sidebar-depth
+    severity: error
+    check: review
+    applies_to: [all]
+    rationale: "More than two levels hides pages."
+    bad: "Section > Group > Subgroup > Page."
+    good: "Section > Group > Page."
+  - id: group-size
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "A group of 5 to 9 pages can be held in the head."
+    bad: "A group of 29 pages."
+    good: "A group of 6 pages."
+  - id: reader-word-labels
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "Sidebar labels use words the reader uses, not folder names."
+    bad: "model-checking"
+    good: "Check a model"
+  - id: one-home-per-topic
+    severity: error
+    check: review
+    applies_to: [all]
+    rationale: "A reader should find one page per topic and never choose between two."
+    bad: "Limits explained on nine pages."
+    good: "One Limits page, linked from the others."

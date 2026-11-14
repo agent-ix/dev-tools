@@ -1,0 +1,33 @@
+extends: substitution
+message: "Use US spelling: '%s' instead of '%s'."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: warning
+ignorecase: true
+scope: text
+swap:
+  behaviour: behavior
+  behaviours: behaviors
+  colour: color
+  colours: colors
+  initialise: initialize
+  initialised: initialized
+  organisation: organization
+  organisations: organizations
+  serialise: serialize
+  serialised: serialized
+  normalise: normalize
+  normalised: normalized
+  recognise: recognize
+  analyse: analyze
+  analysed: analyzed
+  optimise: optimize
+  optimised: optimized
+  licence: license
+  catalogue: catalog
+  honour: honor
+  favour: favor
+  neighbour: neighbor
+  neighbours: neighbors
+  centre: center
+  artefact: artifact
+  artefacts: artifacts

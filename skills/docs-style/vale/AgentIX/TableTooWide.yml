@@ -1,0 +1,7 @@
+extends: script
+message: "Table with 5 or more columns. Split it, or use a definition list."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/tables.md
+level: error
+scope: raw
+# Needs config/scripts/table-too-wide.tengo in the same StylesPath. The script skips fenced code blocks.
+script: table-too-wide.tengo

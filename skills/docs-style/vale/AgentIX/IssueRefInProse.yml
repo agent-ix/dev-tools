@@ -1,0 +1,9 @@
+extends: existence
+message: "Issue reference '%s' in prose. Ticket numbers do not help a reader."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: error
+nonword: true
+scope: text
+tokens:
+  - '\b[A-Za-z][\w.-]*#\d+\b'
+  - '\b(issue|PR|pull request) #\d+\b'

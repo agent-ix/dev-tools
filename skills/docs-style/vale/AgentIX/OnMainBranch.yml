@@ -1,0 +1,12 @@
+extends: existence
+message: "'%s' ties the page to a branch. Say what the released thing does."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: warning
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '\bon (the )?main branch\b'
+  - '\bon main\b(?! (page|thread|screen|path|menu|window|loop|function|tab))'
+  - '\bat origin/main\b'
+  - '\bunreleased\b'

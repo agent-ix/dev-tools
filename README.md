@@ -29,6 +29,7 @@ If the setup checks leave a reproducible Agent IX dev-tools bug that blocks prog
 | `security-deepsec` | Run a DeepSec security review and track remediation. |
 | `new-project` | Scaffold and prepare a new repository from an Agent IX template. |
 | `docs-figures` | Draw transparent light/dark SVG diagrams, charts and CSS animations for GitHub docs, clean or hand-sketched. |
+| `docs-style` | Write and review READMEs and docs pages: page types, a rule catalog, a Vale style and a structure checker. |
 
 Each skill states its own external prerequisites. Quoin is used for formal specification and evidence artifacts when installed; DeepSec is required for its named audit workflow. The `new-project` skill currently offers a public Rust scaffold through [rust-lib-cookiecutter](https://github.com/agent-ix/rust-lib-cookiecutter). Its other named Agent IX templates require separate authenticated access and are not part of the public support promise. `new-project` applies its own AGPL policy to generated projects; that does not change this plugin's MIT license.
 

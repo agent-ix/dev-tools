@@ -1,0 +1,14 @@
+extends: existence
+message: "Figurative word ('%s'). Use the literal word."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: error
+ignorecase: true
+nonword: true
+scope: sentence
+# Kept apart from FigurativeWords so a page that needs the word (an assurance page
+# about trusted signers) can switch off this one rule per path in .vale.ini.
+tokens:
+  - '\bhonest(ly|y)?\b'
+  - '\btrust(s|ed|worthy|worthiness)?\b(?!-words)'
+  - '\blie(s|d)? (to|about)\b'
+  - '\blying\b'
