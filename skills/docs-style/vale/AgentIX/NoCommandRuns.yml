@@ -1,0 +1,7 @@
+extends: script
+message: "States what does not run. Say what runs, on the status page."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: error
+scope: raw
+# Needs config/scripts/no-command-runs.tengo in the same StylesPath. The script skips fenced code blocks.
+script: no-command-runs.tengo

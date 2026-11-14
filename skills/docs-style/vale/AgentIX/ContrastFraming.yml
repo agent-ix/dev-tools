@@ -1,0 +1,13 @@
+extends: existence
+message: "Contrast framing ('%s'). Say what the thing is or does."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: error
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - ', not '
+  - '\brather than\b'
+  - '\binstead of\b'
+  - "\\b(isn[’']t|is not|aren[’']t|are not|doesn[’']t|does not)\\b[^.;]{1,40}, (it[’']s|it is|they[’']re|they are)\\b"
+  - '\bnot [^,.;]{1,40}\bbut\b'

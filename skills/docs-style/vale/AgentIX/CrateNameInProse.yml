@@ -1,0 +1,7 @@
+extends: script
+message: "Crate or module name in prose. Internal package names do not belong in prose."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: warning
+scope: raw
+# Needs config/scripts/crate-name-in-prose.tengo in the same StylesPath. The script skips fenced code blocks.
+script: crate-name-in-prose.tengo

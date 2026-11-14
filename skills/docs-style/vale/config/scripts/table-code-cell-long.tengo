@@ -1,0 +1,28 @@
+// Matches outside fenced code blocks. Offsets are positions in `scope` (raw text).
+text := import("text")
+patterns := ["(?m)^[ \\t]*\\|(?:[^|\\n]*\\|)*?[^|\\n`]*`[^`|\\n]{30,}`"]
+fences := []
+f := text.re_find("(?ms)^[ \\t]*(?:```|~~~).*?^[ \\t]*(?:```|~~~)[ \\t]*$", scope, -1)
+if f != undefined {
+  for i := 0; i < len(f); i++ {
+    fences = append(fences, f[i][0])
+  }
+}
+matches := []
+for p in patterns {
+  m := text.re_find(p, scope, -1)
+  if m != undefined {
+    for i := 0; i < len(m); i++ {
+      c := m[i][0]
+      inside := false
+      for j := 0; j < len(fences); j++ {
+        if c.begin >= fences[j].begin && c.begin < fences[j].end {
+          inside = true
+        }
+      }
+      if !inside {
+        matches = append(matches, {begin: c.begin, end: c.end})
+      }
+    }
+  }
+}

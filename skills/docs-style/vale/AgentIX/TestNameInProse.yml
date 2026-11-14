@@ -1,0 +1,7 @@
+extends: script
+message: "Test name in prose. The example stands on its own."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: error
+scope: raw
+# Needs config/scripts/test-name-in-prose.tengo in the same StylesPath. The script skips fenced code blocks.
+script: test-name-in-prose.tengo

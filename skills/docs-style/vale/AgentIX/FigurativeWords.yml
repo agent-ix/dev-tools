@@ -1,0 +1,18 @@
+extends: existence
+message: "Figurative or dramatic wording ('%s'). Use the literal word."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: error
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '\bhonest(ly)?\b'
+  - '\btrust(s|ed|worthy)?\b'
+  - '\blies\b'
+  - '\blie to\b'
+  - '\bonly as good as\b'
+  - '\bis where\b'
+  - '\bthe point is\b'
+  - '\bunder the hood\b'
+  - '\bat the heart of\b'
+  - '\bsingle source of truth\b'

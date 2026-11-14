@@ -1,0 +1,9 @@
+extends: existence
+message: "Internal id '%s' in prose. Requirement, test and decision ids belong in the spec, not in the docs."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: error
+nonword: true
+scope: text
+tokens:
+  - '\b(FR|NFR|StR|SR|TC|AC|ADR|US|QSL|IR|TL)-\d+\b'
+  - '\b(Plan|Task)-\d+\b'

@@ -1,0 +1,13 @@
+extends: existence
+message: "'%s' names a system the reader did not ask about. Cut it, or say what the thing does."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: warning
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '\b(does|do) not depend on\b'
+  - '\b(has|have) no dependency on\b'
+  - '\bis not (connected|related) to\b'
+  - '\bis unrelated to\b'
+  - '\b(does|do) not (qualify|validate|accredit|certify)\b'

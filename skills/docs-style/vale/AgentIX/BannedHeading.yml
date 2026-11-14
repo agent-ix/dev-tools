@@ -1,0 +1,9 @@
+extends: existence
+message: "Heading '%s' is banned. Use a literal heading that names the content."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: error
+ignorecase: true
+nonword: true
+scope: heading
+tokens:
+  - '^(Gaps|Known gaps|Tests|Status of this page|What was verified|What runs|Related pages|Open questions)$'

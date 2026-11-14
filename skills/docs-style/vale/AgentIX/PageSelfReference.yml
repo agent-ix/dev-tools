@@ -1,0 +1,13 @@
+extends: existence
+message: "Page self-reference ('%s'). Say what the thing is; do not describe the page."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/phrasing.md
+level: error
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '\bthis (page|section|chapter|document|guide) (covers|lists|documents|describes|explains|walks through|shows|maps|summarizes|introduces|contains|states)\b'
+  - '\b(on|in) this page\b'
+  - '\bthe page (badge|status) is\b'
+  - '\bthe (section|page) badge\b'
+  - '\bthe pages? (below|above) (cover|list|document|describe)\b'

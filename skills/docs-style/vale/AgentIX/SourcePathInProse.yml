@@ -1,0 +1,7 @@
+extends: script
+message: "Source path in prose. Say what the code does; link the repository if a reader needs it."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: warning
+scope: raw
+# Needs config/scripts/source-path-in-prose.tengo in the same StylesPath. The script skips fenced code blocks.
+script: source-path-in-prose.tengo

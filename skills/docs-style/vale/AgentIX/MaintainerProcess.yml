@@ -1,0 +1,16 @@
+extends: existence
+message: "Maintainer or process detail ('%s') does not help a reader use the thing."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: error
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '\bCLAUDE\.md\b'
+  - '\bAGENTS\.md\b'
+  - '\bHosted CI\b'
+  - '\bmanual-only\b'
+  - '\bagent-assisted\b'
+  - '\bpublish = false\b'
+  - '\bwork is specified before it is implemented\b'
+  - '\bthe gate (script|tooling)\b'
