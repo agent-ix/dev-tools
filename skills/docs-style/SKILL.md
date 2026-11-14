@@ -30,11 +30,14 @@ covers the words, the page types and the structure.
    [status-and-internals.md](references/status-and-internals.md),
    [navigation.md](references/navigation.md).
 3. **Run the checks.**
-   - Prose: `vale --config=<ini> <paths>`. Copy `<skill>/vale/` into the repository
-     (`AgentIX` style and `config/scripts`), start from
-     [vale/.vale.ini](vale/.vale.ini). MDX needs `mdx2vast` on `PATH`.
-   - Structure: `python3 <skill>/scripts/docs_lint.py --check <paths>`. Add
-     `--type readme` for a README, `--level suggestion` to see everything.
+   - Prose: `vale --config=<ini> <paths>`. Copy both `AgentIX/` and `config/` from
+     `<skill>/vale/` into your Vale `StylesPath` (the script rules need `config/`),
+     and start from [vale/.vale.ini](vale/.vale.ini). MDX needs `mdx2vast` on `PATH`.
+     Vale applies a rule to every page; the sample ini shows per-path sections for
+     `applies_to`, for the `trust-words` and contrast rules, and for status pages.
+   - Structure: `python3 <skill>/scripts/docs_lint.py --check <paths>`. It reads the
+     page type from frontmatter. `--type T` fills it in for files without one.
+     `--level suggestion` shows everything; `--ignore ids` skips rules.
 4. **Judge the `review` rules** in the catalog (`check: review`). No tool checks
    them. Read the page as someone who has never heard of the project.
 5. **Report** findings, then fix them.
@@ -44,7 +47,9 @@ covers the words, the page types and the structure.
 1. Read the page as the target reader. For each sentence ask: does this help me
    understand or use the thing? If not, cut it.
 2. Run Vale and `docs_lint.py`. Keep a hit unless the sentence states a plain
-   fact the reader needs (for example, "does not allocate").
+   fact the reader needs (for example, "does not allocate"). To suppress a rule for
+   a block, write `<!-- vale AgentIX.LeadIns = NO -->` before it and
+   `<!-- vale AgentIX.LeadIns = YES -->` after it (MDX: `{/* vale AgentIX.LeadIns = NO */}`).
 3. Go through the `review` rules for the page's type: lede, one idea per
    section, running example, repetition, two-dimensional tables, navigation.
 4. Check that fenced code blocks are unchanged, every relative link resolves,
@@ -58,8 +63,12 @@ covers the words, the page types and the structure.
 
 ## The rules in short
 
-- First sentence: `<name> is <what it is>.` Second paragraph: what the reader
-  can do. No sourcing, version or release state in it.
+- Concept, reference and README pages open with `<name> is <what it is>.` A
+  how-to opens with the task, a tutorial with the result, a status page with what
+  it lists. The second paragraph says what the reader can do, with no sourcing,
+  version or release state.
+- Examples run: taken from tests, executed in CI, output generated.
+- A learning track introduces terms in order; each page says what to know first.
 - One fact per sentence, under 30 words. Literal headings. US spelling.
 - No figurative words, no contrast framing, no lead-ins, no page self-reference.
 - Tables only for two-dimensional data: 4 columns at most, cells of 12 words at
@@ -78,6 +87,7 @@ Full text and examples are in the references. Every rule is in the catalog.
 - `rules/catalog.yaml`: every rule, with severity, check kind, examples.
 - `vale/`: the `AgentIX` Vale style, `config/scripts/` (rules that skip fenced
   code), and a sample `.vale.ini`.
-- `scripts/docs_lint.py`: the structure checker.
+- `scripts/docs_lint.py`: the structure checker. `scripts/gen_vale_scripts.py`
+  generates the Tengo scripts from one template (`--check` finds stale ones).
 
-Tests are in `tests/docs-style/`: `python3 -m pytest tests/docs-style`.
+Run `python3 -m pytest tests/docs-style` for the tests.

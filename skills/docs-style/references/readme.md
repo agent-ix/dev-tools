@@ -1,7 +1,8 @@
 # README layout
 
 A README is one page with a fixed layout. Check it with
-`docs_lint.py --type readme README.md` (or by file name).
+`docs_lint.py README.md`. A file named `README.md` given directly, or at the top of a
+directory argument, is typed as a README. A `type:` in frontmatter always wins.
 
 1. Title and badges.
 2. Two paragraphs: `<name> is <what it is>.` Then what it does for the reader,

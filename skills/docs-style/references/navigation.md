@@ -9,29 +9,33 @@ sidebar-depth). A third level hides pages.
 
 ## Five to nine pages per group
 
-A group has 5 to 9 pages (rule: group-size). A group of 29 pages is several
-topics. Merge pages, or split the group by reader task.
+A group has 5 to 9 pages (rule: group-size). A group of 29 pages is several topics.
+Merge pages, or split the group by reader task.
 
-Bad: the Probability group listing 29 pages.
-Good: Probability with five pages: models, claims, sampling, exact checking,
-results.
+Bad: the Probability group lists 29 pages.
 
-## Labels are reader words
+Good: Probability has five pages: models, claims, sampling, exact checking, results.
 
-A label names what the reader wants, not a folder (rule: reader-word-labels).
+## Labels use reader words
+
+A label names what the reader wants, using words the reader knows (rule:
+reader-word-labels). A folder name is a poor label.
 
 Bad: `model-checking`, `cli`, `adr`.
+
 Good: Check a model, Command line, Decisions.
 
 ## One home per topic
 
 A topic has one page (rule: one-home-per-topic). Outcomes, limits, counterexamples
-and profiles are each explained once and linked from the others. Two pages with
-the same title or headings are merged and the removed URL redirects to the
-survivor (rules: duplicate-title, near-duplicate-topic).
+and profiles are each explained once and linked from the others. Two pages with the
+same title or headings are merged, and the removed URL redirects to the survivor
+(rules: duplicate-title, near-duplicate-topic).
 
 ## Order
 
-Order a section for a newcomer: concepts, then tutorials, then how-to guides,
-then reference. Internal repository documents (decision records, audits,
-acceptance packets) are not in the public sidebar.
+Order a section for a newcomer: concepts, then tutorials, then how-to guides, then
+reference. Order the concept and tutorial pages as a learning track, so each page
+uses only what earlier pages introduced (rule: learning-track-order). Internal
+repository documents such as decision records, audits and acceptance packets stay
+out of the public sidebar.

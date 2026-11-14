@@ -3,11 +3,15 @@ message: "'%s' is used without a definition. Spell it out once, then use the acr
 link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/framing.md
 level: suggestion
 scope: text
-# An acronym of three or more capitals needs "Full Name (ABC)" earlier in the page.
+# An acronym of three or more capitals needs "the full name (ABC)" earlier in the page.
 first: '\b([A-Z]{3,})\b'
-second: '(?:\b[A-Z][a-z]+ )+\(([A-Z]{3,})\)'
+second: '(?:\b[A-Za-z][\w-]* ){1,6}\(([A-Z]{3,})\)'
 # Add your product's own names (for example FSL) in your copy of this list.
 exceptions:
+  - CLAUDE
+  - AGENTS
+  - CONTRIBUTING
+  - CHANGELOG
   - README
   - ISO
   - IEC

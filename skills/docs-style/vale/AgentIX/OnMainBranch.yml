@@ -6,6 +6,7 @@ ignorecase: true
 nonword: true
 scope: sentence
 tokens:
-  - '\bon (the )?main( branch)?\b'
+  - '\bon (the )?main branch\b'
+  - '\bon main\b(?! (page|thread|screen|path|menu|window|loop|function|tab))'
   - '\bat origin/main\b'
   - '\bunreleased\b'

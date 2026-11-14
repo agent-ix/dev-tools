@@ -1,9 +1,24 @@
 extends: existence
-message: "Internal id '%s' in prose. Requirement, test and decision ids belong in the spec, not in the docs."
+message: "Internal id '%s' in prose. Requirement, test, ticket and decision ids belong in the spec or the tracker."
 link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
 level: error
 nonword: true
 scope: text
+# Any uppercase key with a number: FR-43, TC-971, STD-123, V1-TEMP-021, ADR-7.
 tokens:
-  - '\b(FR|NFR|StR|SR|TC|AC|ADR|US|QSL|IR|TL)-\d+\b'
+  - '\b[A-Z][A-Z0-9]{1,5}(-[A-Z0-9]+)*-\d+\b'
   - '\b(Plan|Task)-\d+\b'
+# Names that look like ids but are not. Add your own (regular expressions).
+exceptions:
+  - 'SHA-\d+'
+  - 'UTF-\d+'
+  - 'ISO-\d+'
+  - 'IEC-\d+'
+  - 'DO-\d+'
+  - 'RFC-\d+'
+  - 'MD-\d+'
+  - 'AES-\d+'
+  - 'TLS-\d+'
+  - 'HTTP-\d+'
+  - 'RS-\d+'
+  - 'COVID-\d+'

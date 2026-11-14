@@ -1,5 +1,5 @@
 extends: script
-message: "Test name in prose. The example stands on its own."
+message: "Test name in prose. An example needs no pointer to a test."
 link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
 level: error
 scope: raw

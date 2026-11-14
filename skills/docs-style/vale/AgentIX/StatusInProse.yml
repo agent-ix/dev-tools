@@ -12,5 +12,7 @@ tokens:
   - '\bis still changing\b'
   - '\bspecified only\b'
   - '\bnot yet (built|implemented|shipped|released)\b'
+  - '\bnot built\b'
+  - '\bspecified\b[^.]{0,20}\bnot (yet )?(built|implemented)\b'
   - '\bwork in progress\b'
   - '^status:'

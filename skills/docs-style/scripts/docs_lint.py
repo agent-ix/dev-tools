@@ -2,9 +2,13 @@
 """Structure checks for Markdown docs that Vale cannot express.
 
 Usage:
-    docs_lint.py [--check] [--type TYPE] [--level LEVEL] PATH...
+    docs_lint.py [--check] [--type TYPE] [--level LEVEL] [--ignore IDS] PATH...
+    docs_lint.py --vale-sections TYPE=GLOB[,TYPE=GLOB...]
 
 PATH is a Markdown file or a directory (searched for .md and .mdx files).
+A `type:` in frontmatter wins; --type fills in for files without one. A file
+named README.md given directly, or at the top of a directory argument, is a
+readme.
 Every finding is one line: ``path:line: rule-id: message``. Rule ids come from
 ``rules/catalog.yaml``. With ``--check`` the exit status is 1 when anything is
 reported. Standard library only.
@@ -35,16 +39,19 @@ MAX_CELL_WORDS = 12
 MAX_CODE_CELL_CHARS = 29
 MAX_TABLE_ROWS = 12
 
+PAGE_TYPE_SET = frozenset(PAGE_TYPES)
 FIGURE_RE = re.compile(r"!\[|<img\b|<picture\b|<figure\b|<svg\b", re.I)
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-FENCE_RE = re.compile(r"^\s*(```|~~~)")
+FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+FENCE_CLOSE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})[ \t]*$")
+DELIM_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 ORDERED_RE = re.compile(r"^\s*\d+[.)]\s+\S")
 STOPWORDS = {"the", "a", "an", "of", "and", "how", "to", "in", "for", "is", "what", "with", "on"}
 
 # Required sections per page type: (description, test over the list of headings).
 REQUIRED = {
     "concept": [
-        ("an 'Example' section", lambda hs: any(re.search(r"\bexample\b", h, re.I) for h in hs)),
+        ("an 'Example' section", lambda hs: any(re.search(r"\bexamples?\b", h, re.I) for h in hs)),
         ("a 'Next steps' section", lambda hs: any(re.fullmatch(r"(next steps|where to go next)", h, re.I) for h in hs)),
     ],
     "tutorial": [
@@ -56,7 +63,7 @@ REQUIRED = {
         ("an 'Expected output' or 'Result' section", lambda hs: any(re.fullmatch(r"(expected output|result)", h, re.I) for h in hs)),
     ],
     "reference": [
-        ("a Syntax, Usage, Options or Fields section", lambda hs: any(re.fullmatch(r"(syntax|usage|options|fields|commands)", h, re.I) for h in hs)),
+        ("a Syntax, Usage, Options or Fields section", lambda hs: any(re.fullmatch(r"(syntax|usage|options|fields)", h, re.I) for h in hs)),
         ("an Example or Examples section", lambda hs: any(re.fullmatch(r"examples?", h, re.I) for h in hs)),
     ],
     "status": [
@@ -68,6 +75,12 @@ REQUIRED = {
         ("a 'License' section", lambda hs: any(re.fullmatch(r"licen[sc]e", h, re.I) for h in hs)),
     ],
 }
+
+
+# Headings a page type requires or a template repeats; they say nothing about the topic.
+BOILERPLATE_HEADING_RE = re.compile(
+    r"(examples?|next steps|where to go next|before you start|step \d+.*|expected output|result|"
+    r"syntax|usage|options|fields|getting started|licen[sc]e|what runs today|the problem)", re.I)
 
 
 class Finding(NamedTuple):
@@ -99,9 +112,9 @@ def load_catalog(path: Path = CATALOG) -> Dict[str, Dict[str, object]]:
 class Page:
     """A Markdown file split into frontmatter, prose lines, headings and tables."""
 
-    def __init__(self, path: Path, forced_type: Optional[str]) -> None:
+    def __init__(self, path: Path, forced_type: Optional[str], readme_ok: bool = False) -> None:
         self.path = path
-        self.lines = path.read_text(encoding="utf-8").splitlines()
+        self.lines = path.read_text(encoding="utf-8-sig").splitlines()
         self.frontmatter: Dict[str, str] = {}
         self.body_start = 0
         self._split_frontmatter()
@@ -113,8 +126,8 @@ class Page:
             m = HEADING_RE.match(self.lines[i])
             if m:
                 self.headings.append((i + 1, len(m.group(1)), m.group(2)))
-        self.type = forced_type or self.frontmatter.get("type")
-        if not self.type and path.name.lower() in ("readme.md", "readme.mdx"):
+        self.type = self.frontmatter.get("type") or forced_type
+        if not self.type and readme_ok and path.name == "README.md":
             self.type = "readme"
 
     def _split_frontmatter(self) -> None:
@@ -129,16 +142,21 @@ class Page:
                     return
 
     def _fence_mask(self) -> List[bool]:
+        """Mark lines inside fenced code. A fence closes on the same character, a run
+        at least as long as the opener, and no info string."""
         mask = [False] * len(self.lines)
         fence: Optional[str] = None
         for i in range(self.body_start, len(self.lines)):
-            m = FENCE_RE.match(self.lines[i])
-            if fence is None and m:
-                fence = m.group(1)
+            line = self.lines[i]
+            if fence is None:
+                m = FENCE_OPEN_RE.match(line)
+                if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                    fence = m.group(1)
+                    mask[i] = True
+            else:
                 mask[i] = True
-            elif fence is not None:
-                mask[i] = True
-                if m and m.group(1) == fence:
+                m = FENCE_CLOSE_RE.match(line)
+                if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
                     fence = None
         return mask
 
@@ -159,17 +177,21 @@ class Page:
         return n
 
     def tables(self) -> List[Tuple[int, List[List[str]]]]:
-        """Return (first line no, rows) for each Markdown table outside fences."""
+        """Return (first line no, rows) for each Markdown table outside fences.
+
+        Outer pipes are optional and delimiter cells may use a single dash."""
         found: List[Tuple[int, List[List[str]]]] = []
         i = self.body_start
-        while i < len(self.lines):
+        n = len(self.lines)
+        while i < n:
             line = self.lines[i]
-            if (not self.in_fence[i] and line.lstrip().startswith("|") and i + 1 < len(self.lines)
-                    and re.match(r"^\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*$", self.lines[i + 1])):
+            if (not self.in_fence[i] and "|" in line and i + 1 < n and not self.in_fence[i + 1]
+                    and "|" in self.lines[i + 1] and DELIM_RE.match(self.lines[i + 1])
+                    and len(split_row(line)) == len(split_row(self.lines[i + 1]))):
                 start = i
                 rows = [split_row(line)]
                 i += 2
-                while i < len(self.lines) and self.lines[i].lstrip().startswith("|") and not self.in_fence[i]:
+                while i < n and self.lines[i].strip() and "|" in self.lines[i] and not self.in_fence[i]:
                     rows.append(split_row(self.lines[i]))
                     i += 1
                 found.append((start + 1, rows))
@@ -186,6 +208,8 @@ def split_row(line: str) -> List[str]:
     s = line.strip()
     if s.startswith("|"):
         s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
     j = 0
     while j < len(s):
         ch = s[j]
@@ -201,9 +225,7 @@ def split_row(line: str) -> List[str]:
         else:
             buf.append(ch)
         j += 1
-    tail = "".join(buf).strip()
-    if tail:
-        cells.append(tail)
+    cells.append("".join(buf).strip())
     return cells
 
 
@@ -278,6 +300,13 @@ def topic_tokens(title: str) -> frozenset:
     return frozenset(w.rstrip("s") for w in words if w not in STOPWORDS)
 
 
+def topic_headings(page: Page) -> set:
+    """Level-2 headings that say something about the topic (not template headings)."""
+    if page.type in ("reference", "status"):
+        return set()
+    return {h[2].lower() for h in page.headings if h[1] == 2 and not BOILERPLATE_HEADING_RE.fullmatch(h[2])}
+
+
 def check_set(pages: List[Page]) -> List[Finding]:
     out: List[Finding] = []
     seen_titles: Dict[str, Page] = {}
@@ -295,9 +324,9 @@ def check_set(pages: List[Page]) -> List[Finding]:
             if not a.title or not b.title or a.title.lower() == b.title.lower():
                 continue
             ta, tb = topic_tokens(a.title), topic_tokens(b.title)
-            title_close = bool(ta) and bool(tb) and (ta <= tb or tb <= ta) and len(ta & tb) >= 2
-            ha = {h[2].lower() for h in a.headings if h[1] == 2}
-            hb = {h[2].lower() for h in b.headings if h[1] == 2}
+            union = ta | tb
+            title_close = len(ta & tb) >= 2 and len(ta & tb) / len(union) >= 0.8
+            ha, hb = topic_headings(a), topic_headings(b)
             shared = ha & hb
             heads_close = len(shared) >= 3 and len(shared) >= 0.6 * min(len(ha), len(hb))
             if title_close or heads_close:
@@ -306,28 +335,71 @@ def check_set(pages: List[Page]) -> List[Finding]:
     return out
 
 
-def collect(paths: List[str]) -> List[Path]:
-    files: List[Path] = []
+def collect(paths: List[str]) -> List[Tuple[Path, bool]]:
+    """Return (file, readme_ok). Only README.md named directly or at the top of a
+    directory argument may be typed as a readme by its name."""
+    files: List[Tuple[Path, bool]] = []
     for raw in paths:
         p = Path(raw)
         if p.is_dir():
-            files.extend(sorted(x for x in p.rglob("*") if x.suffix in (".md", ".mdx") and ".git" not in x.parts and "node_modules" not in x.parts))
+            for x in sorted(p.rglob("*")):
+                if x.suffix in (".md", ".mdx") and ".git" not in x.parts and "node_modules" not in x.parts:
+                    files.append((x, x.parent == p))
         else:
-            files.append(p)
+            files.append((p, True))
     return files
+
+
+def vale_sections(spec: str, catalog: Dict[str, Dict[str, object]]) -> str:
+    """Print .vale.ini sections that apply each Vale rule's `applies_to` per path glob."""
+    out: List[str] = []
+    for item in spec.split(","):
+        kind, _, glob = item.partition("=")
+        kind = kind.strip()
+        if kind not in PAGE_TYPE_SET or not glob.strip():
+            raise SystemExit("--vale-sections needs TYPE=GLOB pairs; TYPE is one of %s" % ", ".join(PAGE_TYPES))
+        off = sorted(r for r, d in catalog.items()
+                     if d.get("check") == "vale" and "all" not in d["applies_to"] and kind not in d["applies_to"])  # type: ignore[operator]
+        out.append("[%s]" % glob.strip())
+        out.extend("AgentIX.%s = NO" % "".join(w.capitalize() for w in r.split("-")) for r in off)
+        out.append("")
+    return "\n".join(out)
+
+
+def applies(rule: Dict[str, object], page_type: Optional[str]) -> bool:
+    scope = rule.get("applies_to") or ["all"]
+    return page_type is None or "all" in scope or page_type in scope  # type: ignore[operator]
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("paths", nargs="+", help="Markdown files or directories")
+    ap.add_argument("paths", nargs="*", help="Markdown files or directories")
     ap.add_argument("--check", action="store_true", help="exit 1 when any finding is reported")
     ap.add_argument("--type", choices=PAGE_TYPES, help="page type for files without a `type:` frontmatter key")
     ap.add_argument("--level", choices=LEVELS, default="warning", help="lowest severity to report (default: warning)")
+    ap.add_argument("--ignore", default="", help="comma-separated rule ids to skip")
+    ap.add_argument("--catalog", type=Path, default=CATALOG, help="rule catalog (default: the skill's catalog.yaml)")
+    ap.add_argument("--vale-sections", metavar="TYPE=GLOB,...", help="print .vale.ini sections that apply applies_to per glob, then exit")
     args = ap.parse_args(argv)
 
-    catalog = load_catalog()
+    catalog = load_catalog(args.catalog)
+    if args.vale_sections:
+        print(vale_sections(args.vale_sections, catalog))
+        return 0
+    if not args.paths:
+        ap.error("PATH is required")
+    ignore = {x.strip() for x in args.ignore.split(",") if x.strip()}
     floor = LEVELS.index(args.level)
-    pages = [Page(f, args.type) for f in collect(args.paths)]
+
+    pages: List[Page] = []
+    unreadable = 0
+    for path, readme_ok in collect(args.paths):
+        try:
+            pages.append(Page(path, args.type, readme_ok))
+        except (OSError, UnicodeDecodeError) as err:
+            print("%s:1: internal: cannot read file: %s" % (path, err.__class__.__name__))
+            unreadable = 1
+    by_path = {str(pg.path): pg for pg in pages}
     findings: List[Finding] = []
     for page in pages:
         findings.extend(check_page(page))
@@ -338,9 +410,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         if f.rule not in catalog:
             print("%s:%d: internal: rule id '%s' is not in the catalog" % (f.path, f.line, f.rule), file=sys.stderr)
             return 2
-        if LEVELS.index(str(catalog[f.rule]["severity"])) >= floor:
-            print("%s:%d: %s: %s" % f)
-            shown += 1
+        rule = catalog[f.rule]
+        if f.rule in ignore or LEVELS.index(str(rule["severity"])) < floor:
+            continue
+        if not applies(rule, by_path[f.path].type if f.path in by_path else None):
+            continue
+        print("%s:%d: %s: %s" % f)
+        shown += 1
+    if unreadable:
+        return 2
     return 1 if (args.check and shown) else 0
 
 
