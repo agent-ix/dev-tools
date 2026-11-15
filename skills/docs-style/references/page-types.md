@@ -3,8 +3,8 @@
 Every page has one type. The type decides who the page is for, which sections it
 has and what it leaves out. The types follow Diátaxis: a page is a tutorial, a
 how-to, a reference or an explanation (called a concept page here). A fifth type,
-status, holds generated state. A README is a sixth page with its own layout in
-[readme.md](readme.md).
+status, holds generated state. A sixth type, index, orients a reader in a section.
+A README is a seventh page with its own layout in [readme.md](readme.md).
 
 Declare the type in frontmatter (`type: concept`). A page that needs two types is
 split into two pages (rules: one-type-per-page, page-type-declared). The structure
@@ -20,6 +20,7 @@ The table lists each type, the question its reader asks and the word budget.
 | how-to | How do I do this one task? | 700 |
 | reference | What exactly is the syntax, option or rule? | 2500 |
 | status | What runs today? | 3000 |
+| index | Which page do I read for this? | 300 |
 
 The budget counts the words a reader reads. It skips code fences and
 frontmatter, strips HTML markup, and counts the alt text of a figure once even
@@ -28,7 +29,7 @@ a warning. A page over it often covers two topics; a page that answers one reade
 question may stay over it. A page that answers two reader questions is split
 whatever its length (rule: split-by-reader-question).
 
-Every page except status and reference states what the reader should know first,
+Every page except status, reference and index states what the reader should know first,
 in a line near the top or in a `Before you start` section (rule: prerequisites-stated).
 Name the earlier pages: "You should know what a trace is" links to the page that
 defines a trace.
@@ -51,7 +52,10 @@ newcomer would make with this page's example, and corrects it (rule:
 common-misreading). Say so once, in one short paragraph. Find the misreading by
 running the example wrong once and reading what the tool says; write down a
 misreading you verified, never one you assume. A guess or a sentence from another
-page is not a finding.
+page is not a finding. The shown output is the output of the wrong version; output
+that shows the right version working proves nothing (rule: common-misreading). On a
+page about evidence or integrity, the misreading is what the check does not detect,
+and you run the attack to show it.
 
 A teaching page shows the command a reader types and a trimmed result that
 contains only fields the page has defined. It keeps shell pipelines and
@@ -61,6 +65,8 @@ prose.
 
 Banned: shell pipelines and test plumbing in command examples, syntax tables,
 option lists, error codes, requirement ids, install steps, numbered procedures. Those belong on other pages (rule: one-type-per-page).
+An Example section holds one worked case. A list or table of links under "Example"
+is an index, so it goes on an index page (rule: example-is-link-list).
 
 Bad opening, a definition buried in an inventory:
 
@@ -142,6 +148,14 @@ an example that has a deliberate bug.
 Banned: choices between alternatives, explanations longer than a paragraph and
 reference tables. Link to the concept page.
 
+A step that depends on a run that varies, such as an agent run, says what varies.
+It then gives the reader a fixed project to use for the steps that follow, so the
+reader's own result cannot diverge from step 3 on.
+
+Every command runs somewhere. The first step gets the project and changes into it,
+and steps that share shell state say to stay in one terminal (rule:
+how-to-where-commands-run).
+
 ### Worked skeleton: tutorial
 
 ````markdown
@@ -188,6 +202,11 @@ against a rule, run ...". It is not a definition.
 
 Banned: background, history, definitions, alternatives. Link to the concept page.
 
+The first step puts the reader where the commands run: it gets the project and
+changes into it. Commands that share shell state go in one block, or the page says
+to stay in one terminal (rule: how-to-where-commands-run). A page that shows output
+pins the version that produced it, in the install command (rule: how-to-pin-version).
+
 Bad opening:
 
 ```text
@@ -226,7 +245,20 @@ The reader looks something up and wants it complete and scannable.
 
 Required: a Syntax, Usage, Options or Fields section, and an Examples section
 with a minimal example for each form (rule: reference-example-per-form). Add an
-errors section when the thing can fail.
+errors section when the thing can fail. A refusal earns its own example only when it
+shows a mistake a reader makes. A refusal the errors table states in one row needs no
+example.
+
+Check every statement against the source, and keep the README and the old page as
+leads and never evidence (rule: readme-secondary-source). Every function, type, variant,
+flag and key on the page exists, on the type or module the page names (rule:
+api-name-exists).
+
+Bad: "`Document::from_digest` builds a document." The function is
+`Digest::into_document`; `from_digest` does not exist.
+
+Good: "`Digest::into_document` builds a document." The name was found in the source,
+on `Digest`.
 
 Banned: teaching prose, motivation and running examples. Link to the concept page.
 A reference page opens with `<name> is <what it is>.` and then goes to the forms.
@@ -262,6 +294,40 @@ The table lists each form of an interval and what it selects.
 An interval with `a` greater than `b` is refused with `invalid_interval`.
 ````
 
+## Index
+
+The reader is in a section and asks which page to read. An index is a short page
+that orients and lists the section's pages. Required: a first sentence that says
+what the section holds, and a list of links, each followed by one sentence that
+says what the reader finds there (rule: index-entry-sentence). The budget is 300
+words.
+
+Banned: an Example heading, a table, a code block, numbered steps and any teaching
+(rule: index-page-contents). A list of links is not an example, so the same list on
+a concept page under "Example" is a defect (rule: example-is-link-list). Declare
+`type: index`.
+
+Bad: a concept page whose "Example" section is a table of links to the section's
+pages.
+
+Good: an index page.
+
+````markdown
+---
+title: Libraries
+type: index
+---
+
+The libraries are the Rust crates that read, check and write specifications.
+
+- [parser-lib](parser-lib.md): reads a document into a tree and reports syntax errors.
+- [checker-lib](checker-lib.md): checks a tree against a rule set.
+- [writer-lib](writer-lib.md): writes a tree back to a file.
+````
+
+A library reference page is labeled with the library's own name (rule:
+reader-word-labels).
+
 ## Status
 
 Generated, one per section, titled "What runs today". It lists what is available,
@@ -274,6 +340,11 @@ it by hand.
 A page with a definition, a syntax table, setup steps and a status note is four
 pages. Keep the part that matches the page's main reader question and move the
 rest. If a part has no home, delete it.
+
+When pages are merged or deleted, the author lists every lost fact in a handoff
+file. Each entry has the fact, the old path with the commit to read it from, and the
+new page or the reason it was cut. The reviewer checks the list against the removed
+pages (rule: dropped-facts-listed).
 
 Split a page when it answers two reader questions, even when it is under its length
 budget (rule: split-by-reader-question). "What is a profile?" and "How do I pick

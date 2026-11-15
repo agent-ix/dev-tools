@@ -20,8 +20,8 @@ covers the words, the page types and the structure.
 
 ## Workflow
 
-1. **Pick the page type.** A page is one of concept, tutorial, how-to, reference
-   or status. A README has its own layout. Put `type:` in the frontmatter.
+1. **Pick the page type.** A page is one of concept, tutorial, how-to, reference,
+   status or index (a short page that orients and lists a section's pages). A README has its own layout. Put `type:` in the frontmatter.
    [page-types.md](references/page-types.md), [readme.md](references/readme.md).
 2. **Write to the guide.** Framing first (reader, task, one idea, one running
    example), then phrasing, tables, and what stays out.
@@ -41,7 +41,10 @@ covers the words, the page types and the structure.
      `--level suggestion` shows everything; `--ignore ids` skips rules.
 4. **Judge the `review` rules** in the catalog (`check: review`). No tool checks
    them. Read the page as someone who has never heard of the project.
-5. **Report** findings, then fix them.
+5. **Look at the rendered page.** For a new page, take screenshots at phone and
+   desktop width, in light and dark. A table clipped at phone width becomes a list
+   (rule: rendered-page-checked).
+6. **Report** findings, then fix them.
 
 ## Review procedure
 
@@ -61,6 +64,19 @@ covers the words, the page types and the structure.
 
    Give a before and after for each cut and a rewritten lede. Do not apply edits
    until asked, unless the task is to apply them.
+6. When pages were merged or deleted, read the author's list of dropped facts
+   against the removed pages, at the commit the list names. Report each fact that
+   is on a removed page, is not on the list and is not on a surviving page.
+
+## Independent review
+
+Every wave of pages needs a review by someone who did not write it and who runs
+the examples. The reviewer runs each step on a clean machine, in the shell a reader
+uses. A passing lint is no evidence of quality. In every wave of a large rewrite,
+lint reported no findings on pages with serious accuracy and teaching defects.
+The defects were wrong API names, wrong exit codes, commands that fail as written
+and tool gaps written as rules. Lint reads words. Only a run, and a check against
+the source and the specification, finds them.
 
 ## The rules in short
 
@@ -70,7 +86,10 @@ covers the words, the page types and the structure.
   version or release state.
 - Examples run: taken from tests, executed in CI, output generated. A teaching
   page shows the command and a short result, with no shell plumbing, and never
-  presents a tool gap as a rule.
+  presents a tool gap as a rule. A statement about an API, a command or a behavior
+  is confirmed in the code or by a run, never copied from a README.
+- A how-to says where its commands run and pins the version whose output it shows.
+- A section index lists the section's pages; it has no example, table or steps.
 - One vocabulary for results per page set; every term in shown output is defined
   or cut.
 - A learning track introduces terms in order; each page says what to know first.
@@ -82,6 +101,9 @@ covers the words, the page types and the structure.
   or version pins in prose. Status lives on the generated status page.
 - No lists of what the thing does not do, unconnected systems, disclaimers,
   maintainer process or history.
+- No bookkeeping: open items, mistakes copied from a README, how the
+  page was checked, why a build fails.
+- No table copied by hand from program output where the site can generate it.
 
 Full text and examples are in the references. Every rule is in the catalog.
 

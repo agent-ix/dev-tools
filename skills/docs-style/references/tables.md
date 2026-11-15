@@ -106,6 +106,26 @@ The table lists each profile and what one tick means in it.
 A table of more than 12 rows in a concept, tutorial, how-to or README page is split
 by theme (rule: table-too-long). Give each part its own heading and introduction.
 
+## Say whether the table is complete
+
+A table introduced with "The keys are:" reads as the full list (rule:
+complete-table-claim). Give every key, or say "The main keys are name and version;
+the others are in the schema."
+
+## Generate tables from output
+
+A table copied by hand from program output goes stale and hides mistakes (rule:
+no-hand-copied-output). Where the site can generate the table from the tool, it
+does. Where no generator exists, show one real run in a fenced block with the
+command that made it, say the rest in a sentence, and ask for a generator. A table
+of facts the author knows, such as a truth table, is not program output.
+
+## Check the table at phone width
+
+The author opens every new page at phone and desktop width, in light and dark, and
+looks at the tables (rule: rendered-page-checked). A table that clips at phone width
+becomes a list.
+
 ## Do not restate
 
 A table and the paragraph after it do not say the same thing (rule:

@@ -1,0 +1,17 @@
+extends: existence
+message: "Bookkeeping in prose ('%s'). How the page was checked, README or code differences and build state belong in the pull request or the tracker."
+link: https://github.com/agent-ix/dev-tools/blob/main/skills/docs-style/references/status-and-internals.md
+level: warning
+ignorecase: true
+nonword: true
+scope: sentence
+tokens:
+  - '\bthe readme (says|states|claims|lists|describes|disagrees|is (wrong|out of date|stale))\b'
+  - '\b(readme|docs|documentation) (and|versus|vs\.?) (the )?(code|readme|source)\b'
+  - '\b(differs?|disagrees?) from the (code|readme|documentation)\b'
+  - '\breadme drift\b'
+  - '\b(was|were) (compiled|checked|verified) against\b'
+  - '\b(every|each) (name|example|command|link) (was|were) (compiled|run|checked|verified)\b'
+  - '\b\d+ commits? (behind|ahead|since|after|on top of)\b'
+  - '\bthe build (fails|failed|breaks|broke) (because|when|until)\b'
+  - '\bfails to build because\b'

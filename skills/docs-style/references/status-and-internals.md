@@ -33,6 +33,29 @@ No `quire-spec` command evaluates a clause over a trace, so the page badge is `p
 Good: delete the sentence. The status page lists what runs (rules:
 no-command-runs, page-self-reference).
 
+## Badge the part that differs
+
+Put one badge on the smallest part that differs: a form, a table row, a field or a
+definition-list term. A page that mixes running and missing material carries no page
+badge. When the checker accepts a form and no command decides it, the checker needs
+no badge and the section about deciding gets one. A concept page has no "Planned"
+section; it names a future use inline with one badge and links the status page.
+
+## Bookkeeping stays out of prose
+
+These notes help the maintainer and not the reader. They cover how the page was
+checked, where a README is wrong, why a build fails, open items and commit counts
+behind a tag (rule: bookkeeping-in-prose). They go in the pull request or the tracker.
+
+Bad:
+
+```text
+Every name on this page was compiled against the tag. The README lists a flag that
+the code does not have. The release is 14 commits behind main.
+```
+
+Good: delete the three sentences. The pull request records the check.
+
 ## Internals that stay out of prose
 
 <!-- vale AgentIX.CrateNameInProse = NO -->
@@ -44,7 +67,8 @@ no-command-runs, page-self-reference).
 - Issue and pull request references such as `repo#123` (rule: issue-ref-in-prose).
 - Rust paths such as `TemporalProfile::ALL` (rule: rust-path-in-prose).
 - Crate and module names such as `qsl-semantics` (rule: crate-name-in-prose). Edit
-  the prefix list in `scripts/gen_vale_scripts.py` and regenerate the scripts.
+  the prefix list in `scripts/gen_vale_scripts.py` and regenerate the scripts. A
+  library's own reference page names the library; turn the rule off for that path.
 - Source paths such as `qsl-semantics/src/check/profile.rs` (rule:
   source-path-in-prose).
 - Test names and pointers to tests (rule: test-name-in-prose). An example needs no
@@ -81,8 +105,9 @@ Good:
 ## Banned headings
 
 These headings announce bookkeeping (rule: banned-heading): `Gaps`, `Known gaps`,
-`Tests`, `Status of this page`, `What was verified`, `What runs`, `Related pages` and
-`Open questions`. A status page uses the heading "What runs today", which the rule
+`Tests`, `Status of this page`, `What was verified`, `What runs`, `Related pages`,
+`Open questions`, `Open items`, `Verification notes`, `Why the build fails`,
+`README drift` and `Differences from the code`. A status page uses the heading "What runs today", which the rule
 does not match; it only needs `AgentIX.StatusInProse = NO` for its path in
 `.vale.ini`.
 

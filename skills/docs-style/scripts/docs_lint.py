@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 CATALOG = Path(__file__).resolve().parent.parent / "rules" / "catalog.yaml"
-PAGE_TYPES = ("concept", "tutorial", "how-to", "reference", "status", "readme")
+PAGE_TYPES = ("concept", "tutorial", "how-to", "reference", "status", "index", "readme")
 LEVELS = ("suggestion", "warning", "error")
 
 # Words in prose (outside code fences and frontmatter) per page type.
@@ -32,6 +32,7 @@ LENGTH_BUDGET = {
     "how-to": 700,
     "reference": 2500,
     "status": 3000,
+    "index": 300,
     "readme": 1200,
 }
 MAX_TABLE_COLUMNS = 4
@@ -87,6 +88,11 @@ DESCRIPTION_RULES: Dict[str, List[str]] = {
 MAX_SENTENCE_WORDS = 30
 
 # Command lines in teaching pages that carry harness plumbing (rule: concept-no-harness).
+# Link list items, `Example` headings and numbered steps in section indexes and Example sections.
+LINK_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]+\]\(")
+EXAMPLE_HEADING_RE = re.compile(r"\bexamples?\b", re.I)
+MIN_LINK_LIST = 3
+
 SHELL_LANGS = frozenset(("sh", "bash", "shell", "console", "zsh", "terminal", "shell-session", "shellsession"))
 JQ_RE = re.compile(r"\|\s*jq\b")
 EXIT_STATUS_RE = re.compile(r"\$\?")
@@ -113,6 +119,7 @@ REQUIRED = {
     "status": [
         ("a 'What runs today' section", lambda hs: any(re.fullmatch(r"what runs today", h, re.I) for h in hs)),
     ],
+    "index": [],  # a list of links, checked in check_page
     "readme": [
         ("a 'Getting started' section", lambda hs: any(re.fullmatch(r"getting started", h, re.I) for h in hs)),
         ("a 'Usage' section", lambda hs: any(re.fullmatch(r"usage", h, re.I) for h in hs)),
@@ -317,6 +324,10 @@ def check_page(page: Page) -> List[Finding]:
             steps = sum(1 for i, l in enumerate(page.lines) if i >= page.body_start and not page.in_fence[i] and ORDERED_RE.match(l))
             if steps < 2:
                 out.append(Finding(p, 1, "required-sections", "how-to page needs numbered steps"))
+        if page.type == "index":
+            out.extend(index_findings(page))
+        if page.type in ("concept", "reference"):
+            out.extend(example_link_list_findings(page))
         words = page.prose_words()
         budget = LENGTH_BUDGET[page.type]
         if words > budget:
@@ -372,6 +383,53 @@ def check_page(page: Page) -> List[Finding]:
             and prev_line.endswith((".", ":", "?"))
         if not ok:
             out.append(Finding(p, start, "table-without-intro", "table is not introduced by a sentence"))
+    return out
+
+
+def prose_line_indexes(page: Page) -> List[int]:
+    return [i for i in range(page.body_start, len(page.lines)) if not page.in_fence[i]]
+
+
+def index_findings(page: Page) -> List[Finding]:
+    """A section index has a list of links and no Example heading, table, code block or numbered steps."""
+    p = str(page.path)
+    out: List[Finding] = []
+    links = sum(1 for i in prose_line_indexes(page) if LINK_ITEM_RE.match(page.lines[i]))
+    if links < 2:
+        out.append(Finding(p, 1, "required-sections", "index page needs a list of the section's pages, each a link"))
+    for line_no, _, text in page.headings:
+        if EXAMPLE_HEADING_RE.search(text):
+            out.append(Finding(p, line_no, "index-page-contents", "index page has an Example heading '%s'; an index has no example" % text))
+    for start, _ in page.tables():
+        out.append(Finding(p, start, "index-page-contents", "index page has a table; use a list of links with one sentence each"))
+    if any(page.in_fence[i] for i in range(page.body_start, len(page.lines))):
+        first = next(i for i in range(page.body_start, len(page.lines)) if page.in_fence[i])
+        out.append(Finding(p, first + 1, "index-page-contents", "index page has a code block"))
+    steps = [i for i in prose_line_indexes(page) if ORDERED_RE.match(page.lines[i]) and not LINK_ITEM_RE.match(page.lines[i])]
+    if len(steps) >= 2:
+        out.append(Finding(p, steps[0] + 1, "index-page-contents", "index page has numbered steps"))
+    return out
+
+
+def example_link_list_findings(page: Page) -> List[Finding]:
+    """An Example section with links and no code block is an index in the wrong place."""
+    p = str(page.path)
+    out: List[Finding] = []
+    heads = page.headings
+    for k, (line_no, level, text) in enumerate(heads):
+        if not EXAMPLE_HEADING_RE.search(text):
+            continue
+        end = len(page.lines)
+        for later_no, later_level, _ in heads[k + 1:]:
+            if later_level <= level:
+                end = later_no - 1
+                break
+        rows = range(line_no, end)
+        if any(page.in_fence[i] for i in rows):
+            continue
+        links = sum(1 for i in rows if LINK_ITEM_RE.match(page.lines[i]) or ("|" in page.lines[i] and "](" in page.lines[i]))
+        if links >= MIN_LINK_LIST:
+            out.append(Finding(p, line_no, "example-is-link-list", "'%s' lists %d links and shows no example; put links under Next steps or on an index page" % (text, links)))
     return out
 
 

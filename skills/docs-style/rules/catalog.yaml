@@ -204,8 +204,8 @@ rules:
     severity: error
     check: vale
     applies_to: [concept, tutorial, how-to, reference, readme]
-    rationale: "These headings announce bookkeeping; the content belongs elsewhere or nowhere."
-    bad: "## Status of this page"
+    rationale: "These headings announce bookkeeping, such as open items or differences between the docs and the code; the content belongs in the tracker or nowhere."
+    bad: "## Open items"
     good: "(Delete the section.)"
   - id: no-test-section
     severity: warning
@@ -214,6 +214,20 @@ rules:
     rationale: "A reader needs one example that works, not a list of tests."
     bad: "A section listing test names that cover the page."
     good: "One example taken from the tests."
+  - id: bookkeeping-in-prose
+    severity: warning
+    check: vale
+    applies_to: [concept, tutorial, how-to, reference, readme]
+    rationale: "Notes on how the page was checked, where the README disagrees with the code or why a build fails help the maintainer, not the reader. They go in the pull request or the tracker."
+    bad: "Every name on this page was compiled against the 0.6.0 tag. The README says otherwise."
+    good: "(Delete both sentences; record the check in the pull request.)"
+  - id: dropped-facts-listed
+    severity: error
+    check: review
+    applies_to: [all]
+    rationale: "Merging or deleting pages loses facts a reader needs unless someone lists them. The author lists each fact with its old path and its new home; the reviewer checks the list against the removed pages."
+    bad: "Forty-five pages are deleted and the pull request says the content is covered."
+    good: "A handoff file lists each dropped fact, the old path with the commit to read it from, and the page that now holds it or the reason it was cut."
   # ---- tables (tables.md) ----
   - id: table-too-wide
     severity: error
@@ -252,6 +266,27 @@ rules:
     rationale: "A long table in a teaching page is hard to scan; split it by theme. Reference tables may be long."
     bad: "A table of 25 rows."
     good: "Three tables of 8 rows, each introduced."
+  - id: no-hand-copied-output
+    severity: error
+    check: review
+    applies_to: [all]
+    rationale: "A table copied by hand from program output goes stale and hides errors. Where the site can generate the table from the tool, it does."
+    bad: "A table of exit codes typed from a run of the tool, on a site that generates one."
+    good: "The generated table. With no generator: one fenced block of a real run and a sentence, and a request for a generator."
+  - id: rendered-page-checked
+    severity: warning
+    check: review
+    applies_to: [all]
+    rationale: "A table that clips at phone width or a figure that vanishes in dark mode passes every lint. The author looks at the rendered page."
+    bad: "A new page published without opening it at phone width."
+    good: "Screenshots at phone and desktop width, light and dark; a table clipped at phone width became a list."
+  - id: complete-table-claim
+    severity: warning
+    check: review
+    applies_to: [reference, how-to, tutorial]
+    rationale: "A table introduced as 'The keys are:' reads as the full list. A reader who finds a missing key stops trusting the rest."
+    bad: "The keys are: name, version. (The format has six.)"
+    good: "The keys are: (all six). Or: The main keys are name and version; the others are in the schema."
   - id: table-two-dimensional
     severity: warning
     check: review
@@ -264,13 +299,13 @@ rules:
     severity: error
     check: structure
     applies_to: [all]
-    rationale: "Every page has exactly one type, so it can be written and reviewed for that type."
+    rationale: "Every page has exactly one type (concept, tutorial, how-to, reference, status, index or readme), so it can be written and reviewed for that type."
     bad: "A page with no `type:` in frontmatter."
     good: "`type: concept`"
   - id: required-sections
     severity: error
     check: structure
-    applies_to: [concept, tutorial, how-to, reference, status, readme]
+    applies_to: [concept, tutorial, how-to, reference, status, index, readme]
     rationale: "Each page type promises the reader a fixed set of parts."
     bad: "A concept page with no example and no next steps."
     good: "A concept page with an Example section and a Next steps section."
@@ -281,6 +316,27 @@ rules:
     rationale: "A page over its budget often covers more than one topic. The budget is a warning; a page that answers one reader question may stay over it, and a page that answers two is split at any length."
     bad: "A 4,000-word concept page."
     good: "A concept page under 900 words, with the rest linked."
+  - id: index-page-contents
+    severity: error
+    check: structure
+    applies_to: [index]
+    rationale: "A section index orients and links. An Example heading, a table, a code block or numbered steps make it a second concept page that nobody can find."
+    bad: "An index page with '## Example' over a table of links."
+    good: "An index page with a lede and a list of links, one sentence each."
+  - id: index-entry-sentence
+    severity: warning
+    check: review
+    applies_to: [index]
+    rationale: "A link list with no words next to the links makes the reader open each page to learn what it holds."
+    bad: "- [Types](types.md)"
+    good: "- [Types](types.md): what each value type holds and how to convert between types."
+  - id: example-is-link-list
+    severity: error
+    check: structure
+    applies_to: [concept, reference]
+    rationale: "An Example section that lists links is an index. The reader expected a worked case."
+    bad: "A concept page whose Example section is a list of three links."
+    good: "An Example section with one small case and its result. Links go under Next steps, or on an index page."
   - id: heading-level-skip
     severity: error
     check: structure
@@ -365,6 +421,20 @@ rules:
     rationale: "A how-to serves a reader who already knows what they want to do."
     bad: "A how-to that first explains what a trace is."
     good: "Numbered steps and the expected output, with a link to the concept page."
+  - id: how-to-where-commands-run
+    severity: error
+    check: review
+    applies_to: [how-to, tutorial]
+    rationale: "A reader who has not guessed the folder fails at the first command. Commands that share shell state need one terminal."
+    bad: "Step 1 is `cargo run`, with no word on where the project is."
+    good: "Step 1 gets the project and changes into it: `git clone <url>` then `cd <folder>`. Later steps run from there, in the same terminal."
+  - id: how-to-pin-version
+    severity: warning
+    check: review
+    applies_to: [how-to, tutorial]
+    rationale: "Shown output is true for one version. An install line with no version shows output the reader may never get."
+    bad: "`npm install parser-lib`, followed by output from 0.6.0."
+    good: "`npm install parser-lib@0.6.0`, followed by output from 0.6.0."
   - id: reference-example-per-form
     severity: warning
     check: review
@@ -384,8 +454,8 @@ rules:
     check: review
     applies_to: [concept, tutorial]
     rationale: "A newcomer reads familiar words with their everyday meaning; naming a wrong reading once prevents it. The misreading is one you verified by running the example wrong, not one you expect."
-    bad: "A concept page that gives its reader no wrong reading to avoid, or one that the author never ran."
-    good: "A short 'A common misreading' step naming an error a newcomer makes with this page's example, found by running the example wrong once."
+    bad: "A concept page that gives its reader no wrong reading to avoid, one that the author never ran, or one whose shown output comes from the right version of the example."
+    good: "A short 'A common misreading' step naming an error a newcomer makes with this page's example, with the output of the wrong version, found by running the example wrong once."
   - id: notation-introduced
     severity: warning
     check: review
@@ -410,10 +480,31 @@ rules:
   - id: gap-not-rule
     severity: error
     check: review
-    applies_to: [concept, tutorial]
-    rationale: "A teaching page teaches with examples that run. An implementation gap, such as a form the tool does not run yet, is not a property of the thing documented; presenting it as one teaches a false rule."
-    bad: "A rule of the language that is only the current tool refusing a form."
-    good: "Teach with the forms that run; put what does not run on the status page."
+    applies_to: [concept, tutorial, how-to, reference, readme]
+    rationale: "An implementation gap, such as a form the tool or library does not run yet or a range it narrows, is not a property of the thing documented; presenting it as one teaches a false rule. The same holds for a library: its current limit is not a rule of the language it implements."
+    bad: "The result of mod is always in 0 to 2. (The specification gives a wider range; the current tool narrows it.)"
+    good: "The specification gives the result of mod. (Badge the form and say what the build returns; or, with no specification line, use observed-behavior-scoped.)"
+  - id: observed-behavior-scoped
+    severity: error
+    check: review
+    applies_to: [concept, tutorial, how-to, reference, readme]
+    rationale: "Where no specification line backs a statement, the page says what a run showed, for which input and version, and no more. A general claim built on one run is a guess the reader will rely on."
+    bad: "A rule that names an unknown field is always refused."
+    good: "Run on the example above, a rule that names an unknown field is refused with the code unknown_field."
+  - id: readme-secondary-source
+    severity: error
+    check: review
+    applies_to: [concept, tutorial, how-to, reference, readme]
+    rationale: "A README or an old page is a secondary source and is often wrong. A statement about an API, a command or a behavior is confirmed in the code or by a run before it is written."
+    bad: "A sentence about an error variant, copied from the repository README, that the code never raises."
+    good: "The sentence names a variant the reviewer found in the source and raised by running a failing input."
+  - id: api-name-exists
+    severity: error
+    check: review
+    applies_to: [reference, how-to, tutorial, readme]
+    rationale: "Every function, type, variant, flag and key a page names exists in the source, on the type or module the page names. A name that does not exist, or sits elsewhere, makes the reader's code fail."
+    bad: "`Document::from_digest` builds a document. (The function is `Digest::into_document`; `from_digest` does not exist.)"
+    good: "`Digest::into_document` builds a document. (Found in the source, on `Digest`.)"
   - id: output-terms-defined
     severity: warning
     check: review
@@ -461,16 +552,16 @@ rules:
     severity: warning
     check: review
     applies_to: [all]
-    rationale: "A group of 5 to 9 pages can be held in the head."
-    bad: "A group of 29 pages."
-    good: "A group of 6 pages."
+    rationale: "A hand-written group of 5 to 9 pages can be held in the head. A group generated from a source list, one page per module or type, may be longer, because the reader looks an entry up by name."
+    bad: "A hand-written group of 29 pages."
+    good: "A hand-written group of 6 pages, or a generated reference group with one page per module."
   - id: reader-word-labels
     severity: warning
     check: review
     applies_to: [all]
-    rationale: "Sidebar labels use words the reader uses, not folder names."
+    rationale: "Sidebar labels use words the reader uses, not folder names. A library reference page is the exception: its label is the library's own name, the name the reader types into a package manifest."
     bad: "model-checking"
-    good: "Check a model"
+    good: "Check a model (a library reference page is labeled with the library name, such as parser-lib)"
   - id: one-home-per-topic
     severity: error
     check: review
