@@ -115,6 +115,7 @@ VALE_CASES: Dict[str, tuple] = {
     "version-pin": ("This section documents Quoin 0.29.1.", "Install the package with npm."),
     "no-command-runs": ("No `quire-spec` command runs the clause.", "The clause is compiled."),
     "banned-heading": ("## Status of this page\n\nText.", "## Usage\n\nText."),
+    "bookkeeping-in-prose": ("The README says the flag is required.", "The flag is required."),
     "table-too-wide": ("| a | b | c | d | e |\n| --- | --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 | 5 |",
                        "| a | b | c | d |\n| --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 |"),
     "table-code-cell-long": ("| Id | Tick |\n| --- | --- |\n| `quire.temporal.event-position.false-extension/v1` | event |",
@@ -218,6 +219,19 @@ def lint(tmp_path: Path, files: Dict[str, str], *extra: str) -> List[str]:
     return [line.split(": ")[1] for line in proc.stdout.splitlines()]
 
 
+INDEX_OK = """---
+title: Libraries
+type: index
+---
+
+The libraries read, check and write specifications.
+
+## Pages
+
+- [Parser](parser.md): reads a document into a tree.
+- [Checker](checker.md): checks a tree against a rule set.
+"""
+
 DESC_PAGE_STRUCT = CONCEPT_OK.replace("type: concept\n", "type: concept\ndescription: %s\n")
 
 STRUCT_CASES = {
@@ -243,6 +257,9 @@ STRUCT_CASES = {
     "lead-ins": ({"a.md": DESC_PAGE_STRUCT % "Here is how time works."}, {"a.md": DESC_PAGE_STRUCT % "Time orders events."}),
     "contrast-framing": ({"a.md": DESC_PAGE_STRUCT % "A clock is a rule, not a stopwatch."}, {"a.md": DESC_PAGE_STRUCT % "A clock numbers positions."}),
     "sentence-too-long": ({"a.md": DESC_PAGE_STRUCT % LONG}, {"a.md": DESC_PAGE_STRUCT % "The compiler checks the rule."}),
+    "index-page-contents": ({"a.md": INDEX_OK.replace("## Pages", "## Example")}, {"a.md": INDEX_OK}),
+    "example-is-link-list": ({"a.md": CONCEPT_OK.replace("A short example.", "- [A](a.md)\n- [B](b.md)\n- [C](c.md)")},
+                             {"a.md": CONCEPT_OK.replace("A short example.", "```text\nholds\n```\n\n- [A](a.md)\n- [B](b.md)\n- [C](c.md)")}),
     "concept-no-harness": ({"a.md": CONCEPT_OK + "\n```bash\ncheck rule.native trace.json | jq .result\n```\n"},
                            {"a.md": CONCEPT_OK + "\n```bash\ncheck rule.native trace.json\n```\n"}),
 }
@@ -266,7 +283,7 @@ def _sub(tmp_path: Path, name: str) -> Path:
     return d
 
 
-@pytest.mark.parametrize("kind", ["concept", "tutorial", "how-to", "reference", "status", "readme"])
+@pytest.mark.parametrize("kind", ["concept", "tutorial", "how-to", "reference", "status", "index", "readme"])
 def test_required_sections_per_type(kind: str, tmp_path: Path) -> None:
     empty = "---\ntitle: T\ntype: %s\n---\n\nText.\n" % kind
     assert "required-sections" in lint(tmp_path, {"a.md": empty})
@@ -684,3 +701,62 @@ def test_harness_allows_plain_commands_and_other_page_types(tmp_path: Path) -> N
     assert "concept-no-harness" not in lint(tmp_path, {"a.md": plain})
     howto = HOWTO_OK + "\n```bash\ncheck rule.native trace.json | jq .result\n```\n"
     assert "concept-no-harness" not in lint(_sub(tmp_path, "h"), {"a.md": howto})
+
+
+# ---------------------------------------------------------------- 0.3.2: index pages, bookkeeping
+
+
+def test_index_page_passes_and_needs_links(tmp_path: Path) -> None:
+    assert lint(tmp_path, {"a.md": INDEX_OK}) == []
+    bare = INDEX_OK.split("## Pages")[0] + "## Pages\n\nNothing here.\n"
+    assert "required-sections" in lint(_sub(tmp_path, "bare"), {"a.md": bare})
+
+
+@pytest.mark.parametrize("extra", [
+    "\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+    "\n```text\nholds\n```\n",
+    "\n1. Run it.\n2. Read it.\n",
+])
+def test_index_page_bans_tables_code_and_steps(extra: str, tmp_path: Path) -> None:
+    assert "index-page-contents" in lint(tmp_path, {"a.md": INDEX_OK + extra})
+
+
+def test_index_page_has_a_word_budget(tmp_path: Path) -> None:
+    assert "page-length-budget" in lint(tmp_path, {"a.md": INDEX_OK + "word " * 320})
+
+
+def test_example_link_list_is_scoped_to_concept_and_reference(tmp_path: Path) -> None:
+    links = "- [A](a.md)\n- [B](b.md)\n- [C](c.md)\n"
+    ref = "---\ntitle: R\ntype: reference\n---\n\nR is a thing.\n\n## Syntax\n\nText.\n\n## Examples\n\n" + links
+    assert "example-is-link-list" in lint(tmp_path, {"a.md": ref})
+    howto = HOWTO_OK + "\n## Example\n\n" + links
+    assert "example-is-link-list" not in lint(_sub(tmp_path, "h"), {"a.md": howto})
+
+
+@needs_vale
+@pytest.mark.parametrize("heading", ["Open items", "Verification notes", "Why the build fails", "README drift",
+                                     "Differences from the code", "Docs versus code", "Known differences"])
+def test_banned_headings_added_in_0_3_2(heading: str, tmp_path: Path) -> None:
+    assert "AgentIX.BannedHeading" in vale_checks(tmp_path, "Intro text.\n\n## %s\n\nText.\n" % heading)
+
+
+@needs_vale
+@pytest.mark.parametrize("text", [
+    "The README lists a flag the code does not have.",
+    "Every name on this page was compiled against the tag.",
+    "The release is 14 commits behind the branch.",
+    "The build fails because the registry is down.",
+    "The docs and the code disagree on the default.",
+])
+def test_bookkeeping_phrases_fail(text: str, tmp_path: Path) -> None:
+    assert "AgentIX.BookkeepingInProse" in vale_checks(tmp_path, "Intro text.\n\n" + text)
+
+
+@needs_vale
+@pytest.mark.parametrize("text", [
+    "Read the README of the repository to install the tool.",
+    "The build produces one binary.",
+    "Each name in the list is a command.",
+])
+def test_bookkeeping_phrases_leave_plain_prose_alone(text: str, tmp_path: Path) -> None:
+    assert "AgentIX.BookkeepingInProse" not in vale_checks(tmp_path, "Intro text.\n\n" + text)

@@ -91,7 +91,8 @@ Pick one small system and use it on every concept and tutorial page (rule:
 running-example). The specification-language example uses the history of
 configuration versions, each with a version number and an optional parent. A reader
 who already knows the system spends attention on the new idea. Build each example
-from the previous one. Quint teaches a small example with a deliberate bug from
+from the previous one. A reference page may use a small system of its own when the
+running example does not fit a form, as a lock fits fairness. Quint teaches a small example with a deliberate bug from
 install to first check. learntla shows a spec as a series of changes from a base
 spec.
 
@@ -104,7 +105,22 @@ with a script. Never paste output by hand; regenerate it when the tool changes
 
 A teaching page teaches with examples that run. A form the tool cannot run yet is
 an implementation gap. A gap is never a rule of the thing the page documents.
-Leave the form out and let the status page carry it (rule: gap-not-rule).
+Leave the form out and let the status page carry it (rule: gap-not-rule). The same
+holds for a library: its current limit is not a rule of the language it implements.
+
+Before you write a restriction, find the line of the specification that states it.
+If the specification differs from the tool, document the specification and badge the
+form. If no line exists, say what a run showed, for which input and version, and no
+more (rule: observed-behavior-scoped).
+
+Bad: "The result of `mod` is always in 0 to 2." The specification gives a wider
+range; the current tool narrows it.
+
+Good: "`mod` returns the remainder as the specification defines it." The badge says
+what the build returns today.
+
+A README and an old page are leads. Confirm each statement about an API, a command
+or a behavior in the code or by a run, and never copy it (rule: readme-secondary-source).
 
 ## Show the command and a trimmed result
 
@@ -113,7 +129,8 @@ contains only fields the page has defined (rules: concept-no-harness,
 output-terms-defined). Define each field or value in the result, or cut it. Pipes into `jq`, redirects
 to files, exit-status captures and multi-line filters are plumbing from a test
 harness. Keep them out of concept and tutorial pages. State the exit code in a sentence: "The command
-exits with status 1".
+exits with status 1". When a page filters the output, for example it hides notices
+or shortens paths, it says what else the reader will see.
 
 Bad:
 
