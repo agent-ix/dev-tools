@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::config::HostSample;
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{Completion, Event, Phase, Request, RequestId, StopReason};
+use crate::model::{CommandOutcome, Completion, Event, Phase, Request, RequestId, StopReason};
 use crate::process::{IdentityState, Processes};
 use crate::store::Store;
 
@@ -98,6 +98,9 @@ pub(crate) fn enqueue(
             ended_clock_ms: None,
             heartbeat_at_ms: None,
             worker: None,
+            worker_generation: 0,
+            watchdog: None,
+            command_finished: None,
             phase: Phase::Queued,
             stop: None,
             exit_code: None,
@@ -206,10 +209,17 @@ pub struct RequestReport {
 }
 
 pub(crate) fn recover(store: &Store) -> Result<Vec<RequestId>> {
-    let now = now_ms()?;
-    let clock = clock_ms()?;
-    let processes = Processes::read();
+    recover_with_processes(store, Processes::read)
+}
+
+fn recover_with_processes(
+    store: &Store,
+    read_processes: impl FnOnce() -> Processes,
+) -> Result<Vec<RequestId>> {
     store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        let processes = read_processes();
         let rebooted = state.boot_time != sysinfo::System::boot_time();
         let mut respawn = Vec::new();
         let mut finish = Vec::new();
@@ -219,6 +229,7 @@ pub(crate) fn recover(store: &Store) -> Result<Vec<RequestId>> {
             }
             if rebooted {
                 request.worker = None;
+                request.watchdog = None;
                 if request.phase == Phase::Running {
                     finish.push(request.id.clone());
                 } else {
@@ -281,10 +292,10 @@ pub(crate) fn recover(store: &Store) -> Result<Vec<RequestId>> {
 }
 
 pub(crate) fn status(store: &Store) -> Result<Report> {
-    let now = now_ms()?;
-    let clock = clock_ms()?;
-    let processes = Processes::read();
     store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        let processes = Processes::read();
         let sample = config.sample(now);
         let (sample, source_error) = match sample {
             Ok(sample) => (Some(sample), None),
@@ -390,59 +401,123 @@ pub(crate) fn wait(store: &Store, id: &RequestId) -> Result<i32> {
     }
 }
 
+struct WorkerFence {
+    identity: crate::model::ProcessIdentity,
+    generation: u64,
+}
+
+impl WorkerFence {
+    fn owns(&self, request: &Request) -> bool {
+        request.worker.as_ref() == Some(&self.identity)
+            && request.worker_generation == self.generation
+    }
+
+    fn require_running(&self, request: &Request) -> Result<()> {
+        if !self.owns(request) || request.phase != Phase::Running {
+            return Err(Error::new(
+                ErrorCode::State,
+                "supervisor lease ownership changed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn claim_worker(
+    store: &Store,
+    id: &RequestId,
+    identity: &crate::model::ProcessIdentity,
+) -> Result<Option<WorkerFence>> {
+    store.transaction(|state, _| {
+        let request = state.find_mut(id)?;
+        if request.phase != Phase::Queued || request.worker.is_some() {
+            return Ok(None);
+        }
+        request.worker_generation = request
+            .worker_generation
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorCode::State, "supervisor generation exhausted"))?;
+        request.worker = Some(identity.clone());
+        Ok(Some(WorkerFence {
+            identity: identity.clone(),
+            generation: request.worker_generation,
+        }))
+    })
+}
+
+enum Admission {
+    Stopped,
+    Waiting(u64),
+    Granted(Box<Request>),
+}
+
+fn admit_worker(
+    store: &Store,
+    id: &RequestId,
+    fence: &WorkerFence,
+    interrupted: &AtomicBool,
+) -> Result<Admission> {
+    store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        let request = state.find(id)?;
+        if request.phase != Phase::Queued || !fence.owns(request) {
+            return Ok(Admission::Stopped);
+        }
+        if interrupted.load(Ordering::Relaxed) {
+            state.find_mut(id)?.stop = Some(StopReason::Cancelled);
+            state.finish(id, Completion::default(), config, now, clock)?;
+            return Ok(Admission::Stopped);
+        }
+        let sample = config.sample(now).ok();
+        let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
+        let request = state.find_mut(id)?;
+        request.heartbeat_at_ms = Some(now);
+        request.reason = reason.map(str::to_owned);
+        if reason.is_some() {
+            return Ok(Admission::Waiting(config.poll_ms));
+        }
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now);
+        request.started_clock_ms = Some(clock);
+        let admitted = request.clone();
+        state.event(id, config, now, clock)?;
+        Ok(Admission::Granted(Box::new(admitted)))
+    })
+}
+
+fn finish_owned(
+    store: &Store,
+    id: &RequestId,
+    fence: &WorkerFence,
+    completion: Completion<'_>,
+) -> Result<()> {
+    store.transaction(|state, config| {
+        fence.require_running(state.find(id)?)?;
+        state.finish(id, completion, config, now_ms()?, clock_ms()?)
+    })
+}
+
 pub(crate) fn worker(store: &Store, id: &RequestId) -> Result<()> {
     let interrupted = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, interrupted.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, interrupted.clone())?;
     let identity = Processes::read().current()?;
-    let claimed = store.transaction(|state, _| {
-        let request = state.find_mut(id)?;
-        if request.phase != Phase::Queued || request.worker.is_some() {
-            return Ok(false);
-        }
-        request.worker = Some(identity.clone());
-        Ok(true)
-    })?;
-    if !claimed {
+    let Some(fence) = claim_worker(store, id, &identity)? else {
         return Ok(());
-    }
+    };
     let request = loop {
-        let now = now_ms()?;
-        let clock = clock_ms()?;
-        let decision = store.transaction(|state, config| {
-            if state.find(id)?.phase != Phase::Queued {
-                return Ok((None, true, config.poll_ms));
-            }
-            if interrupted.load(Ordering::Relaxed) {
-                state.find_mut(id)?.stop = Some(StopReason::Cancelled);
-                state.finish(id, Completion::default(), config, now, clock)?;
-                return Ok((None, true, config.poll_ms));
-            }
-            let sample = config.sample(now).ok();
-            let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
-            let request = state.find_mut(id)?;
-            request.heartbeat_at_ms = Some(now);
-            request.reason = reason.map(str::to_owned);
-            if reason.is_some() {
-                return Ok((None, false, config.poll_ms));
-            }
-            request.phase = Phase::Running;
-            request.started_at_ms = Some(now);
-            request.started_clock_ms = Some(clock);
-            let admitted = request.clone();
-            state.event(id, config, now, clock)?;
-            Ok((Some(admitted), false, config.poll_ms))
-        })?;
-        if let Some(request) = decision.0 {
-            break request;
+        match admit_worker(store, id, &fence, &interrupted)? {
+            Admission::Stopped => return Ok(()),
+            Admission::Waiting(poll_ms) => std::thread::sleep(Duration::from_millis(poll_ms)),
+            Admission::Granted(request) => break *request,
         }
-        if decision.1 {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(decision.2));
     };
     let cleanup_policy = crate::config::Config::read(&store.config_path)?;
-    let result = supervise(store, &request, &identity, &interrupted);
+    let result = (|| {
+        let watchdog = crate::watchdog::launch(store, id, &identity, fence.generation)?;
+        supervise(store, &request, &fence, &watchdog, &interrupted)
+    })();
     if result.is_err() {
         let processes = Processes::read();
         if processes.group_has_live_members(identity.pid, Some(identity.pid)) {
@@ -473,9 +548,12 @@ pub(crate) fn worker(store: &Store, id: &RequestId) -> Result<()> {
 fn supervise(
     store: &Store,
     request: &Request,
-    identity: &crate::model::ProcessIdentity,
+    fence: &WorkerFence,
+    watchdog: &crate::model::ProcessIdentity,
     interrupted: &AtomicBool,
 ) -> Result<()> {
+    let identity = &fence.identity;
+    store.transaction(|state, _| fence.require_running(state.find(&request.id)?))?;
     let Some(program) = request.command.first() else {
         return Err(Error::new(ErrorCode::State, "persisted empty command"));
     };
@@ -486,26 +564,44 @@ fn supervise(
     {
         Ok(child) => child,
         Err(_) => {
-            return store.transaction(|state, config| {
-                state.finish(
-                    &request.id,
-                    Completion {
-                        reason: Some("command_spawn_failed"),
-                        ..Completion::default()
-                    },
-                    config,
-                    now_ms()?,
-                    clock_ms()?,
-                )
-            });
+            return finish_owned(
+                store,
+                &request.id,
+                fence,
+                Completion {
+                    reason: Some("command_spawn_failed"),
+                    ..Completion::default()
+                },
+            );
         }
     };
     let started = Instant::now();
     let mut stopping: Option<Instant> = None;
     let mut status: Option<ExitStatus> = None;
     loop {
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
         let policy = store.transaction(|state, config| {
+            fence.require_running(state.find(&request.id)?)?;
             let current = state.find_mut(&request.id)?;
+            if let Some(outcome) = status {
+                current.command_finished = Some(CommandOutcome {
+                    code: outcome.code(),
+                    signal: outcome.signal(),
+                });
+            } else if Processes::read().role_identity(
+                watchdog,
+                &request.id,
+                "watchdog",
+                identity.pid,
+            ) != IdentityState::Matching
+            {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "watchdog supervision unavailable",
+                ));
+            }
             current.heartbeat_at_ms = Some(now_ms()?);
             if current.stop.is_none() {
                 if interrupted.load(Ordering::Relaxed) && stopping.is_none() {
@@ -516,29 +612,24 @@ fn supervise(
             }
             Ok((current.stop, config.termination_grace_ms, config.poll_ms))
         })?;
-        if status.is_none() {
-            status = child.try_wait()?;
-        }
         let processes = Processes::read();
-        let has_descendants = processes.group_has_live_members(identity.pid, Some(identity.pid));
+        let controls = [identity.pid, watchdog.pid];
+        let has_descendants = processes.group_has_live_members_excluding(identity.pid, &controls);
         if status.is_some() && !has_descendants {
-            return store.transaction(|state, config| {
-                state.finish(
-                    &request.id,
-                    Completion {
-                        code: status.and_then(|value| value.code()),
-                        signal: status.and_then(|value| value.signal()),
-                        reason: stopping.map(|_| "remaining_descendants_terminated"),
-                    },
-                    config,
-                    now_ms()?,
-                    clock_ms()?,
-                )
-            });
+            return finish_owned(
+                store,
+                &request.id,
+                fence,
+                Completion {
+                    code: status.and_then(|value| value.code()),
+                    signal: status.and_then(|value| value.signal()),
+                    reason: stopping.map(|_| "remaining_descendants_terminated"),
+                },
+            );
         }
         if policy.0.is_some()
             || (status.is_some()
-                && processes.confirmed_group_has_live_members(identity.pid, Some(identity.pid)))
+                && processes.confirmed_group_has_live_members_excluding(identity.pid, &controls))
         {
             if let Some(stopping_at) = stopping {
                 if stopping_at.elapsed() >= Duration::from_millis(policy.1) {
@@ -603,3 +694,6 @@ fn phase_name(phase: Phase) -> &'static str {
 pub(crate) fn open(state: &Path, config: &Path) -> Result<Store> {
     Store::open(state, config)
 }
+
+#[cfg(test)]
+mod tests;

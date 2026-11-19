@@ -67,7 +67,8 @@ This can leave additional headroom when running builds already consume their bud
 ## Supervision and recovery
 
 Each request has an isolated supervisor process group.
-The supervisor applies the hold deadline, SIGTERM grace, and SIGKILL cleanup.
+A companion watchdog joins that group before the build starts.
+The supervisor and watchdog enforce the hold deadline, SIGTERM grace, and SIGKILL cleanup.
 A lease remains occupied until its command group has stopped.
 Commands must keep their descendants in that group; detached services require their own service manager.
 
@@ -76,8 +77,10 @@ A supervisor survives the submitting terminal's exit.
 Restarted queued supervisors inherit the recovering invocation's environment.
 Supply the same build environment when recovering queued work.
 Running commands are never rerun after supervisor loss.
-An orphaned live group retains its lease with an uncertainty reason until exit is verified.
+The watchdog continues cancellation and deadline enforcement if the primary supervisor dies.
+The lease remains occupied until command exit is verified.
 Process identity requires the supervisor token, birth time, and group identity; PID existence alone cannot authorize signaling.
+Generation fencing prevents a superseded worker from admitting or completing another worker's lease.
 
 State and command arguments are private files; keep credentials in inherited environment or external secret providers.
 Replace a policy or host sample atomically so readers see a complete document.

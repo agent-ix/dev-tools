@@ -3,6 +3,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, atomic::AtomicBool};
@@ -85,6 +86,8 @@ impl Harness {
             .arg("subprocess_fixture")
             .arg("--ignored")
             .arg("--nocapture")
+            .arg("--skip")
+            .arg(marker)
             .env("LOCKED_BUILD_FIXTURE_MODE", mode)
             .env("LOCKED_BUILD_FIXTURE_MARKER", marker)
             .env("LOCKED_BUILD_FIXTURE_RELEASE", release)
@@ -122,6 +125,51 @@ impl Harness {
     }
 }
 
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let mut pids = std::collections::BTreeSet::new();
+        if let Ok(bytes) = fs::read(self.state.join("state.json"))
+            && let Ok(state) = serde_json::from_slice::<Value>(&bytes)
+        {
+            for request in state["requests"].as_array().into_iter().flatten() {
+                for role in ["worker", "watchdog"] {
+                    if let Some(pid) = request[role]["pid"]
+                        .as_u64()
+                        .and_then(|pid| u32::try_from(pid).ok())
+                    {
+                        pids.insert(pid);
+                    }
+                }
+            }
+        }
+        if let Ok(files) = fs::read_dir(self.root.path()) {
+            for file in files.flatten() {
+                if file
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "pid")
+                    && let Ok(value) = fs::read_to_string(file.path())
+                    && let Ok(pid) = value.parse::<u32>()
+                {
+                    pids.insert(pid);
+                }
+            }
+        }
+        let system = sysinfo::System::new_all();
+        for pid in pids {
+            if let Some(process) = system.process(sysinfo::Pid::from_u32(pid))
+                && process
+                    .cmd()
+                    .iter()
+                    .any(|argument| Path::new(argument).starts_with(self.root.path()))
+                && let Ok(pid) = i32::try_from(pid)
+            {
+                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+            }
+        }
+    }
+}
+
 fn observed(mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !check() {
@@ -134,20 +182,42 @@ fn observed(mut check: impl FnMut() -> bool) {
 }
 
 fn complete(child: &mut Child) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
-    let mut result = None;
-    observed(|| {
-        result = child.try_wait().ok().flatten();
-        result.is_some()
-    });
-    result.ok_or_else(|| "child result missing".into())
+    complete_before(child, Duration::from_secs(30))
+}
+
+fn complete_before(
+    child: &mut Child,
+    limit: Duration,
+) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "command survived the cancellation/hold cleanup deadline"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn fixture_alive(marker: &Path) -> Result<bool, Box<dyn std::error::Error>> {
-    let pid: u32 = fs::read_to_string(marker.with_extension("pid"))?.parse()?;
+    let pid: u32 = fs::read_to_string(pid_file(marker))?.parse()?;
+    Ok(process_alive(pid))
+}
+
+fn pid_file(marker: &Path) -> PathBuf {
+    let mut path = marker.as_os_str().to_os_string();
+    path.push(".pid");
+    PathBuf::from(path)
+}
+
+fn process_alive(pid: u32) -> bool {
     let system = sysinfo::System::new_all();
-    Ok(system
+    system
         .process(sysinfo::Pid::from_u32(pid))
-        .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie))
+        .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie)
 }
 
 /// Trace: FR-005-AC-7, FR-005-AC-5
@@ -377,17 +447,17 @@ fn policy_read_failure_stops_owned_work_and_retains_lease_until_recovery() -> Te
     let marker = harness.root.path().join("started");
     let mut child = harness.command("block", &marker, &harness.root.path().join("release"), 1)?;
     observed(|| marker.exists());
-    let request = harness.request(0)?;
-    let id = request["request_id"].as_str().ok_or("ID missing")?;
+    let worker = u32::try_from(
+        harness.persisted()?["requests"][0]["worker"]["pid"]
+            .as_u64()
+            .ok_or("PID missing")?,
+    )?;
     let original = fs::read(&harness.config)?;
     let replacement = harness.root.path().join("policy.next");
     fs::write(&replacement, "invalid json")?;
     fs::rename(&replacement, &harness.config)?;
     assert_eq!(complete(&mut child)?.code(), Some(2));
-    observed(|| {
-        fs::read_to_string(harness.state.join(format!("{id}.stderr")))
-            .is_ok_and(|output| output.contains("configuration: "))
-    });
+    observed(|| fixture_alive(&marker).is_ok_and(|alive| !alive) && !process_alive(worker));
     fs::write(&replacement, original)?;
     fs::rename(&replacement, &harness.config)?;
     observed(|| {
@@ -442,6 +512,90 @@ fn running_cancel_returns_cancelled_after_group_cleanup() -> TestResult {
     Ok(())
 }
 
+/// Trace: FR-005-AC-4
+#[test]
+fn cancellation_after_supervisor_loss_stops_owned_descendants_and_preserves_unrelated_work()
+-> TestResult {
+    let harness = Harness::new(1, 20000)?;
+    let marker = harness.root.path().join("owned");
+    let descendant = marker.with_extension("descendant");
+    let mut child = harness.command(
+        "ignore-term",
+        &marker,
+        &harness.root.path().join("never-release"),
+        1,
+    )?;
+    observed(|| marker.exists() && descendant.exists());
+    let unrelated = harness.root.path().join("unrelated");
+    let unrelated_release = harness.root.path().join("unrelated-release");
+    let mut other = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("subprocess_fixture")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .arg("--skip")
+        .arg(&unrelated)
+        .env("LOCKED_BUILD_FIXTURE_MODE", "block")
+        .env("LOCKED_BUILD_FIXTURE_MARKER", &unrelated)
+        .env("LOCKED_BUILD_FIXTURE_RELEASE", &unrelated_release)
+        .process_group(0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    observed(|| unrelated.exists());
+    let request = harness.request(0)?;
+    let id = request["request_id"].as_str().ok_or("ID missing")?;
+    let pid = harness.persisted()?["requests"][0]["worker"]["pid"]
+        .as_u64()
+        .ok_or("PID missing")?;
+    kill(Pid::from_raw(i32::try_from(pid)?), Signal::SIGKILL)?;
+    assert!(harness.cli().arg("cancel").arg(id).status()?.success());
+    assert_eq!(
+        complete_before(&mut child, Duration::from_secs(8))?.code(),
+        Some(130)
+    );
+    assert_eq!(harness.report()?["used_units"], 0);
+    assert!(!fixture_alive(&marker)?);
+    assert!(!fixture_alive(&descendant)?);
+    assert!(fixture_alive(&unrelated)?);
+    assert!(
+        other.try_wait()?.is_none(),
+        "watchdog cleanup affected an unrelated process group"
+    );
+    fs::write(unrelated_release, "release")?;
+    assert!(complete(&mut other)?.success());
+    Ok(())
+}
+
+/// Trace: FR-005-AC-4
+#[test]
+fn hold_deadline_survives_supervisor_loss_and_stops_term_resistant_descendants() -> TestResult {
+    let harness = Harness::new(1, 2000)?;
+    let marker = harness.root.path().join("owned");
+    let descendant = marker.with_extension("descendant");
+    let mut child = harness.command(
+        "ignore-term",
+        &marker,
+        &harness.root.path().join("never-release"),
+        1,
+    )?;
+    observed(|| marker.exists() && descendant.exists());
+    let pid = harness.persisted()?["requests"][0]["worker"]["pid"]
+        .as_u64()
+        .ok_or("PID missing")?;
+    kill(Pid::from_raw(i32::try_from(pid)?), Signal::SIGKILL)?;
+    assert_eq!(
+        complete_before(&mut child, Duration::from_secs(8))?.code(),
+        Some(124)
+    );
+    assert_eq!(harness.request(0)?["state"], "timed_out");
+    assert_eq!(harness.request(0)?["reason"], "hold_timeout");
+    assert!(!fixture_alive(&marker)?);
+    assert!(!fixture_alive(&descendant)?);
+    assert_eq!(harness.report()?["used_units"], 0);
+    Ok(())
+}
+
 #[test]
 #[ignore = "subprocess workload, invoked by supervision tests"]
 fn subprocess_fixture() -> TestResult {
@@ -463,11 +617,13 @@ fn subprocess_fixture() -> TestResult {
             .arg("subprocess_fixture")
             .arg("--ignored")
             .arg("--nocapture")
+            .arg("--skip")
+            .arg(&descendant)
             .env("LOCKED_BUILD_FIXTURE_MODE", "leaf-ignore-term")
             .env("LOCKED_BUILD_FIXTURE_MARKER", descendant)
             .spawn()?;
     }
-    fs::write(marker.with_extension("pid"), std::process::id().to_string())?;
+    fs::write(pid_file(&marker), std::process::id().to_string())?;
     let mut file = OpenOptions::new().create(true).append(true).open(marker)?;
     writeln!(file, "invoked")?;
     file.sync_all()?;

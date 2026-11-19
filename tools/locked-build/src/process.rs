@@ -67,6 +67,16 @@ impl Processes {
     }
 
     pub(crate) fn identity(&self, identity: &ProcessIdentity, id: &RequestId) -> IdentityState {
+        self.role_identity(identity, id, "worker", identity.pid)
+    }
+
+    pub(crate) fn role_identity(
+        &self,
+        identity: &ProcessIdentity,
+        id: &RequestId,
+        role: &str,
+        group: u32,
+    ) -> IdentityState {
         if !self.complete {
             return IdentityState::Unavailable;
         }
@@ -80,9 +90,9 @@ impl Processes {
             return IdentityState::Unavailable;
         }
         if row.start == identity.started_seconds
-            && row.group == Some(identity.pid)
+            && row.group == Some(group)
             && row.arguments.iter().any(|argument| argument == &id.0)
-            && row.arguments.iter().any(|argument| argument == "worker")
+            && row.arguments.iter().any(|argument| argument == role)
         {
             IdentityState::Matching
         } else {
@@ -91,12 +101,16 @@ impl Processes {
     }
 
     pub(crate) fn current(&self) -> Result<ProcessIdentity> {
+        self.current_member(std::process::id())
+    }
+
+    pub(crate) fn current_member(&self, group: u32) -> Result<ProcessIdentity> {
         let pid = std::process::id();
         let row = self
             .rows
             .get(&pid)
             .ok_or_else(|| Error::new(ErrorCode::State, "cannot verify supervisor identity"))?;
-        if row.group != Some(pid) {
+        if row.group != Some(group) {
             return Err(Error::new(
                 ErrorCode::State,
                 "supervisor must own an isolated process group",
@@ -109,24 +123,28 @@ impl Processes {
     }
 
     pub(crate) fn group_has_live_members(&self, group: u32, excluding: Option<u32>) -> bool {
+        self.group_has_live_members_excluding(group, excluding.as_slice())
+    }
+
+    pub(crate) fn group_has_live_members_excluding(&self, group: u32, excluding: &[u32]) -> bool {
         if !self.complete {
             return true;
         }
         self.rows.iter().any(|(pid, row)| {
             (row.group == Some(group) || row.group.is_none())
                 && !row.zombie
-                && Some(*pid) != excluding
+                && !excluding.contains(pid)
         })
     }
 
-    pub(crate) fn confirmed_group_has_live_members(
+    pub(crate) fn confirmed_group_has_live_members_excluding(
         &self,
         group: u32,
-        excluding: Option<u32>,
+        excluding: &[u32],
     ) -> bool {
         self.rows
             .iter()
-            .any(|(pid, row)| row.group == Some(group) && !row.zombie && Some(*pid) != excluding)
+            .any(|(pid, row)| row.group == Some(group) && !row.zombie && !excluding.contains(pid))
     }
 
     pub(crate) fn signal_owned(
@@ -135,13 +153,26 @@ impl Processes {
         id: &RequestId,
         signal: Signal,
     ) -> Result<()> {
-        if self.identity(identity, id) != IdentityState::Matching {
+        self.signal_member_owned(identity, id, "worker", identity.pid, signal)
+    }
+
+    pub(crate) fn signal_member_owned(
+        &self,
+        identity: &ProcessIdentity,
+        id: &RequestId,
+        role: &str,
+        group: u32,
+        signal: Signal,
+    ) -> Result<()> {
+        if identity.pid != std::process::id()
+            || self.role_identity(identity, id, role, group) != IdentityState::Matching
+        {
             return Err(Error::new(
                 ErrorCode::State,
                 "process identity unverified; refusing group signal",
             ));
         }
-        let pid = i32::try_from(identity.pid)
+        let pid = i32::try_from(group)
             .map_err(|_| Error::new(ErrorCode::State, "process ID out of range"))?;
         killpg(Pid::from_raw(pid), signal)
             .map_err(|error| Error::new(ErrorCode::Io, format!("group signal failed: {error}")))

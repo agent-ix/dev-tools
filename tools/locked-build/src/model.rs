@@ -15,10 +15,10 @@ use crate::error::{Error, ErrorCode, Result};
 pub struct RequestId(pub String);
 
 /// A supervisor identity includes its unguessable request token, not only PID.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessIdentity {
-    /// Process ID and process-group ID of the stable supervisor.
+    /// Native process ID; the owning group is verified separately for its role.
     pub pid: u32,
     /// Native process start time, combined with the exact command token.
     pub started_seconds: u64,
@@ -60,6 +60,13 @@ pub(crate) struct Completion<'reason> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct CommandOutcome {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Request {
     pub id: RequestId,
     pub sequence: u64,
@@ -75,6 +82,9 @@ pub(crate) struct Request {
     pub ended_clock_ms: Option<u64>,
     pub heartbeat_at_ms: Option<u64>,
     pub worker: Option<ProcessIdentity>,
+    pub worker_generation: u64,
+    pub watchdog: Option<ProcessIdentity>,
+    pub command_finished: Option<CommandOutcome>,
     pub phase: Phase,
     pub stop: Option<StopReason>,
     pub exit_code: Option<i32>,
@@ -164,6 +174,9 @@ impl State {
                 || request.owner.len() > 256
                 || request.ticket.is_empty()
                 || request.ticket.len() > 128
+                || (request.worker.is_some() && request.worker_generation == 0)
+                || (request.phase == Phase::Queued
+                    && (request.watchdog.is_some() || request.command_finished.is_some()))
                 || (request.phase == Phase::Running
                     && (request.worker.is_none()
                         || request.started_clock_ms.is_none()

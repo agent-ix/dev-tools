@@ -58,7 +58,8 @@ Durations use a monotonic clock; UTC timestamps support cross-source correlation
 
 Requests move from `queued` to `running`, then `succeeded`, `failed`, `timed_out`, or `cancelled`.
 A queued request can become `cancelled` without running.
-Lost supervisors leave running requests suspect while their group remains live or unverified.
+After supervisor loss, the authenticated watchdog continues timeout and cancellation enforcement.
+The request remains suspect and occupied until command exit is verified.
 No new grant exceeds configured capacity; reduced capacity can report existing overcommit.
 
 ## Examples

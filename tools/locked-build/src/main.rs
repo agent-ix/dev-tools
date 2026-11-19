@@ -8,6 +8,7 @@ mod model;
 mod process;
 mod runtime;
 mod store;
+mod watchdog;
 
 use std::path::PathBuf;
 
@@ -57,6 +58,8 @@ enum Action {
     Prune,
     #[command(hide = true)]
     Worker { request: String },
+    #[command(hide = true)]
+    Watchdog { request: String, generation: u64 },
 }
 
 fn execute(cli: Cli) -> Result<i32> {
@@ -116,6 +119,13 @@ fn execute(cli: Cli) -> Result<i32> {
         }
         Action::Worker { request } => {
             runtime::worker(&store, &RequestId(request))?;
+            Ok(0)
+        }
+        Action::Watchdog {
+            request,
+            generation,
+        } => {
+            watchdog::run(&store, &RequestId(request), generation)?;
             Ok(0)
         }
     }
