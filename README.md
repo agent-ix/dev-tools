@@ -48,6 +48,12 @@ The repository is one plugin. The same `skills/` tree is used by all four hosts.
 
 Claude uses `.claude-plugin/plugin.json`, Codex and Copilot use the root portable `plugin.json`, and OpenCode uses the remote skill catalog. The [Agent IX public marketplace](https://github.com/agent-ix/agent-plugins) pins reviewed versions for Claude and Codex. The `.codex-plugin/plugin.json` file supports older Codex plugin loaders. No host-specific copy of a skill is maintained.
 
+## Shared build tool
+
+[locked-build](tools/locked-build/README.md) provides a persistent FIFO and priority
+queue, host resource admission, process supervision, and JSON lease telemetry.
+Install its executable separately from the plugin skills.
+
 ## License
 
 MIT. See [LICENSE](LICENSE). See [CONTENT_RIGHTS.md](CONTENT_RIGHTS.md) for source-content rules.
