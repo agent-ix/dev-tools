@@ -142,6 +142,14 @@ fn complete(child: &mut Child) -> Result<std::process::ExitStatus, Box<dyn std::
     result.ok_or_else(|| "child result missing".into())
 }
 
+fn fixture_alive(marker: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    let pid: u32 = fs::read_to_string(marker.with_extension("pid"))?.parse()?;
+    let system = sysinfo::System::new_all();
+    Ok(system
+        .process(sysinfo::Pid::from_u32(pid))
+        .is_some_and(|process| process.status() != sysinfo::ProcessStatus::Zombie))
+}
+
 /// Trace: FR-005-AC-7, FR-005-AC-5
 #[test]
 fn exit_75_is_executed_once_and_telemetry_excludes_command_arguments() -> TestResult {
@@ -241,7 +249,7 @@ fn queued_cancel_never_runs_the_command() -> TestResult {
 /// Trace: FR-005-AC-4
 #[test]
 fn hold_timeout_kills_the_group_before_releasing_capacity() -> TestResult {
-    let harness = Harness::new(1, 500)?;
+    let harness = Harness::new(1, 2000)?;
     let marker = harness.root.path().join("started");
     let mut child = harness.command(
         "ignore-term",
@@ -250,10 +258,14 @@ fn hold_timeout_kills_the_group_before_releasing_capacity() -> TestResult {
         1,
     )?;
     observed(|| marker.exists());
+    let descendant = marker.with_extension("descendant");
+    observed(|| descendant.exists());
     assert_eq!(harness.report()?["used_units"], 1);
     assert_eq!(complete(&mut child)?.code(), Some(124));
     assert_eq!(harness.request(0)?["state"], "timed_out");
     assert_eq!(harness.report()?["used_units"], 0);
+    assert!(!fixture_alive(&marker)?);
+    assert!(!fixture_alive(&descendant)?);
     Ok(())
 }
 
@@ -390,6 +402,46 @@ fn policy_read_failure_stops_owned_work_and_retains_lease_until_recovery() -> Te
     Ok(())
 }
 
+/// Trace: FR-005-AC-3, FR-005-AC-5
+#[test]
+fn relative_host_sample_paths_work_from_another_directory_and_prune_removes_logs() -> TestResult {
+    let harness = Harness::new(1, 10000)?;
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["sample_file"] = json!("sample.json");
+    policy["disk_path"] = json!(".");
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let marker = harness.root.path().join("invoked");
+    let mut child = harness.command("exit75", &marker, &harness.root.path().join("release"), 1)?;
+    assert_eq!(complete(&mut child)?.code(), Some(75));
+    let request = harness.request(0)?;
+    let id = request["request_id"].as_str().ok_or("ID missing")?;
+    let log = harness.state.join(format!("{id}.stdout"));
+    assert!(log.exists());
+    assert!(harness.output("prune")?.status.success());
+    assert!(!log.exists());
+    assert_eq!(harness.report()?["requests"], json!([]));
+    assert_eq!(harness.report()?["pruned_events"], 3);
+    Ok(())
+}
+
+/// Trace: FR-005-AC-4
+#[test]
+fn running_cancel_returns_cancelled_after_group_cleanup() -> TestResult {
+    let harness = Harness::new(1, 20000)?;
+    let marker = harness.root.path().join("started");
+    let mut child = harness.command("block", &marker, &harness.root.path().join("release"), 1)?;
+    observed(|| marker.exists());
+    let request = harness.request(0)?;
+    let id = request["request_id"].as_str().ok_or("ID missing")?;
+    assert!(harness.cli().arg("cancel").arg(id).status()?.success());
+    assert_eq!(complete(&mut child)?.code(), Some(130));
+    assert_eq!(harness.request(0)?["state"], "cancelled");
+    assert_eq!(harness.request(0)?["reason"], "cancelled");
+    assert_eq!(harness.report()?["used_units"], 0);
+    assert!(!fixture_alive(&marker)?);
+    Ok(())
+}
+
 #[test]
 #[ignore = "subprocess workload, invoked by supervision tests"]
 fn subprocess_fixture() -> TestResult {
@@ -398,12 +450,24 @@ fn subprocess_fixture() -> TestResult {
         PathBuf::from(std::env::var_os("LOCKED_BUILD_FIXTURE_MARKER").ok_or("marker missing")?);
     let release =
         PathBuf::from(std::env::var_os("LOCKED_BUILD_FIXTURE_RELEASE").ok_or("release missing")?);
-    if mode == "ignore-term" {
+    if mode == "ignore-term" || mode == "leaf-ignore-term" {
         signal_hook::flag::register(
             signal_hook::consts::SIGTERM,
             Arc::new(AtomicBool::new(false)),
         )?;
     }
+    if mode == "ignore-term" {
+        let descendant = marker.with_extension("descendant");
+        Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("subprocess_fixture")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env("LOCKED_BUILD_FIXTURE_MODE", "leaf-ignore-term")
+            .env("LOCKED_BUILD_FIXTURE_MARKER", descendant)
+            .spawn()?;
+    }
+    fs::write(marker.with_extension("pid"), std::process::id().to_string())?;
     let mut file = OpenOptions::new().create(true).append(true).open(marker)?;
     writeln!(file, "invoked")?;
     file.sync_all()?;
@@ -412,7 +476,7 @@ fn subprocess_fixture() -> TestResult {
         "signal" => {
             kill(Pid::this(), Signal::SIGTERM)?;
         }
-        "block" | "ignore-term" => {
+        "block" | "ignore-term" | "leaf-ignore-term" => {
             while !release.exists() {
                 std::thread::sleep(Duration::from_millis(10));
             }

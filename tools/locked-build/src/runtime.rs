@@ -164,6 +164,10 @@ pub struct Report {
     pub requests: Vec<RequestReport>,
     /// Retained transition evidence; pruning is explicit.
     pub events: Vec<Event>,
+    /// Number of transitions removed by explicit pruning.
+    pub pruned_events: u64,
+    /// Next stable event sequence; permits detection of missed history.
+    pub next_event_sequence: u64,
 }
 
 /// One redacted request, including exact wait/hold ages and uncertainty.
@@ -337,6 +341,8 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
             source_error,
             requests,
             events: state.events.clone(),
+            pruned_events: state.pruned_events,
+            next_event_sequence: state.next_event,
         })
     })
 }
@@ -550,8 +556,7 @@ fn supervise(
 }
 
 pub(crate) fn prune(store: &Store) -> Result<usize> {
-    store.transaction(|state, _| {
-        let original = state.requests.len();
+    let terminal = store.transaction(|state, _| {
         let terminal: Vec<_> = state
             .requests
             .iter()
@@ -559,11 +564,29 @@ pub(crate) fn prune(store: &Store) -> Result<usize> {
             .map(|request| request.id.clone())
             .collect();
         state.requests.retain(|request| !request.phase.terminal());
+        let previous_events = state.events.len();
         state
             .events
             .retain(|event| !terminal.contains(&event.request_id));
-        Ok(original.saturating_sub(state.requests.len()))
-    })
+        state.pruned_events = state
+            .pruned_events
+            .checked_add(
+                u64::try_from(previous_events.saturating_sub(state.events.len()))
+                    .map_err(|_| Error::new(ErrorCode::State, "pruned event count out of range"))?,
+            )
+            .ok_or_else(|| Error::new(ErrorCode::State, "pruned event count overflow"))?;
+        Ok(terminal)
+    })?;
+    for id in &terminal {
+        for extension in ["stdout", "stderr"] {
+            match std::fs::remove_file(store.path.join(format!("{}.{extension}", id.0))) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(terminal.len())
 }
 
 fn phase_name(phase: Phase) -> &'static str {

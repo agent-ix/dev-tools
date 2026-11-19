@@ -49,7 +49,7 @@ locked-build --state /tmp/build-queue --config /path/to/host-policy.json prune
 `status` emits JSON with host capacity, occupied/free units, overcommit, host samples,
 request wait/hold ages, uncertainty, outcomes, and stable transition events.
 It omits command arguments and environment values.
-Save terminal evidence before `prune`, which removes terminal requests and their events.
+Save terminal evidence before `prune`, which removes terminal requests, events, and output files.
 
 ## Scheduling
 
@@ -88,7 +88,8 @@ Use [the reference](reference.md) for field and telemetry definitions.
 Point new build invocations at the shared state directory and host policy.
 Route every cooperating wrapper through this executable before treating its capacity view as complete.
 Let existing builds finish under their original wrappers before retiring those wrappers.
-Operator annotations such as agent counts describe planning capacity, not measured build leases.
+Operator agent-count annotations describe planning capacity.
+Read measured build leases from the shared scheduler.
 
 ## Building and testing
 

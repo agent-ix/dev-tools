@@ -71,6 +71,7 @@ impl Store {
                 boot_time: sysinfo::System::boot_time(),
                 next_sequence: 1,
                 next_event: 1,
+                pruned_events: 0,
                 requests: Vec::new(),
                 events: Vec::new(),
             },

@@ -70,6 +70,7 @@ fn state(requests: Vec<Request>) -> State {
         boot_time: 1,
         next_sequence: 100,
         next_event: 1,
+        pruned_events: 0,
         requests,
         events: Vec::new(),
     }

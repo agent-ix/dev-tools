@@ -8,6 +8,8 @@ A host policy is a JSON document defining build admission and supervision limits
 ## Fields
 
 All fields except `sample_file` are required; unknown fields are rejected.
+Relative filesystem paths resolve from the policy file's directory.
+The polling interval cannot exceed the hold deadline or termination grace.
 
 | Field | Meaning |
 |---|---|
@@ -51,6 +53,7 @@ Missing measurements remain unavailable.
 Each transition has stable store/event/request IDs, host, owner, ticket,
 UTC time, resulting state, priority, units, capacity/free units, wait/hold durations, and reason.
 Consumers deduplicate by event ID and retain their own history before pruning.
+`pruned_events` counts removed transitions; `next_event_sequence` exposes missing history.
 Durations use a monotonic clock; UTC timestamps support cross-source correlation.
 
 Requests move from `queued` to `running`, then `succeeded`, `failed`, `timed_out`, or `cancelled`.
@@ -85,4 +88,4 @@ Diagnostics begin with a stable code:
 | `state` | Invalid, unsupported, oversized, or unsafe persisted state. |
 | `request` | Unknown request or invalid requested resource bounds. |
 
-A running command's nonzero result is preserved instead of becoming a scheduler error.
+A running command's nonzero result is preserved as its own outcome.

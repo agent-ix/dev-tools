@@ -50,8 +50,19 @@ pub struct Config {
 
 impl Config {
     pub(crate) fn read(path: &Path) -> Result<Self> {
-        let config: Self = serde_json::from_reader(std::fs::File::open(path)?)
+        let mut config: Self = serde_json::from_reader(std::fs::File::open(path)?)
             .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| Error::new(ErrorCode::Configuration, "policy path has no directory"))?;
+        if config.disk_path.is_relative() {
+            config.disk_path = directory.join(&config.disk_path);
+        }
+        if let Some(sample) = &mut config.sample_file
+            && sample.is_relative()
+        {
+            *sample = directory.join(&*sample);
+        }
         config.validate()?;
         Ok(config)
     }
@@ -70,6 +81,11 @@ impl Config {
             && self.sample_max_age_ms > 0
             && self.heartbeat_max_age_ms > self.poll_ms
             && self.poll_ms > 0
+            && self.poll_ms <= self.hold_ms
+            && self.poll_ms <= self.termination_grace_ms
+            && std::time::Instant::now()
+                .checked_add(std::time::Duration::from_millis(self.termination_grace_ms))
+                .is_some()
             && self.maximum_requests > 0
             && self.maximum_requests <= 100_000
             && u64::from(self.maximum_units)

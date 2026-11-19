@@ -94,6 +94,7 @@ pub(crate) struct State {
     pub boot_time: u64,
     pub next_sequence: u64,
     pub next_event: u64,
+    pub pruned_events: u64,
     pub requests: Vec<Request>,
     pub events: Vec<Event>,
 }
