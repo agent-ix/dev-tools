@@ -248,6 +248,13 @@ This artifact preserves the committed initial review text above and reconstructs
 |---|---|---|
 | FND-001 | fixed | Added deterministic claim/snapshot and superseded-generation tests plus combined primary-crash/cancel and primary-crash/timeout integration oracles. Their race/fence/orphan mutations fail targeted assertions. |
 
+
+### Round 2
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-002 | deferred | Outside the expressly assigned bounded PR acceptance scope: the code lead confirmed that no whole legacy dev-tools assurance gate or AssuranceProfile was requested. Canonical FR-005 lives in agent-ix/dev-team. Full repository assurance requires its own declared spec/traceability scope; do not copy external FRs or add unrelated legacy specs to hide the engine diagnostic. This deferral does not accept any source safety or functional defect. |
+
 ## Recovered round-1 machine record
 
 ```yaml
@@ -267,4 +274,227 @@ This artifact preserves the committed initial review text above and reconstructs
 ## Current status at the recovered checkpoint
 
 The sole original gap finding has a recorded round-1 outcome of `fixed`. No newer gap finding is recorded in this method. The PR remains not mergeable because SR-001 FND-003 is open. This recovery does not extend the original bounded acceptance scope or claim a whole-repository audit.
+
+
+## New findings (disposition pass 2)
+
+| ID | Severity | Summary | Refs |
+|---|---|---|---|
+| FND-002 | high | The engine-backed repository assurance audit is incomplete because this repository has no local spec document root; this limitation is outside the explicitly assigned bounded FR-005 acceptance scope. | /Users/peter/dev/.dev-dept-recovery/swm-166/disposition2/matrix.log:1 |
+
+The installed `quoin:gap-analysis` 0.31.1 skill was loaded. Its explicit static matrix step, `quire matrix --scope /Users/peter/dev/worktrees/dev-tools-swm-166 --format json`, exited 3 with the diagnostic retained in `matrix.log`; no engine coverage result exists. This is recorded as incomplete full assurance, not converted to a PASS or a fabricated grep matrix. Source and test stub inspection of the scheduler surface found no hollow implementations; its new launch, kernel probe, parking, reaping, and recovery behavior maps to the canonical FR-005 lifecycle/occupancy requirements. No whole legacy repository reverse-gap audit is claimed. The code lead explicitly retained the previously assigned bounded acceptance scope and deferred this separate assurance-scope limitation; no external FRs or unrelated specs were authored or copied.
+
+
+## Disposition pass 2 evidence
+
+Frozen source: `c407a0e40f8ffff33514d1fc811a923e806b54ef`. The replacement reviewer read the code, traced every running-lease release path, and ran admitted focused checks sequentially using the existing private target cache: runtime 3 passed; watchdog 2 passed with its intentional child fixture ignored by the outer harness; process-safety 2 passed; supervision 15 passed with its intentional child fixture ignored. All four commands exited 0. Logs are beside these artifacts. No aggregate gate or source edits were performed. The build phase was yielded to the code lead after checks completed.
+
+The controlled missed-direct-birth and descendant-fork tests keep a real process alive outside the supplied stale snapshot and assert that actual occupied units stay at one. The recovery counterpart does the same for the recovery path, then verifies capacity is reclaimed after real exit. The author's snapshot-only mutation logs were inspected: the intended occupied-capacity assertions fail (actual 0, required 1), exit 101. The reviewer did not rerun those mutations. Parking pipes and child handles are closed/reaped; the live watchdog PID pins the original group number during its kernel probe. Inaccessible/existing groups retain occupancy. The independently observed tests retain signal, cancellation, deadline, exact-once exit 75, and unrelated-process survival behavior. Optional repository-wide semantic review was not requested.
+
+
+## Examined scope in disposition pass 2
+
+```yaml
+{
+  "scope": [
+    {
+      "id": "tools/locked-build/src/process.rs",
+      "path": "tools/locked-build/src/process.rs",
+      "role": "examined",
+      "excerpt": "/// Only a kernel ESRCH result proves that no process can still fork in a group.\n/// Permission errors and reused group IDs retain occupancy conservatively.\npub(crate) fn group_absent(group: u32) -> bool {\n    i32::try_from(group).ok().is_some_and(|group| {\n        group > 0 && killpg(Pid::from_raw(group), None) == Err(nix::errno::Errno::ESRCH)\n    })\n}\n\npub(crate) struct Processes {\n    rows: BTreeMap<u32, Row>,\n    complete: bool,\n}\n\nstruct Row {\n    start: u64,\n    group: Option<u32>,\n    arguments: Vec<String>,\n    zombie: bool,\n}\n\n#[derive(Clone, Copy, Debug,"
+    },
+    {
+      "id": "tools/locked-build/src/runtime.rs:start_command",
+      "path": "tools/locked-build/src/runtime.rs",
+      "role": "examined",
+      "excerpt": "        // Creation and every quiescence decision share the durable store lock.\n        Command::new(program)\n            .args(request.command.iter().skip(1))\n            .current_dir(&request.cwd)\n            .process_group(group)\n            .spawn()\n            .map_err(Into::into)\n    })\n}\n\npub(crate) fn prune(store: &Store) -> Result<usize> {\n    let terminal = store.transaction(|state, _| {\n        let terminal: Vec<_> = state\n  "
+    },
+    {
+      "id": "tools/locked-build/src/runtime.rs:recovery",
+      "path": "tools/locked-build/src/runtime.rs",
+      "role": "examined",
+      "excerpt": "                            ) && group_absent(worker.pid)\n                                && request\n                                    .watchdog\n                                    .as_ref()\n                                    .is_none_or(|watchdog| group_absent(watchdog.pid))\n                        })\n                    {\n                        finish.push(request.id.clone());\n                    } else if identity != So"
+    },
+    {
+      "id": "tools/locked-build/src/watchdog.rs:probe_with_parking",
+      "path": "tools/locked-build/src/watchdog.rs",
+      "role": "examined",
+      "excerpt": "        setpgid(Pid::this(), Pid::from_raw(parking_pid))\n            .map_err(|error| Error::new(ErrorCode::Io, format!(\"leave group: {error}\")))?;\n        let absent = group_absent(group);\n        if !absent {\n            // A missed child, including a concurrently forked descendant, retains\n            // occupancy. Rejoin the pinned group to keep enforcing its deadline.\n            setpgid(Pid::this(), Pid::this())\n                .map_err(|error| Error::new(ErrorCode::Io, format!(\"rejoin group: {error}\")))?;\n        }\n        Ok(absent)\n    })();\n    drop(park"
+    },
+    {
+      "id": "tools/locked-build/src/watchdog.rs:observe",
+      "path": "tools/locked-build/src/watchdog.rs",
+      "role": "examined",
+      "excerpt": "        if (worker_lost || request.command_finished.is_some())\n            && no_command_members\n            && probe_exit(watchdog.pid)?\n        {\n            let completion = match &request.command_finished {\n                Some(outcome) => Completion {\n                    code: outcome.code,\n                    signal: outcome.signal,\n                    reason: None,\n                },\n                None => Completion {\n                    reason: Some(\"supervisor_lost\"),\n                    ..Completion::default()\n                },\n            };\n        "
+    },
+    {
+      "id": "tools/locked-build/src/main.rs",
+      "path": "tools/locked-build/src/main.rs",
+      "role": "examined",
+      "excerpt": "    if matches!(cli.command, Action::Parking) {\n        // EOF follows the watchdog's exit, including SIGKILL. No state access is needed.\n        std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;\n        return Ok(0);\n    }\n    if let Action::ErrorCodes { code } = &cli.command {"
+    },
+    {
+      "id": "tools/locked-build/src/runtime/tests.rs",
+      "path": "tools/locked-build/src/runtime/tests.rs",
+      "role": "examined",
+      "excerpt": "    assert_eq!(\n        used_while_alive, 1,\n        \"a non-atomic enumeration released occupied capacity\"\n    );\n    recover(&store)?;\n    store.transaction(|state, _| {\n        assert_eq!(\n            state.used(),\n            0,\n            \"kernel-confirmed group exit must reclaim the lease\"\n        );\n        Ok(())\n    })\n}\n"
+    },
+    {
+      "id": "tools/locked-build/src/watchdog/tests.rs",
+      "path": "tools/locked-build/src/watchdog/tests.rs",
+      "role": "examined",
+      "excerpt": "    assert!(\n        leaf_alive,\n        \"the missed command must still be alive at the decision\"\n    );\n    assert_eq!(\n        occupied, 1,\n        \"watchdog enumeration released actual occupied capacity\"\n    );\n    assert!(\n        matches!(decision, Decision::Observe { .. }),\n        \"a missed live command completed the lease\"\n    );\n    let deadline = Instant::now() + Duration::from_secs(10);\n    loop {\n        let decision = observe(\n            &store,\n           "
+    },
+    {
+      "id": "tools/locked-build/tests/supervision.rs",
+      "path": "tools/locked-build/tests/supervision.rs",
+      "role": "examined",
+      "excerpt": "fn exit_75_survives_forced_descendant_cleanup_and_reaps_its_watchdog() -> TestResult {\n    let harness = Harness::new(1, 10000)?;\n    let marker = harness.root.path().join(\"invocations\");\n    let descendant = marker.with_extension(\"descendant\");\n    let mut child = harness.command(\n        \"exit75-descendant\",\n        &marker,\n        &harness.root.path().join(\"never-release\"),\n        1,\n    )?;\n    assert_eq!(\n        complete_before(&mut child, Duration::from_secs(8))?.code(),\n        Some(75)\n    );\n    assert_eq!(fs::read_to_string(&marker)?, \"invoked\\n\");\n    assert_eq!(harness"
+    },
+    {
+      "id": "tools/locked-build/README.md",
+      "path": "tools/locked-build/README.md",
+      "role": "examined",
+      "excerpt": "Each request has a primary supervisor and a watchdog that owns its command process group.\nThe watchdog starts before the build and enforces the hold deadline, SIGTERM grace, and SIGKILL cleanup.\nA lease remains occupied until the kernel confirms that the command group has disappeared.\nProcess enumeration alone cannot release capacity.\nThe watchdog temporarily leaves its group to check for exit; its live PID prevents group-ID reuse during that check.\nCommand creation and exit checks share the state lock.\nCommands must keep their descendants in that group; detached services require the"
+    },
+    {
+      "id": "tools/locked-build/reference.md",
+      "path": "tools/locked-build/reference.md",
+      "role": "examined",
+      "excerpt": "Release requires a kernel process-group absence result, including after a supervisor crash.\nAn incomplete or empty process enumeration preserves occupancy until that independent check succeeds.\nNo new grant exceeds configured capacity; reduced capacity can report existing overcommit.\n\n## Examples\n\nList stable error codes independently from a host policy:\n\n```sh\nlocked-buil"
+    },
+    {
+      "id": "FR-005-AC-2",
+      "path": "agent-ix/dev-team/spec/functional/FR-005-fair-build-scheduler.md",
+      "role": "examined",
+      "excerpt": "Higher-priority waiting work gets the next available capacity before aging reservation, while an already running child continues; no new grant exceeds current capacity or duplicates leased units. If capacity shrinks from two units to one while two units are running, both continue, overcommit is reported, and new admission waits for sufficient release."
+    },
+    {
+      "id": "FR-005-AC-4",
+      "path": "agent-ix/dev-team/spec/functional/FR-005-fair-build-scheduler.md",
+      "role": "examined",
+      "excerpt": "Timeout, cancellation, child crash, scheduler restart, stale heartbeat and PID-reuse fixtures reclaim leases only after verified termination of the owned child group; unrelated children are never terminated."
+    }
+  ]
+}
+```
+
+## Verdict after disposition pass 2
+
+**The bounded acceptance finding is fixed. Full engine-backed repository assurance is INCOMPLETE/unavailable.** The new assurance-scope finding is explicitly deferred outside this PR's assigned acceptance scope under the code lead's scope instruction; it is not a source bug or an accepted safety defect. No real source safety or functional finding remains open. Bounded merge readiness remains subject to the code lead's final gate. Plan completion: not assessed.
+
+## Disposition pass 2 machine record
+
+```yaml
+{
+  "dispositions": [
+    {
+      "fnd": "FND-002",
+      "outcome": "deferred",
+      "reason": "Outside the expressly assigned bounded PR acceptance scope: the code lead confirmed that no whole legacy dev-tools assurance gate or AssuranceProfile was requested. Canonical FR-005 lives in agent-ix/dev-team. Full repository assurance requires its own declared spec/traceability scope; do not copy external FRs or add unrelated legacy specs to hide the engine diagnostic. This deferral does not accept any source safety or functional defect."
+    }
+  ],
+  "scope": [
+    {
+      "id": "tools/locked-build/src/process.rs",
+      "path": "tools/locked-build/src/process.rs",
+      "role": "examined",
+      "excerpt": "/// Only a kernel ESRCH result proves that no process can still fork in a group.\n/// Permission errors and reused group IDs retain occupancy conservatively.\npub(crate) fn group_absent(group: u32) -> bool {\n    i32::try_from(group).ok().is_some_and(|group| {\n        group > 0 && killpg(Pid::from_raw(group), None) == Err(nix::errno::Errno::ESRCH)\n    })\n}\n\npub(crate) struct Processes {\n    rows: BTreeMap<u32, Row>,\n    complete: bool,\n}\n\nstruct Row {\n    start: u64,\n    group: Option<u32>,\n    arguments: Vec<String>,\n    zombie: bool,\n}\n\n#[derive(Clone, Copy, Debug,"
+    },
+    {
+      "id": "tools/locked-build/src/runtime.rs:start_command",
+      "path": "tools/locked-build/src/runtime.rs",
+      "role": "examined",
+      "excerpt": "        // Creation and every quiescence decision share the durable store lock.\n        Command::new(program)\n            .args(request.command.iter().skip(1))\n            .current_dir(&request.cwd)\n            .process_group(group)\n            .spawn()\n            .map_err(Into::into)\n    })\n}\n\npub(crate) fn prune(store: &Store) -> Result<usize> {\n    let terminal = store.transaction(|state, _| {\n        let terminal: Vec<_> = state\n  "
+    },
+    {
+      "id": "tools/locked-build/src/runtime.rs:recovery",
+      "path": "tools/locked-build/src/runtime.rs",
+      "role": "examined",
+      "excerpt": "                            ) && group_absent(worker.pid)\n                                && request\n                                    .watchdog\n                                    .as_ref()\n                                    .is_none_or(|watchdog| group_absent(watchdog.pid))\n                        })\n                    {\n                        finish.push(request.id.clone());\n                    } else if identity != So"
+    },
+    {
+      "id": "tools/locked-build/src/watchdog.rs:probe_with_parking",
+      "path": "tools/locked-build/src/watchdog.rs",
+      "role": "examined",
+      "excerpt": "        setpgid(Pid::this(), Pid::from_raw(parking_pid))\n            .map_err(|error| Error::new(ErrorCode::Io, format!(\"leave group: {error}\")))?;\n        let absent = group_absent(group);\n        if !absent {\n            // A missed child, including a concurrently forked descendant, retains\n            // occupancy. Rejoin the pinned group to keep enforcing its deadline.\n            setpgid(Pid::this(), Pid::this())\n                .map_err(|error| Error::new(ErrorCode::Io, format!(\"rejoin group: {error}\")))?;\n        }\n        Ok(absent)\n    })();\n    drop(park"
+    },
+    {
+      "id": "tools/locked-build/src/watchdog.rs:observe",
+      "path": "tools/locked-build/src/watchdog.rs",
+      "role": "examined",
+      "excerpt": "        if (worker_lost || request.command_finished.is_some())\n            && no_command_members\n            && probe_exit(watchdog.pid)?\n        {\n            let completion = match &request.command_finished {\n                Some(outcome) => Completion {\n                    code: outcome.code,\n                    signal: outcome.signal,\n                    reason: None,\n                },\n                None => Completion {\n                    reason: Some(\"supervisor_lost\"),\n                    ..Completion::default()\n                },\n            };\n        "
+    },
+    {
+      "id": "tools/locked-build/src/main.rs",
+      "path": "tools/locked-build/src/main.rs",
+      "role": "examined",
+      "excerpt": "    if matches!(cli.command, Action::Parking) {\n        // EOF follows the watchdog's exit, including SIGKILL. No state access is needed.\n        std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;\n        return Ok(0);\n    }\n    if let Action::ErrorCodes { code } = &cli.command {"
+    },
+    {
+      "id": "tools/locked-build/src/runtime/tests.rs",
+      "path": "tools/locked-build/src/runtime/tests.rs",
+      "role": "examined",
+      "excerpt": "    assert_eq!(\n        used_while_alive, 1,\n        \"a non-atomic enumeration released occupied capacity\"\n    );\n    recover(&store)?;\n    store.transaction(|state, _| {\n        assert_eq!(\n            state.used(),\n            0,\n            \"kernel-confirmed group exit must reclaim the lease\"\n        );\n        Ok(())\n    })\n}\n"
+    },
+    {
+      "id": "tools/locked-build/src/watchdog/tests.rs",
+      "path": "tools/locked-build/src/watchdog/tests.rs",
+      "role": "examined",
+      "excerpt": "    assert!(\n        leaf_alive,\n        \"the missed command must still be alive at the decision\"\n    );\n    assert_eq!(\n        occupied, 1,\n        \"watchdog enumeration released actual occupied capacity\"\n    );\n    assert!(\n        matches!(decision, Decision::Observe { .. }),\n        \"a missed live command completed the lease\"\n    );\n    let deadline = Instant::now() + Duration::from_secs(10);\n    loop {\n        let decision = observe(\n            &store,\n           "
+    },
+    {
+      "id": "tools/locked-build/tests/supervision.rs",
+      "path": "tools/locked-build/tests/supervision.rs",
+      "role": "examined",
+      "excerpt": "fn exit_75_survives_forced_descendant_cleanup_and_reaps_its_watchdog() -> TestResult {\n    let harness = Harness::new(1, 10000)?;\n    let marker = harness.root.path().join(\"invocations\");\n    let descendant = marker.with_extension(\"descendant\");\n    let mut child = harness.command(\n        \"exit75-descendant\",\n        &marker,\n        &harness.root.path().join(\"never-release\"),\n        1,\n    )?;\n    assert_eq!(\n        complete_before(&mut child, Duration::from_secs(8))?.code(),\n        Some(75)\n    );\n    assert_eq!(fs::read_to_string(&marker)?, \"invoked\\n\");\n    assert_eq!(harness"
+    },
+    {
+      "id": "tools/locked-build/README.md",
+      "path": "tools/locked-build/README.md",
+      "role": "examined",
+      "excerpt": "Each request has a primary supervisor and a watchdog that owns its command process group.\nThe watchdog starts before the build and enforces the hold deadline, SIGTERM grace, and SIGKILL cleanup.\nA lease remains occupied until the kernel confirms that the command group has disappeared.\nProcess enumeration alone cannot release capacity.\nThe watchdog temporarily leaves its group to check for exit; its live PID prevents group-ID reuse during that check.\nCommand creation and exit checks share the state lock.\nCommands must keep their descendants in that group; detached services require the"
+    },
+    {
+      "id": "tools/locked-build/reference.md",
+      "path": "tools/locked-build/reference.md",
+      "role": "examined",
+      "excerpt": "Release requires a kernel process-group absence result, including after a supervisor crash.\nAn incomplete or empty process enumeration preserves occupancy until that independent check succeeds.\nNo new grant exceeds configured capacity; reduced capacity can report existing overcommit.\n\n## Examples\n\nList stable error codes independently from a host policy:\n\n```sh\nlocked-buil"
+    },
+    {
+      "id": "FR-005-AC-2",
+      "path": "agent-ix/dev-team/spec/functional/FR-005-fair-build-scheduler.md",
+      "role": "examined",
+      "excerpt": "Higher-priority waiting work gets the next available capacity before aging reservation, while an already running child continues; no new grant exceeds current capacity or duplicates leased units. If capacity shrinks from two units to one while two units are running, both continue, overcommit is reported, and new admission waits for sufficient release."
+    },
+    {
+      "id": "FR-005-AC-4",
+      "path": "agent-ix/dev-team/spec/functional/FR-005-fair-build-scheduler.md",
+      "role": "examined",
+      "excerpt": "Timeout, cancellation, child crash, scheduler restart, stale heartbeat and PID-reuse fixtures reclaim leases only after verified termination of the owned child group; unrelated children are never terminated."
+    },
+    {
+      "id": "matrix.log",
+      "path": "/Users/peter/dev/.dev-dept-recovery/swm-166/disposition2/matrix.log",
+      "role": "examined",
+      "excerpt": "member '--scope': no document root at '/Users/peter/dev/worktrees/dev-tools-swm-166/spec': spec documents live in `spec/` under the repository root (quire-rs FR-050 two-roots); name the repository root, or create spec/"
+    }
+  ],
+  "findings": [
+    {
+      "fnd": "FND-002",
+      "severity": "high",
+      "confidence": "high",
+      "method": "gap-analysis",
+      "check": "other",
+      "artifact_id": "matrix.log",
+      "related_ids": [],
+      "path": "/Users/peter/dev/.dev-dept-recovery/swm-166/disposition2/matrix.log",
+      "lines": "1",
+      "excerpt": "member '--scope': no document root at '/Users/peter/dev/worktrees/dev-tools-swm-166/spec': spec documents live in `spec/` under the repository root (quire-rs FR-050 two-roots); name the repository root, or create spec/",
+      "finding": "The engine-backed repository assurance audit is incomplete because this repository has no local spec document root; this limitation is outside the explicitly assigned bounded FR-005 acceptance scope."
+    }
+  ]
+}
+```
 
