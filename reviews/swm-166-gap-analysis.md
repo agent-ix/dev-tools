@@ -230,3 +230,41 @@ FND-001 interleaving: collector snapshots before A exists; A claims queued reque
 
 FR-005-AC-5 emitter fields/units/events were inspected; downstream ix-board ingestion remains explicitly owned by SWM-164 and was not exercised here. FR-005-AC-6 migration docs preserve running legacy builds and do not claim activation. No whole-repository matrix or historical corpus replay is claimed. Plan completion: not assessed.
 
+
+## Recovery provenance
+
+This artifact preserves the committed initial review text above and reconstructs disposition pass 1 from the existing Linear comment below. The former scratch files were lost during the session crash. This is a reconstruction from durable records, not a byte-for-byte claim about the lost scratch file. No domain review, test execution, or new disposition occurred during recovery.
+
+- Source artifact: `reviews/swm-166-gap-analysis.md` at commit `a8843b9e5b3247faa11f1fb1c405d0a61d81b9ea`.
+- Authoritative round-1 comment: `1057c6b2-19a2-4fef-9d4d-737015ce1e18` on SWM-166.
+- Round-1 source marker is retained in `linear-round1-source-comments.json` alongside this file.
+- Current checkpoint: PR dev-tools#19 at `a8843b9e5b3247faa11f1fb1c405d0a61d81b9ea`.
+
+## Dispositions
+
+### Round 1 — recovered from Linear
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-001 | fixed | Added deterministic claim/snapshot and superseded-generation tests plus combined primary-crash/cancel and primary-crash/timeout integration oracles. Their race/fence/orphan mutations fail targeted assertions. |
+
+## Recovered round-1 machine record
+
+```yaml
+{
+  "dispositions": [
+    {
+      "fnd": "FND-001",
+      "outcome": "fixed",
+      "after_excerpt": "fn cancellation_after_supervisor_loss_stops_owned_descendants_and_preserves_unrelated_work()\n-> TestResult {\n    let harness = Harness::new(1, 20000)?;\n    let marker = harness.root.path().join(\"owned\");\n    let descendant = marker.with_extension(\"descendant\");\n    let mut child = harness.command(\n        \"ignore-term\",\n        &marker,\n        &harness.root.path().join(\"never-release\"),\n        1,\n    )?;\n",
+      "reason": "Added deterministic claim/snapshot and superseded-generation tests plus combined primary-crash/cancel and primary-crash/timeout integration oracles. Their race/fence/orphan mutations fail targeted assertions."
+    }
+  ],
+  "findings": []
+}
+```
+
+## Current status at the recovered checkpoint
+
+The sole original gap finding has a recorded round-1 outcome of `fixed`. No newer gap finding is recorded in this method. The PR remains not mergeable because SR-001 FND-003 is open. This recovery does not extend the original bounded acceptance scope or claim a whole-repository audit.
+

@@ -60,9 +60,16 @@ enum Action {
     Worker { request: String },
     #[command(hide = true)]
     Watchdog { request: String, generation: u64 },
+    #[command(hide = true)]
+    Parking,
 }
 
 fn execute(cli: Cli) -> Result<i32> {
+    if matches!(cli.command, Action::Parking) {
+        // EOF follows the watchdog's exit, including SIGKILL. No state access is needed.
+        std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;
+        return Ok(0);
+    }
     if let Action::ErrorCodes { code } = &cli.command {
         let codes = match code {
             Some(code) => vec![error::ErrorCode::from_code(code).ok_or_else(|| {
@@ -86,6 +93,7 @@ fn execute(cli: Cli) -> Result<i32> {
     let store = runtime::open(state, config)?;
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
+        Action::Parking => Ok(0),
         Action::Run {
             owner,
             ticket,
@@ -95,8 +103,8 @@ fn execute(cli: Cli) -> Result<i32> {
         } => {
             let id = runtime::enqueue(&store, &owner, &ticket, units, priority, &command)?;
             eprintln!("request={} output={}", id.0, store.path.display());
-            runtime::spawn_worker(&store, &id)?;
-            runtime::wait(&store, &id)
+            let worker = runtime::spawn_worker(&store, &id)?;
+            runtime::wait(&store, &id, vec![worker])
         }
         Action::Status => {
             println!("{}", serde_json::to_string(&runtime::status(&store)?)?);

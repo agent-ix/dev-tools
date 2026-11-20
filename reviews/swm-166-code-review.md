@@ -231,3 +231,72 @@ FND-001 interleaving: collector snapshots before A exists; A claims queued reque
 
 FR-005-AC-5 emitter fields/units/events were inspected; downstream ix-board ingestion remains explicitly owned by SWM-164 and was not exercised here. FR-005-AC-6 migration docs preserve running legacy builds and do not claim activation. No whole-repository matrix or historical corpus replay is claimed. Plan completion: not assessed.
 
+
+## Recovery provenance
+
+This artifact preserves the committed initial review text above and reconstructs disposition pass 1 from the existing Linear comment below. The former scratch files were lost during the session crash. This is a reconstruction from durable records, not a byte-for-byte claim about the lost scratch file. No domain review, test execution, or new disposition occurred during recovery.
+
+- Source artifact: `reviews/swm-166-code-review.md` at commit `a8843b9e5b3247faa11f1fb1c405d0a61d81b9ea`.
+- Authoritative round-1 comment: `e21aa874-b761-47cd-a9b8-a504ed150051` on SWM-166.
+- Round-1 source marker is retained in `linear-round1-source-comments.json` alongside this file.
+- Current checkpoint: PR dev-tools#19 at `a8843b9e5b3247faa11f1fb1c405d0a61d81b9ea`.
+
+## Dispositions
+
+### Round 1 — recovered from Linear
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-001 | fixed | Process collection occurs under the store lock, and generation/identity fences protect admission, heartbeat and completion; two deterministic regressions pass and targeted mutations fail. |
+| FND-002 | fixed | Authenticated companion watchdog is started before command execution and continues configured cancellation/hold enforcement after primary death. Real crash/cancel and crash/timeout regressions pass, including TERM-resistant descendants and unrelated-process survival. |
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+|---|---|---|---|
+| FND-003 | high | The watchdog releases a lost supervisor's lease from an empty non-atomic process enumeration; a command born after PID-list capture can be absent from that enumeration while its parent has already exited, so occupied capacity is released before group exit is verified. | tools/locked-build/src/watchdog.rs:157-199; tools/locked-build/src/process.rs:65; tools/locked-build/src/runtime.rs:560 |
+
+The original round-1 reviewer traced this interleaving against the macOS sysinfo 0.37.2 implementation: PID-list capture precedes a command spawn outside the store lock; the primary exits before its row is refreshed; the child is absent from the captured list while the watchdog remains visible. Empty command rows therefore do not establish group exit. This was a traced interleaving, not a claimed live timing reproduction. Final group exit needs independent verification or conservative lease retention. A controlled snapshot/command-start regression must use actual occupancy as its oracle.
+
+## Recovered round-1 machine record
+
+```yaml
+{
+  "dispositions": [
+    {
+      "fnd": "FND-001",
+      "outcome": "fixed",
+      "after_excerpt": "fn recover_with_processes(\n    store: &Store,\n    read_processes: impl FnOnce() -> Processes,\n) -> Result<Vec<RequestId>> {\n    store.transaction(|state, config| {\n        let now = now_ms()?;\n        let clock = clock_ms()?;\n        let processes = read_processes();",
+      "reason": "Process collection occurs under the store lock, and generation/identity fences protect admission, heartbeat and completion; two deterministic regressions pass and targeted mutations fail."
+    },
+    {
+      "fnd": "FND-002",
+      "outcome": "fixed",
+      "after_excerpt": "            if request.stop.is_none()\n                && request.started_clock_ms.is_some_and(|started| {\n                    clock_ms().is_ok_and(|now| now.saturating_sub(started) >= config.hold_ms)\n                })\n            {\n                request.stop = Some(StopReason::TimedOut);\n            }",
+      "reason": "Authenticated companion watchdog is started before command execution and continues configured cancellation/hold enforcement after primary death. Real crash/cancel and crash/timeout regressions pass, including TERM-resistant descendants and unrelated-process survival."
+    }
+  ],
+  "findings": [
+    {
+      "fnd": "FND-003",
+      "severity": "high",
+      "confidence": "high",
+      "method": "code-review",
+      "check": "code-bug",
+      "artifact_id": "FR-005-AC-2",
+      "related_ids": [
+        "FR-005-AC-4"
+      ],
+      "path": "tools/locked-build/src/watchdog.rs",
+      "lines": "157-199",
+      "excerpt": "Higher-priority waiting work gets the next available capacity before aging reservation, while an already running child continues; no new grant exceeds current capacity or duplicates leased units. If capacity shrinks from two units to one while two units are running, both continue, overcommit is reported, and new admission waits for sufficient release.",
+      "finding": "The watchdog releases a lost supervisor's lease from an empty non-atomic process enumeration; a command born after PID-list capture can be absent from that enumeration while its parent has already exited, so occupied capacity is released before group exit is verified."
+    }
+  ]
+}
+```
+
+## Current status at the recovered checkpoint
+
+**Not mergeable.** FND-001 and FND-002 have recorded round-1 outcomes of `fixed`. FND-003 has no later outcome and remains open; source fix round 2 and independent disposition pass 2 are pending.
+

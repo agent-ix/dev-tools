@@ -130,16 +130,19 @@ fn superseded_worker_cannot_admit_or_complete_a_replacement_generation() -> Resu
         Admission::Granted(_)
     ));
     assert!(
-        finish_owned(
-            &store,
-            &id,
-            &old,
-            Completion {
-                code: Some(0),
-                ..Completion::default()
-            }
-        )
-        .is_err()
+        store
+            .transaction(|state, config| finish_owned(
+                state,
+                config,
+                &id,
+                &old,
+                u32::MAX - 1,
+                Completion {
+                    code: Some(0),
+                    ..Completion::default()
+                }
+            ))
+            .is_err()
     );
     store.transaction(|state, _| {
         assert_eq!(
@@ -148,6 +151,49 @@ fn superseded_worker_cannot_admit_or_complete_a_replacement_generation() -> Resu
             "a stale completion released the replacement lease"
         );
         assert_eq!(state.find(&id)?.worker_generation, replacement.generation);
+        Ok(())
+    })
+}
+
+/// Trace: FR-005-AC-2, FR-005-AC-4
+#[test]
+fn recovery_keeps_actual_occupancy_for_a_command_born_after_pid_capture() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let snapshot = Processes::read();
+    let mut child = Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()?;
+    let identity = ProcessIdentity {
+        pid: child.id(),
+        started_seconds: 1,
+    };
+    let fence = claim_worker(&store, &id, &identity)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+    let admission = admit_worker(&store, &id, &fence, &AtomicBool::new(false))?;
+    assert!(matches!(admission, Admission::Granted(_)));
+    recover_with_processes(&store, || snapshot)?;
+    let used_while_alive = store.transaction(|state, _| Ok(state.used()))?;
+    let alive = child.try_wait()?.is_none();
+    child.kill()?;
+    child.wait()?;
+    assert!(
+        alive,
+        "the missed process must still occupy its group at the decision"
+    );
+    assert_eq!(
+        used_while_alive, 1,
+        "a non-atomic enumeration released occupied capacity"
+    );
+    recover(&store)?;
+    store.transaction(|state, _| {
+        assert_eq!(
+            state.used(),
+            0,
+            "kernel-confirmed group exit must reclaim the lease"
+        );
         Ok(())
     })
 }

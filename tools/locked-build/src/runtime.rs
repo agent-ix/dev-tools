@@ -5,20 +5,19 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use nix::sys::signal::Signal;
 use serde::Serialize;
 
 use crate::config::HostSample;
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{CommandOutcome, Completion, Event, Phase, Request, RequestId, StopReason};
-use crate::process::{IdentityState, Processes};
+use crate::process::{IdentityState, Processes, group_absent};
 use crate::store::Store;
 
 pub(crate) fn now_ms() -> Result<u64> {
@@ -114,7 +113,7 @@ pub(crate) fn enqueue(
     })
 }
 
-pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<()> {
+pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<Child> {
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -125,7 +124,7 @@ pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<()> {
         .append(true)
         .mode(0o600)
         .open(store.path.join(format!("{}.stderr", id.0)))?;
-    Command::new(std::env::current_exe()?)
+    let child = Command::new(std::env::current_exe()?)
         .arg("--state")
         .arg(&store.path)
         .arg("--config")
@@ -137,7 +136,7 @@ pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<()> {
         .stderr(stderr)
         .process_group(0)
         .spawn()?;
-    Ok(())
+    Ok(child)
 }
 
 /// Redacted snapshot suitable for deterministic monitoring consumers.
@@ -256,7 +255,11 @@ fn recover_with_processes(
                             matches!(
                                 identity,
                                 Some(IdentityState::Absent | IdentityState::Different)
-                            ) && !processes.group_has_live_members(worker.pid, None)
+                            ) && group_absent(worker.pid)
+                                && request
+                                    .watchdog
+                                    .as_ref()
+                                    .is_none_or(|watchdog| group_absent(watchdog.pid))
                         })
                     {
                         finish.push(request.id.clone());
@@ -270,11 +273,14 @@ fn recover_with_processes(
         finish.sort_by(|left, right| left.0.cmp(&right.0));
         finish.dedup();
         for id in finish {
+            let outcome = state.find(&id)?.command_finished.as_ref();
+            let code = outcome.and_then(|outcome| outcome.code);
+            let signal = outcome.and_then(|outcome| outcome.signal);
             state.finish(
                 &id,
                 Completion {
-                    code: None,
-                    signal: None,
+                    code,
+                    signal,
                     reason: Some(if rebooted {
                         "host_rebooted"
                     } else {
@@ -372,10 +378,17 @@ pub(crate) fn cancel(store: &Store, id: &RequestId) -> Result<()> {
     })
 }
 
-pub(crate) fn wait(store: &Store, id: &RequestId) -> Result<i32> {
+pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Result<i32> {
     loop {
+        let mut active = Vec::new();
+        for mut worker in workers {
+            if worker.try_wait()?.is_none() {
+                active.push(worker);
+            }
+        }
+        workers = active;
         for missing in recover(store)? {
-            spawn_worker(store, &missing)?;
+            workers.push(spawn_worker(store, &missing)?);
         }
         let result = store.transaction(|state, config| {
             let request = state.find(id)?;
@@ -487,15 +500,21 @@ fn admit_worker(
 }
 
 fn finish_owned(
-    store: &Store,
+    state: &mut crate::model::State,
+    config: &crate::config::Config,
     id: &RequestId,
     fence: &WorkerFence,
+    group: u32,
     completion: Completion<'_>,
 ) -> Result<()> {
-    store.transaction(|state, config| {
-        fence.require_running(state.find(id)?)?;
-        state.finish(id, completion, config, now_ms()?, clock_ms()?)
-    })
+    fence.require_running(state.find(id)?)?;
+    if !group_absent(group) {
+        return Err(Error::new(
+            ErrorCode::State,
+            "command group exit unverified",
+        ));
+    }
+    state.finish(id, completion, config, now_ms()?, clock_ms()?)
 }
 
 pub(crate) fn worker(store: &Store, id: &RequestId) -> Result<()> {
@@ -513,36 +532,16 @@ pub(crate) fn worker(store: &Store, id: &RequestId) -> Result<()> {
             Admission::Granted(request) => break *request,
         }
     };
-    let cleanup_policy = crate::config::Config::read(&store.config_path)?;
-    let result = (|| {
-        let watchdog = crate::watchdog::launch(store, id, &identity, fence.generation)?;
-        supervise(store, &request, &fence, &watchdog, &interrupted)
-    })();
-    if result.is_err() {
-        let processes = Processes::read();
-        if processes.group_has_live_members(identity.pid, Some(identity.pid)) {
-            processes.signal_owned(&identity, id, Signal::SIGTERM)?;
-            let deadline = Instant::now()
-                .checked_add(Duration::from_millis(cleanup_policy.termination_grace_ms))
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::Configuration,
-                        "termination grace exceeds clock range",
-                    )
-                })?;
-            loop {
-                let processes = Processes::read();
-                if !processes.group_has_live_members(identity.pid, Some(identity.pid)) {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    processes.signal_owned(&identity, id, Signal::SIGKILL)?;
-                }
-                std::thread::sleep(Duration::from_millis(cleanup_policy.poll_ms));
-            }
-        }
-    }
-    result
+    let (watchdog, mut watchdog_child) =
+        crate::watchdog::launch(store, id, &identity, fence.generation)?;
+    supervise(
+        store,
+        &request,
+        &fence,
+        &watchdog,
+        &mut watchdog_child,
+        &interrupted,
+    )
 }
 
 fn supervise(
@@ -550,39 +549,21 @@ fn supervise(
     request: &Request,
     fence: &WorkerFence,
     watchdog: &crate::model::ProcessIdentity,
+    watchdog_child: &mut Child,
     interrupted: &AtomicBool,
 ) -> Result<()> {
-    let identity = &fence.identity;
-    store.transaction(|state, _| fence.require_running(state.find(&request.id)?))?;
-    let Some(program) = request.command.first() else {
-        return Err(Error::new(ErrorCode::State, "persisted empty command"));
-    };
-    let mut child = match Command::new(program)
-        .args(request.command.iter().skip(1))
-        .current_dir(&request.cwd)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => {
-            return finish_owned(
-                store,
-                &request.id,
-                fence,
-                Completion {
-                    reason: Some("command_spawn_failed"),
-                    ..Completion::default()
-                },
-            );
-        }
-    };
-    let started = Instant::now();
-    let mut stopping: Option<Instant> = None;
-    let mut status: Option<ExitStatus> = None;
+    let mut child = start_command(store, request, fence, watchdog)?;
+    let mut status = None;
     loop {
+        // A dead watchdog remains a group member until its parent reaps it.
+        watchdog_child.try_wait()?;
         if status.is_none() {
             status = child.try_wait()?;
         }
         let policy = store.transaction(|state, config| {
+            if state.find(&request.id)?.phase.terminal() {
+                return Ok(None);
+            }
             fence.require_running(state.find(&request.id)?)?;
             let current = state.find_mut(&request.id)?;
             if let Some(outcome) = status {
@@ -594,7 +575,7 @@ fn supervise(
                 watchdog,
                 &request.id,
                 "watchdog",
-                identity.pid,
+                watchdog.pid,
             ) != IdentityState::Matching
             {
                 return Err(Error::new(
@@ -604,46 +585,71 @@ fn supervise(
             }
             current.heartbeat_at_ms = Some(now_ms()?);
             if current.stop.is_none() {
-                if interrupted.load(Ordering::Relaxed) && stopping.is_none() {
+                if interrupted.load(Ordering::Relaxed) {
                     current.stop = Some(StopReason::Cancelled);
-                } else if started.elapsed() >= Duration::from_millis(config.hold_ms) {
+                } else if current.started_clock_ms.is_some_and(|start| {
+                    clock_ms().is_ok_and(|now| now.saturating_sub(start) >= config.hold_ms)
+                }) {
                     current.stop = Some(StopReason::TimedOut);
                 }
             }
-            Ok((current.stop, config.termination_grace_ms, config.poll_ms))
-        })?;
-        let processes = Processes::read();
-        let controls = [identity.pid, watchdog.pid];
-        let has_descendants = processes.group_has_live_members_excluding(identity.pid, &controls);
-        if status.is_some() && !has_descendants {
-            return finish_owned(
-                store,
-                &request.id,
-                fence,
-                Completion {
-                    code: status.and_then(|value| value.code()),
-                    signal: status.and_then(|value| value.signal()),
-                    reason: stopping.map(|_| "remaining_descendants_terminated"),
-                },
-            );
-        }
-        if policy.0.is_some()
-            || (status.is_some()
-                && processes.confirmed_group_has_live_members_excluding(identity.pid, &controls))
-        {
-            if let Some(stopping_at) = stopping {
-                if stopping_at.elapsed() >= Duration::from_millis(policy.1) {
-                    // SIGKILL includes this stable group leader. Recovery finalizes only after
-                    // all live members disappear, retaining the lease across supervisor death.
-                    processes.signal_owned(identity, &request.id, Signal::SIGKILL)?;
-                }
-            } else {
-                processes.signal_owned(identity, &request.id, Signal::SIGTERM)?;
-                stopping = Some(Instant::now());
+            if let Some(outcome) = status
+                && group_absent(watchdog.pid)
+            {
+                finish_owned(
+                    state,
+                    config,
+                    &request.id,
+                    fence,
+                    watchdog.pid,
+                    Completion {
+                        code: outcome.code(),
+                        signal: outcome.signal(),
+                        reason: None,
+                    },
+                )?;
+                return Ok(None);
             }
-        }
-        std::thread::sleep(Duration::from_millis(policy.2));
+            Ok(Some(config.poll_ms))
+        })?;
+        let Some(poll_ms) = policy else {
+            return Ok(());
+        };
+        std::thread::sleep(Duration::from_millis(poll_ms));
     }
+}
+
+fn start_command(
+    store: &Store,
+    request: &Request,
+    fence: &WorkerFence,
+    watchdog: &crate::model::ProcessIdentity,
+) -> Result<Child> {
+    store.transaction(|state, _| {
+        fence.require_running(state.find(&request.id)?)?;
+        if state.find(&request.id)?.watchdog.as_ref() != Some(watchdog)
+            || Processes::read().role_identity(watchdog, &request.id, "watchdog", watchdog.pid)
+                != IdentityState::Matching
+        {
+            return Err(Error::new(
+                ErrorCode::State,
+                "command group ownership unavailable",
+            ));
+        }
+        let program = request
+            .command
+            .first()
+            .ok_or_else(|| Error::new(ErrorCode::State, "persisted empty command"))?;
+        let group = i32::try_from(watchdog.pid)
+            .map_err(|_| Error::new(ErrorCode::State, "command group out of range"))?;
+        // Creation and every quiescence decision share the durable store lock.
+        Command::new(program)
+            .args(request.command.iter().skip(1))
+            .current_dir(&request.cwd)
+            .process_group(group)
+            .spawn()
+            .map_err(Into::into)
+    })
 }
 
 pub(crate) fn prune(store: &Store) -> Result<usize> {

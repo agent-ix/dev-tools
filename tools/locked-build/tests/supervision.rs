@@ -238,6 +238,28 @@ fn exit_75_is_executed_once_and_telemetry_excludes_command_arguments() -> TestRe
     Ok(())
 }
 
+/// Trace: FR-005-AC-4, FR-005-AC-7
+#[test]
+fn exit_75_survives_forced_descendant_cleanup_and_reaps_its_watchdog() -> TestResult {
+    let harness = Harness::new(1, 10000)?;
+    let marker = harness.root.path().join("invocations");
+    let descendant = marker.with_extension("descendant");
+    let mut child = harness.command(
+        "exit75-descendant",
+        &marker,
+        &harness.root.path().join("never-release"),
+        1,
+    )?;
+    assert_eq!(
+        complete_before(&mut child, Duration::from_secs(8))?.code(),
+        Some(75)
+    );
+    assert_eq!(fs::read_to_string(&marker)?, "invoked\n");
+    assert_eq!(harness.report()?["used_units"], 0);
+    assert!(!fixture_alive(&descendant)?);
+    Ok(())
+}
+
 /// Trace: FR-005-AC-7
 #[test]
 fn a_signaled_command_returns_non_success() -> TestResult {
@@ -610,7 +632,7 @@ fn subprocess_fixture() -> TestResult {
             Arc::new(AtomicBool::new(false)),
         )?;
     }
-    if mode == "ignore-term" {
+    if mode == "ignore-term" || mode == "exit75-descendant" {
         let descendant = marker.with_extension("descendant");
         Command::new(std::env::current_exe()?)
             .arg("--exact")
@@ -620,15 +642,16 @@ fn subprocess_fixture() -> TestResult {
             .arg("--skip")
             .arg(&descendant)
             .env("LOCKED_BUILD_FIXTURE_MODE", "leaf-ignore-term")
-            .env("LOCKED_BUILD_FIXTURE_MARKER", descendant)
+            .env("LOCKED_BUILD_FIXTURE_MARKER", &descendant)
             .spawn()?;
+        observed(|| descendant.exists());
     }
     fs::write(pid_file(&marker), std::process::id().to_string())?;
     let mut file = OpenOptions::new().create(true).append(true).open(marker)?;
     writeln!(file, "invoked")?;
     file.sync_all()?;
     match mode.as_str() {
-        "exit75" => std::process::exit(75),
+        "exit75" | "exit75-descendant" => std::process::exit(75),
         "signal" => {
             kill(Pid::this(), Signal::SIGTERM)?;
         }

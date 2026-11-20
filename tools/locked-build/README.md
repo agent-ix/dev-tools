@@ -66,10 +66,12 @@ This can leave additional headroom when running builds already consume their bud
 
 ## Supervision and recovery
 
-Each request has an isolated supervisor process group.
-A companion watchdog joins that group before the build starts.
-The supervisor and watchdog enforce the hold deadline, SIGTERM grace, and SIGKILL cleanup.
-A lease remains occupied until its command group has stopped.
+Each request has a primary supervisor and a watchdog that owns its command process group.
+The watchdog starts before the build and enforces the hold deadline, SIGTERM grace, and SIGKILL cleanup.
+A lease remains occupied until the kernel confirms that the command group has disappeared.
+Process enumeration alone cannot release capacity.
+The watchdog temporarily leaves its group to check for exit; its live PID prevents group-ID reuse during that check.
+Command creation and exit checks share the state lock.
 Commands must keep their descendants in that group; detached services require their own service manager.
 
 A supervisor survives the submitting terminal's exit.

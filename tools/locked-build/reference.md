@@ -60,6 +60,8 @@ Requests move from `queued` to `running`, then `succeeded`, `failed`, `timed_out
 A queued request can become `cancelled` without running.
 After supervisor loss, the authenticated watchdog continues timeout and cancellation enforcement.
 The request remains suspect and occupied until command exit is verified.
+Release requires a kernel process-group absence result, including after a supervisor crash.
+An incomplete or empty process enumeration preserves occupancy until that independent check succeeds.
 No new grant exceeds configured capacity; reduced capacity can report existing overcommit.
 
 ## Examples

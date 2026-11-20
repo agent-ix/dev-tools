@@ -10,6 +10,14 @@ use sysinfo::{ProcessRefreshKind, ProcessStatus, RefreshKind, System};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{ProcessIdentity, RequestId};
 
+/// Only a kernel ESRCH result proves that no process can still fork in a group.
+/// Permission errors and reused group IDs retain occupancy conservatively.
+pub(crate) fn group_absent(group: u32) -> bool {
+    i32::try_from(group).ok().is_some_and(|group| {
+        group > 0 && killpg(Pid::from_raw(group), None) == Err(nix::errno::Errno::ESRCH)
+    })
+}
+
 pub(crate) struct Processes {
     rows: BTreeMap<u32, Row>,
     complete: bool,
@@ -137,25 +145,6 @@ impl Processes {
         })
     }
 
-    pub(crate) fn confirmed_group_has_live_members_excluding(
-        &self,
-        group: u32,
-        excluding: &[u32],
-    ) -> bool {
-        self.rows
-            .iter()
-            .any(|(pid, row)| row.group == Some(group) && !row.zombie && !excluding.contains(pid))
-    }
-
-    pub(crate) fn signal_owned(
-        &self,
-        identity: &ProcessIdentity,
-        id: &RequestId,
-        signal: Signal,
-    ) -> Result<()> {
-        self.signal_member_owned(identity, id, "worker", identity.pid, signal)
-    }
-
     pub(crate) fn signal_member_owned(
         &self,
         identity: &ProcessIdentity,
@@ -227,7 +216,7 @@ mod tests {
         assert!(processes.group_has_live_members(77, None));
         assert_eq!(
             processes
-                .signal_owned(&identity, &id, Signal::SIGTERM)
+                .signal_member_owned(&identity, &id, "worker", identity.pid, Signal::SIGTERM)
                 .map_err(|error| error.code),
             Err(ErrorCode::State)
         );
