@@ -1,16 +1,14 @@
-# Include from a repository Makefile: `include docs/figures.mk`, then list the figure names.
-# Each name NAME maps docs/diagrams/NAME.yaml to docs/images/NAME/ (figures/NAME.light.svg, ...).
-# IXD is the ixd binary; IXD_PLAYER is the built player directory of an ix-diagrams clone.
-FIGURES ?= example
+# Include from a repository Makefile (`include docs/figures.mk`) or copy the targets.
+# docs/images/figures.json declares the figures; ixd writes <id>-light.svg, <id>-dark.svg and
+# figures.manifest.json into docs/images. Install ixd from agent-ix/ix-diagrams:
+#   cargo install --locked --git https://github.com/agent-ix/ix-diagrams ix-diagrams
+
 IXD ?= ixd
-IXD_PLAYER ?= ../ix-diagrams/packages/player/dist/site
 
-.PHONY: figures figures-check
-figures: $(FIGURES:%=figure-%)
-figures-check: $(FIGURES:%=check-figure-%)
+.PHONY: figures
+figures:
+	$(IXD) build docs/images/figures.json --out docs/images
 
-figure-%:
-	$(IXD) build docs/diagrams/$*.yaml --out docs/images/$* --player-dist $(IXD_PLAYER)
-
-check-figure-%:
-	$(IXD) build docs/diagrams/$*.yaml --out docs/images/$* --player-dist $(IXD_PLAYER) --check
+.PHONY: figures-check
+figures-check:
+	$(IXD) build docs/images/figures.json --out docs/images --check

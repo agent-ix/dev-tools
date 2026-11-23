@@ -1,0 +1,19 @@
+{
+  "style": "ix-docs",
+  "data": {
+    "cases": {"from": "json", "path": "docs/data/run.json", "pointer": "/cases", "raw": true},
+    "total": {"from": "json", "path": "docs/data/run.json", "pointer": "/cases", "length": true}
+  },
+  "figures": [
+    {
+      "id": "cases",
+      "width": 420, "height": "=20 + 66 * len(cases)",
+      "label": "{total} cases ran; each box shows a case and its status.",
+      "items": [
+        {"k": "repeat", "over": "cases", "as": "c", "index": "i", "items": [
+          {"k": "box", "at": [0, "=10 + 66 * i", 420, 56], "role": "logic", "title": "{c.id}", "subs": ["{c.status}"]}
+        ]}
+      ]
+    }
+  ]
+}

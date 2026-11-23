@@ -1,14 +1,15 @@
 # Authoring a figure
 
-A figure is a definition plus the data it shows. Two authoring paths build the same validated model
-and the same scene contract; neither evaluates scripts.
+README and docs-page figures use `docs/images/figures.json`, documented in [figures-json.md](figures-json.md).
+This page covers the two secondary paths for explanatory scenes: a YAML scene and a Rust adapter. They
+build the same validated model and scene contract; neither evaluates scripts.
 
 | Path | Use it for | Where it lives |
 |---|---|---|
-| Declarative YAML | Generic diagrams: cards, boundaries, annotations, labelled connections, steps and scenarios | `docs/diagrams/NAME.yaml`, built with `ixd build` |
-| Rust authoring | Rich-card, state, sequence, architecture, swimlane and quantitative families, and any producer adapter | A small Rust program in the consumer (or the `ix-diagrams` facade calls) that writes the scene and SVG |
+| Declarative YAML scene (secondary) | Generic diagrams: cards, boundaries, annotations, labelled connections, steps and scenarios | `docs/diagrams/NAME.yaml`, built with `ixd build` |
+| Rust authoring (secondary) | Rich-card, state, sequence, architecture, swimlane and quantitative families, and any producer adapter | A small Rust program in the consumer (or the `ix-diagrams` facade calls) that writes the scene and SVG |
 
-Start declarative. Move to Rust only when the claim needs a family the YAML element kinds cannot
+For an ordinary figure stay on figures.json. For a scene, start with YAML and move to Rust only when the claim needs a family the YAML element kinds cannot
 express (see [families.md](families.md)). The worked examples of the Rust path in
 `ix-diagrams` are `crates/ixd-example-fsl` (rich cards) and `crates/ixd-example-arch`
 (architecture); read them before writing a new adapter.

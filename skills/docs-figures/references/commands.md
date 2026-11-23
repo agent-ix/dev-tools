@@ -3,6 +3,19 @@
 Run every command from the repository root; data and definition paths resolve against the current
 directory and may not escape it.
 
+## build and check figures.json (primary)
+
+`ixd build docs/images/figures.json --out DIR [--check]`. A `.json` definition is built as README figures:
+it writes `<id>-light.svg` and `<id>-dark.svg` for each figure (plus `<id>-still-light.svg` and
+`<id>-still-dark.svg` for an animated one) and `figures.manifest.json` into `DIR` (default: the definition's
+directory). It takes no `--player-dist`, `--animated-svg` or `--scenario`. `--check` writes nothing:
+it prints `up to date: DIR` or fails with `IXD_CLI_STALE: missing or stale in DIR: FILE, ...`, exit 1,
+also for an orphaned output the definition no longer produces. `ixd validate` is for YAML scenes, not
+figures.json; an invalid definition fails the build with `IXD_CLI_FIGURES` naming the figure and item.
+Reference: [figures-json.md](figures-json.md).
+
+The sections below until "Install and version" describe the secondary YAML scene path.
+
 ## validate
 
 `ixd validate docs/diagrams/NAME.yaml` parses the definition and resolves each declared JSON source
@@ -69,8 +82,7 @@ rebuild with `make figures` and review the diff. Never copy engine sources into 
 
 ## Style choice
 
-Roles (`ink`, `muted`, `model`, `logic`, `code`, `evidence`, `faint`) keep one meaning across styles.
-The visual language defines two styles, `ix-docs` (clean vector) and `pencil` (hand-sketched), and
-`ixd build` has no style selector yet; it renders the shared default tokens
-(`assets/styles/tokens.css` in ix-diagrams). Use that default. A request for pencil is a missing
-shared capability: file it against ix-diagrams, do not recreate it in the consumer.
+Roles (`ink`, `muted`, `model`, `logic`, `code`, `evidence`, `faint`) keep one meaning across styles. A
+`figures.json` selects the style with a top-level `"style": "ix-docs"` (default, clean vector) or
+`"pencil"` (hand-sketched), applied to every figure in the file. YAML scene builds have no style
+selector and render the shared default tokens (`assets/styles/tokens.css` in ix-diagrams).

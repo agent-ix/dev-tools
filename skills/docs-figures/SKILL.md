@@ -15,45 +15,48 @@ and the [examples catalog](https://github.com/agent-ix/ix-diagrams/blob/main/exa
 repository keeps its figure definitions and the generated output, never a copy of the engine. Output is
 deterministic: the same definition and data give byte-identical files, so `--check` can gate commits.
 
-There are two authoring paths; say which one a figure uses:
+There is one primary path and two secondary ones; say which one a figure uses:
 
-- **YAML path (generic elements):** `docs/diagrams/NAME.yaml` with `card`, `boundary`, `connection` and
-  `annotation` elements, built by `ixd build`. Use it for simple boxes-and-arrows claims.
-- **Rust path (rich families):** a small Rust adapter (a `[[bin]]` with `generate` and `check` commands, as
-  in ix-diagrams `ixd-example-fsl`, `ixd-example-arch`, `ixd-devteam-example`) that maps real producer output
-  to rich cards, state replay, architecture, swimlanes or marks. Use it whenever the figure needs those
-  families. Both walkthroughs are recorded in [recipes.md](references/recipes.md).
+- **`docs/images/figures.json` (primary, for READMEs and docs pages):** a declarative file of figures
+  drawn with boxes, lines, text, columns, code panels and animation, with values bound to the repository's
+  own files, and shared constructs (`ecosystem`, `tl-stack`, `tl-pipeline`, `tl-scenario`). Built by
+  `ixd build docs/images/figures.json --out docs/images` into `<id>-light.svg` and `<id>-dark.svg`. Full
+  reference: [figures-json.md](references/figures-json.md). Use it for every ordinary figure.
+- **YAML scene (secondary, explanatory scenes):** `docs/diagrams/NAME.yaml` with `card`, `boundary`,
+  `connection` and `annotation` elements, steps and scenarios, built with `ixd build` into an interactive
+  player page. Use it when readers should step through scenarios.
+- **Rust adapter (secondary, rich scenes):** a small Rust program (a `[[bin]]` with `generate` and `check`
+  commands, as in ix-diagrams `ixd-example-fsl`, `ixd-example-arch`, `ixd-devteam-example`) that maps
+  real producer output to rich cards, state replay, architecture, swimlanes or marks.
 
-Deprecated: the old Python engine lives only under [legacy/](legacy/README.md) until IXD-34 removes it
-(FR-034). Do not use it for new work.
+Both secondary paths are recorded in [recipes.md](references/recipes.md).
+
+A repository that still has `docs/images/figures.py` follows [migration.md](references/migration.md); the
+old Python engine is removed from this skill.
 
 ## Workflow
 
 1. **Decide each figure's claim.** One figure shows one mechanism: what moves along each edge, which
    branch is taken, what changes between options. If a sentence says it faster, write the sentence.
-   Choose the family with [families.md](references/families.md).
-2. **Get the producer's real output.** Run the tool that decides the result (for example
-   `fsl run REQUEST --format json > docs/data/run.json`) and keep the JSON in the repository. Never
-   type a value the producer can supply. See [authoring.md](references/authoring.md#real-data-binding).
-3. **Write the definition.** Copy [assets/starter-definition.yaml](assets/starter-definition.yaml) to
-   `docs/diagrams/NAME.yaml` and bind each shown value to a JSON pointer. Rich-card, state, sequence,
-   architecture, swimlane and quantitative families are Rust authoring; see
-   [authoring.md](references/authoring.md).
-4. **Validate:** `ixd validate docs/diagrams/NAME.yaml` (run from the repository root). Fix every
-   diagnostic; each names the file, line, column and field path.
-5. **Build:** `ixd build docs/diagrams/NAME.yaml --out docs/images/NAME --player-dist PLAYER_DIR`.
-   Add `--animated-svg` for a standalone animated SVG. Commands and flags:
-   [commands.md](references/commands.md).
-6. **Preview, then look:** `ixd preview docs/images/NAME`, open the printed URL, play the scenario,
-   and inspect light and dark. Fix clipping, crowded labels and low contrast before continuing.
-7. **Embed** with the `<picture>` pattern or the `<Explainer>` wrapper in
-   [github.md](references/github.md). Alt text copies the figure's title word for word.
-8. **Gate:** add the targets from [assets/figures.mk](assets/figures.mk) to the repository Makefile;
-   `make figures-check` runs `ixd build ... --check`, which writes nothing and exits 1 on any stale or
-   missing file. Run it before committing.
+2. **Bind real values.** Point `data` sources at the repository's own JSON, source or corpus files; add
+   an `expect` where the figure claims something a source decides. Never type a value the repository can
+   supply. See [figures-json.md](references/figures-json.md#sources-data).
+3. **Write `docs/images/figures.json`:** copy a figure from a sibling repository or start from
+   [assets/starter-figures.json](assets/starter-figures.json). Give each figure a full-sentence `label`.
+4. **Build:** `ixd build docs/images/figures.json --out docs/images`. Fix every diagnostic; each names
+   the figure and the item.
+5. **Look at it** in light and dark: clipping, crowded labels, low contrast.
+6. **Embed** with the `<picture>` pattern in [github.md](references/github.md). The `alt` copies the
+   figure's `label` word for word.
+7. **Gate:** add the targets from [assets/figures.mk](assets/figures.mk) to the repository Makefile;
+   `make figures-check` runs `ixd build ... --check`, which writes nothing and exits 1 on any stale,
+   missing or orphaned file. Run it before committing.
 
-Follow a full example in [recipes.md](references/recipes.md), including a create-then-revise
-walkthrough.
+For an explanatory scene with steps and scenarios (YAML) or a rich family (Rust), follow
+[authoring.md](references/authoring.md) and [recipes.md](references/recipes.md).
+
+The secondary paths have worked examples, including a create-then-revise walkthrough, in
+[recipes.md](references/recipes.md).
 
 ## Rules
 
@@ -76,15 +79,16 @@ Rust dependency form: [commands.md](references/commands.md#install-and-version).
 
 ## Styles
 
-Colour roles are fixed by the visual language (FR-008) and cover the `ix-docs` and `pencil` styles.
-The current CLI renders one style and has no style flag; see
-[commands.md](references/commands.md#style-choice) for what to do today.
+`figures.json` takes a top-level `"style": "ix-docs"` (default, clean vector) or `"pencil"` (hand-sketched);
+roles keep one meaning in both. The YAML and Rust paths render the shared default tokens and have no style
+selector.
 
 ## References
 
-- [authoring.md](references/authoring.md): definition format, data binding, Rust authoring, citations.
+- [figures-json.md](references/figures-json.md): the primary path: command, outputs, items, sources, expressions, repeat, animation, constructs.
+- [authoring.md](references/authoring.md): the secondary YAML scene and Rust adapter paths.
 - [families.md](references/families.md): which diagram family fits which claim.
-- [commands.md](references/commands.md): validate, build, check, export, preview, playback, install, style.
+- [commands.md](references/commands.md): build and check of figures.json, validate, export, preview, playback, install, style.
 - [recipes.md](references/recipes.md): story recipes and the recorded create/revise walkthrough.
 - [github.md](references/github.md): README embedding, `<Explainer>` docs wrapper, link checks.
 - [design.md](references/design.md): layout and labelling guidance.

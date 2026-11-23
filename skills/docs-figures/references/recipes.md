@@ -1,5 +1,7 @@
 # Story recipes
 
+These recipes are for explanatory scenes (the secondary YAML and Rust paths); their make targets come from
+[assets/scenes.mk](../assets/scenes.mk). Ordinary README figures use [figures-json.md](figures-json.md).
 Each recipe states the claim, the producer, the family, and the commands. Replace names and paths.
 
 ## 1. Verdict with its decisive evidence (cards)
@@ -10,7 +12,7 @@ Each recipe states the claim, the producer, the family, and the commands. Replac
   Use rich evaluation/state cards (Rust, `constructs::build_card`) when the card needs guards, rows
   or an animated result.
 - Bind: `/items/0/category`, `/items/0/axes/truth`, `/items/0/decisive/position`.
-- Commands: `ixd validate`, `make figures`, `make figures-check`.
+- Commands: `ixd validate`, `make scenes`, `make scenes-check`.
 
 ## 2. State replay of a recorded run (rich cards plus timeline; see Walkthrough B)
 
@@ -48,7 +50,7 @@ Each recipe states the claim, the producer, the family, and the commands. Replac
 ## Walkthrough A (YAML path, generic elements): create, then revise
 
 Run in a clean consumer (a new Git repository containing only `docs/data`, `docs/diagrams`,
-`docs/figures.mk` and a Makefile that includes it), with `ixd` 0.1.0 and the player built from
+`docs/scenes.mk` and a Makefile that includes it), with `ixd` 0.1.0 and the player built from
 ix-diagrams `main`, and `fsl` 0.1.4. This is the generic-element path; rich cards are Walkthrough B.
 
 Create:
@@ -57,23 +59,23 @@ Create:
 2. Producer output: `fsl run examples/rover/requests/safe-stop-late.json --format json > docs/data/run.json`
    (exit 10, category `violation`).
 3. `cp assets/starter-definition.yaml docs/diagrams/replay.yaml`; set `id: replay`, the title to the claim
-   sentence, and `FIGURES ?= replay` in `docs/figures.mk`. The `clause` card binds `/items/0/category`; the
+   sentence, and `SCENES ?= replay` in `docs/scenes.mk`. The `clause` card binds `/items/0/category`; the
    `evidence` card binds `/items/0/decisive/position`.
 4. `ixd validate docs/diagrams/replay.yaml` printed `valid: replay (3 elements, 1 data source(s))`.
-5. `make figures` built 9 files under `docs/images/replay`; `make figures-check` printed
+5. `make scenes` built 9 files under `docs/images/replay`; `make scenes-check` printed
    `up to date: docs/images/replay (9 files)` and exited 0.
 6. `ixd preview docs/images/replay --port 4998` served `replay.html` with status 200.
 
 Revise (the claim changes to an accepted run):
 
 1. Re-run the producer on `safe-stop-in-time.json`; exit 0, category `success`, no decisive position.
-2. `make figures-check` failed with
+2. `make scenes-check` failed with
    `error[missing_data]: JSON Pointer /items/0/decisive/position was not found in source run`. The
    check caught that the figure still asked for a value the new result does not have.
 3. Edit the definition: title to "The producer accepted SafeStopWithin3Steps because the rover stopped within
    three steps", rename the `evidence` card to `Truth of the clause`, and rebind it to `/items/0/axes/truth`.
-4. `ixd validate` passed; `make figures-check` failed (stale); `make figures` rebuilt 9 files;
-   `make figures-check` printed `up to date` and exited 0. The scene, light and dark SVGs, fragment and
+4. `ixd validate` passed; `make scenes-check` failed (stale); `make scenes` rebuilt 9 files;
+   `make scenes-check` printed `up to date` and exited 0. The scene, light and dark SVGs, fragment and
    manifest changed; no Python and no engine copy appeared in the consumer.
 
 ## Walkthrough B (Rust path, rich cards): create, then revise

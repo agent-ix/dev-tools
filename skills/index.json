@@ -20,15 +20,18 @@
       "version": "0.1.0",
       "files": [
         "SKILL.md",
-        "assets/starter_figures.py",
-        "references/api.md",
+        "assets/figures.mk",
+        "assets/scenes.mk",
+        "assets/starter-definition.yaml",
+        "assets/starter-figures.json",
+        "references/authoring.md",
+        "references/commands.md",
         "references/design.md",
+        "references/families.md",
+        "references/figures-json.md",
         "references/github.md",
-        "scripts/docs_figures.py",
-        "scripts/preview.py",
-        "scripts/render.py",
-        "styles/ix-docs.json",
-        "styles/pencil.json"
+        "references/migration.md",
+        "references/recipes.md"
       ]
     },
     {
