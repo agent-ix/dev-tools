@@ -1,0 +1,39 @@
+# Starter IX Diagrams definition. Copy to docs/diagrams/<name>.yaml, then replace every value.
+# Values shown must come from a declared producer output; never type a result here.
+schema_version: 1
+id: example                       # becomes the output file stem: figures/example.light.svg
+title: What the producer decided  # becomes the accessible name; write a full sentence
+data_sources:
+  - id: run
+    path: docs/data/run.json      # repository-local JSON written by the real producer
+    kind: data                    # `trace` also needs a stable record_id on every citation
+elements:
+  - id: clause
+    kind: card
+    title: Clause under test
+    fields:
+      verdict: {type: data, source_id: run, pointer: /items/0/category}
+    citations:
+      - source_id: run
+  - id: evidence
+    kind: card
+    title: Decisive observation
+    fields:
+      position: {type: data, source_id: run, pointer: /items/0/decisive/position}
+    citations:
+      - source_id: run
+  - id: link
+    kind: connection
+    title: decided by             # label what moves along the edge
+    fields:
+      source: {type: literal, value: clause}
+      target: {type: literal, value: evidence}
+steps:
+  - id: verdict
+    title: Verdict
+    caption: One sentence stating what this step shows.
+    element_ids: [clause, evidence]
+scenarios:
+  - id: main
+    title: Main scenario
+    step_ids: [verdict]

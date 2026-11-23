@@ -1,4 +1,12 @@
-# API
+# API (deprecated Python engine)
+
+> Deprecated. This describes the legacy engine that ix-diagrams replaces. Do not start new
+> figures with it and do not copy it into a repository. It remains in this skill only while a
+> canonical consumer's default branch still has `docs/images/figures.py` or invokes its generator
+> (FR-010-AC-8), and the retirement change (IXD-34, FR-034) removes it, keeping committed SVGs and
+> adding a migration guide. To migrate a figure, follow [../SKILL.md](../../SKILL.md): rewrite its
+> definition as an ix-diagrams definition, bind its values to the producer's output, and gate with
+> `ixd build ... --check`.
 
 ## Definitions file
 
