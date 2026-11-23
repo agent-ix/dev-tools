@@ -71,9 +71,11 @@ The secondary paths have worked examples, including a create-then-revise walkthr
 
 ## Install and version
 
-`ixd` has no registry release yet; build it from a clone of `agent-ix/ix-diagrams`
-(`cargo build --release` gives `target/release/ixd`; `make player-install player-build` gives the player
-at `packages/player/dist/site`). Check with `ixd --version` and record the ix-diagrams revision in the
+`ixd` has no registry release yet and `agent-ix/ix-diagrams` is private. `figures.json` builds need only the
+binary: `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --locked --git https://github.com/agent-ix/ix-diagrams ix-diagrams --bin ixd`
+(with a git credential for `agent-ix`). YAML scene builds also need the player, so build from a clone of
+`agent-ix/ix-diagrams` (`cargo build --release` gives `target/release/ixd`; `make player-install player-build`
+gives the player at `packages/player/dist/site`). Check with `ixd --version` and record the ix-diagrams revision in the
 consumer's Cargo pin or CI setup, not in the figures. Details and the
 Rust dependency form: [commands.md](references/commands.md#install-and-version).
 
