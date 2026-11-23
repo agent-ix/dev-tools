@@ -11,10 +11,14 @@ fields, `bind.rs` for sources, `expr.rs` and `expand.rs` for expressions and loo
 ```bash
 ixd build docs/images/figures.json --out docs/images            # write
 ixd build docs/images/figures.json --out docs/images --check    # write nothing, exit 1 if stale
+ixd build schema/docs/images/figures.json --out schema/docs/images --root schema --check   # sources under schema/
 ```
 
-Run from the repository root; source paths resolve against the current directory and may not contain
-`..` or resolve outside it. A `.json` definition is built as figures. `--out` defaults to the
+Run from the repository root. The consumer root is the current directory, or `DIR` with `--root DIR`; source
+paths are relative to the root and may not contain `..` or resolve outside it, symbolic links included. The
+definition path and `--out` stay relative to the current directory. A missing source fails naming the root
+used and, when the file exists relative to the definition or a parent up to the git root, that directory
+(run from there or pass `--root`). A `.json` definition is built as figures. `--out` defaults to the
 definition's directory. Nothing is written when any figure fails. Output is byte-identical for
 identical input.
 
@@ -24,7 +28,7 @@ identical input.
 | `<id>-still-light.svg`, `<id>-still-dark.svg` | Only for an animated figure (one with `cycle`): the resting frame for READMEs |
 | `figures.manifest.json` | Files of the last run; the next run deletes listed files the definition no longer produces and `--check` reports them as orphaned. Other files are never touched |
 
-`--check` prints `up to date: DIR` or `IXD_CLI_STALE: missing or stale in DIR: FILE, ...` and fails.
+`--check` prints `up to date: DIR` or `IXD_CLI_STALE: missing or stale in DIR: FILE, ...` plus the line ``run `ixd build DEF --out DIR [--root R]` to regenerate``, and fails.
 Commit the SVGs and the manifest. Wire the two targets in [assets/figures.mk](../assets/figures.mk).
 
 ## File shape

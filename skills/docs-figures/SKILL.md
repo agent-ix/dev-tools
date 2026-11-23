@@ -1,14 +1,14 @@
 ---
 name: docs-figures
 description: Draw diagrams, charts and CSS animations for GitHub READMEs and documentation as transparent light and dark SVG pairs, with text drawn as glyph outlines so every viewer renders it identically. Use when a README or doc page needs a mechanism or flow diagram, a chart, an animated walkthrough, figures in the ix-docs style, or when a repository's docs/images figures must be regenerated or checked.
-compatibility: The `ixd` binary from agent-ix/ix-diagrams (Rust toolchain to build it) and a built player directory. No Python.
+compatibility: The `ixd` binary from agent-ix/ix-diagrams (Rust toolchain to build it). figures.json builds need only `ixd`; YAML and --scene builds also need the player directory (`--player-dist`). No Python.
 ---
 
 # Docs Figures
 
 If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
 
-Figures are drawn with [ix-diagrams](https://github.com/agent-ix/ix-diagrams) (`ixd`). Public reference:
+Figures are drawn with [ix-diagrams](https://github.com/agent-ix/ix-diagrams) (`ixd`). Reference in the ix-diagrams repository (private; needs `agent-ix` access):
 the [README](https://github.com/agent-ix/ix-diagrams/blob/main/README.md) (definition format and Rust
 authoring), [BUILDING.md](https://github.com/agent-ix/ix-diagrams/blob/main/BUILDING.md) (build and player),
 and the [examples catalog](https://github.com/agent-ix/ix-diagrams/blob/main/examples/README.md). A
@@ -71,9 +71,11 @@ The secondary paths have worked examples, including a create-then-revise walkthr
 
 ## Install and version
 
-`ixd` has no registry release yet; build it from a clone of `agent-ix/ix-diagrams`
-(`cargo build --release` gives `target/release/ixd`; `make player-install player-build` gives the player
-at `packages/player/dist/site`). Check with `ixd --version` and record the ix-diagrams revision in the
+`ixd` has no registry release yet and `agent-ix/ix-diagrams` is private. `figures.json` builds need only the
+binary: `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --locked --git https://github.com/agent-ix/ix-diagrams ix-diagrams --bin ixd`
+(with a git credential for `agent-ix`). YAML scene builds also need the player, so build from a clone of
+`agent-ix/ix-diagrams` (`cargo build --release` gives `target/release/ixd`; `make player-install player-build`
+gives the player at `packages/player/dist/site`). Check with `ixd --version` and record the ix-diagrams revision in the
 consumer's Cargo pin or CI setup, not in the figures. Details and the
 Rust dependency form: [commands.md](references/commands.md#install-and-version).
 

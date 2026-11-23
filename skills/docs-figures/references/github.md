@@ -28,6 +28,18 @@ motion link `docs/images/NAME/figures/NAME.animated.svg` (built with `--animated
 pair as the visible image. Link the interactive page (`docs/images/NAME/NAME.html`) as a file for readers
 who clone; GitHub does not run scripts in repository files.
 
+## Embedding the interactive HTML under a host heading
+
+The HTML figure carries its own section headings (Captions, Initial values, Sources, Connections), by
+default at level 2. A host page that embeds the figure sets `--heading-level N` so they nest below the
+host's own last heading of level N-1, for example `--heading-level 3` under an `## ` heading:
+
+```bash
+ixd build docs/diagrams/NAME.yaml --out docs/images/NAME --player-dist PLAYER --heading-level 3
+```
+
+The flag applies to YAML and `--scene` builds and to `ixd export`; a `figures.json` build (the SVG pair) refuses it. Pass the same value to `--check`.
+
 ## Filament docs (Astro/Starlight)
 
 Embed a published explanation with the MDX wrapper:
