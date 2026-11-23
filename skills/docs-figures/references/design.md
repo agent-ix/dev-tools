@@ -66,5 +66,7 @@ labels, and `muted` for sub-lines, axes and legends.
 
 ## Data
 
-- Compute every value from the repository's data in the definitions file:
-  recordings, datasets and command outputs.
+- Bind every value to the producer's stored output (recordings, datasets,
+  command results) with a JSON pointer; see [authoring.md](authoring.md).
+- Name the producer and input in the caption or a source link, so a reader can
+  rerun it.

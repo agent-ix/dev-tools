@@ -1,74 +1,82 @@
 ---
 name: docs-figures
 description: Draw diagrams, charts and CSS animations for GitHub READMEs and documentation as transparent light and dark SVG pairs, with text drawn as glyph outlines so every viewer renders it identically. Use when a README or doc page needs a mechanism or flow diagram, a chart, an animated walkthrough, figures in the ix-docs style, or when a repository's docs/images figures must be regenerated or checked.
-compatibility: Python 3.9+ with fontTools. Downloads the style's fonts once (network). Headless Chrome or Chromium for previews.
+compatibility: The `ixd` binary from agent-ix/ix-diagrams (Rust toolchain to build it) and a built player directory. No Python.
 ---
 
 # Docs Figures
 
 If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
 
-The engine lives only in this skill. A repository keeps its figure definitions
-(`docs/images/figures.py`) and the generated SVGs, never a copy of the engine.
-People without the plugin regenerate from a clone of `agent-ix/dev-tools`.
+Figures are drawn with [ix-diagrams](https://github.com/agent-ix/ix-diagrams) (`ixd`). A repository keeps
+its figure definitions (`docs/diagrams/NAME.yaml`, or a small Rust program for rich families) and the
+generated output, never a copy of the engine. Output is deterministic: the same definition and data
+give byte-identical files, so `--check` can gate commits.
 
-`<skill>` below is this skill's base directory.
+The previous Python engine in this skill is deprecated and stays only until the last consumer has
+migrated (IXD-34, FR-034); its files are `scripts/`, `styles/` and `assets/starter_figures.py`. Do not use
+them for new figures. See [references/api.md](references/api.md)
+for its historical contract and the migration note.
 
 ## Workflow
 
-1. **Decide each figure's claim.** One figure shows one mechanism: what moves
-   along each edge, which branch is taken, what changes between options. If a
-   sentence says it faster, write the sentence. See [design.md](references/design.md).
-2. **Write the definitions.** If the repository has no `docs/images/figures.py`,
-   copy [assets/starter_figures.py](assets/starter_figures.py) there. Each figure
-   is a function returning a `Figure`; list them in `FIGURES`. API:
-   [api.md](references/api.md). Besides boxes and notes it has `code()` for
-   source-code panels with numbered callouts and `columns()` for column charts.
-3. **Use real values.** Read numbers from the repository's own data
-   (recordings, datasets, command output) in the definitions file. Never type a
-   value that the repository can supply.
-4. **Render:** `python3 <skill>/scripts/render.py docs/images/figures.py`
-   (`python3 -m pip install fonttools` first if needed).
-5. **Preview, then look:** `python3 <skill>/scripts/preview.py docs/images --out <tmp>`,
-   adding `--at 1.5 4 8` for animation frames. Read every PNG. Fix clipping,
-   collisions, crowded labels and low contrast before continuing.
-6. **Embed** with the `<picture>` pattern in [github.md](references/github.md).
-   Give each animated figure a "Show the whole diagram" toggle with its still.
-7. **Gate:** `render.py docs/images/figures.py --check` exits 1 when any
-   committed SVG is stale. Run it before committing.
+1. **Decide each figure's claim.** One figure shows one mechanism: what moves along each edge, which
+   branch is taken, what changes between options. If a sentence says it faster, write the sentence.
+   Choose the family with [families.md](references/families.md).
+2. **Get the producer's real output.** Run the tool that decides the result (for example
+   `fsl run REQUEST --format json > docs/data/run.json`) and keep the JSON in the repository. Never
+   type a value the producer can supply. See [authoring.md](references/authoring.md#real-data-binding).
+3. **Write the definition.** Copy [assets/starter-definition.yaml](assets/starter-definition.yaml) to
+   `docs/diagrams/NAME.yaml` and bind each shown value to a JSON pointer. Rich-card, state, sequence,
+   architecture, swimlane and quantitative families are Rust authoring; see
+   [authoring.md](references/authoring.md).
+4. **Validate:** `ixd validate docs/diagrams/NAME.yaml` (run from the repository root). Fix every
+   diagnostic; each names the file, line, column and field path.
+5. **Build:** `ixd build docs/diagrams/NAME.yaml --out docs/images/NAME --player-dist PLAYER_DIR`.
+   Add `--animated-svg` for a standalone animated SVG. Commands and flags:
+   [commands.md](references/commands.md).
+6. **Preview, then look:** `ixd preview docs/images/NAME`, open the printed URL, play the scenario,
+   and inspect light and dark. Fix clipping, crowded labels and low contrast before continuing.
+7. **Embed** with the `<picture>` pattern or the `<Explainer>` wrapper in
+   [github.md](references/github.md). Alt text copies the figure's title word for word.
+8. **Gate:** add the targets from [assets/figures.mk](assets/figures.mk) to the repository Makefile;
+   `make figures-check` runs `ixd build ... --check`, which writes nothing and exits 1 on any stale or
+   missing file. Run it before committing.
+
+Follow a full example in [recipes.md](references/recipes.md), including a create-then-revise
+walkthrough.
 
 ## Rules
 
-- A fit check that raises means the layout is wrong: widen the box or shorten
-  the text. Never shrink below the style's sizes.
-- Colour means role, never decoration. Keep a role's meaning fixed across a
-  repository's figures and add a legend when roles repeat.
+- Colour means role (`ink`, `muted`, `model`, `logic`, `code`, `evidence`, `faint`), never decoration.
+  Keep a role's meaning fixed across a repository's figures.
 - Label arrows with what moves along them (`answers`, `0.82`, `true`).
-- Each figure has a full-sentence label: the `Figure` label becomes the SVG
-  `aria-label`, and Markdown `alt` text copies it word for word.
-- Keep output deterministic: no clocks, randomness or unordered iteration.
-  Rendering twice must produce identical bytes.
-- Animate with CSS only (`lit`/`appear` windows and tokens). No script or SMIL.
-  The resting state must be the complete figure, because it is the still and
-  the reduced-motion view.
-- Headless Chrome does not advance time inside `<img>`. Check animations with
-  `preview.py --at`, which seeks inline copies.
+- Each figure has a full-sentence title; it becomes the accessible name, and Markdown `alt` copies it.
+- Keep output deterministic: no clocks, randomness or unordered iteration in Rust authoring programs.
+- Never hand-edit generated output. Change the definition or the data and rebuild.
+- Do not add Python or logic-bearing shell. Rust programs hold logic; Make targets only call `ixd`.
+- The resting state is the complete figure, because it is the still and the reduced-motion view.
+
+## Install and version
+
+`ixd` has no registry release yet; build it from a clone of `agent-ix/ix-diagrams`
+(`cargo build --release` gives `target/release/ixd`; `make player-install player-build` gives the player
+at `packages/player/dist/site`). Check with `ixd --version` and record the ix-diagrams revision in the
+consumer's Cargo pin or CI setup, not in the figures. Details and the
+Rust dependency form: [commands.md](references/commands.md#install-and-version).
 
 ## Styles
 
-- `ix-docs` (default): thin coloured boxes with tinted fills, IBM Plex Sans
-  Condensed titles and IBM Plex Mono labels.
-- `pencil`: hand-sketched. Wobbly double-traced strokes with a subtle tremor,
-  open arrowheads, pencil hatching and Kalam handwriting; graphite and coloured
-  pencil on light pages, chalk on dark.
-
-A definitions file selects a style with `STYLE = "name"`; `--style` overrides
-it. Figures laid out for one style fit the other, so switching is one line.
-To add a style, copy a file in `styles/` and change its fonts, sizes, palette
-or renderer; keep every role key. See [api.md](references/api.md#styles).
+Colour roles are fixed by the visual language (FR-008) and cover the `ix-docs` and `pencil` styles.
+The current CLI renders one style and has no style flag; see
+[commands.md](references/commands.md#style-choice) for what to do today.
 
 ## References
 
-- [api.md](references/api.md): definitions-file contract, `Figure` API, animation, CLI options.
-- [design.md](references/design.md): layout grid, roles, charts and animation choreography.
-- [github.md](references/github.md): embedding, alt text, stills, GitHub rendering constraints and checks.
+- [authoring.md](references/authoring.md): definition format, data binding, Rust authoring, citations.
+- [families.md](references/families.md): which diagram family fits which claim.
+- [commands.md](references/commands.md): validate, build, check, export, preview, playback, install, style.
+- [recipes.md](references/recipes.md): story recipes and the recorded create/revise walkthrough.
+- [github.md](references/github.md): README embedding, `<Explainer>` docs wrapper, link checks.
+- [design.md](references/design.md): layout and labelling guidance.
+- [api.md](references/api.md): deprecated Python engine contract (migration only).
