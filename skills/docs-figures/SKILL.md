@@ -24,8 +24,8 @@ There are two authoring paths; say which one a figure uses:
   to rich cards, state replay, architecture, swimlanes or marks. Use it whenever the figure needs those
   families. Both walkthroughs are recorded in [recipes.md](references/recipes.md).
 
-Deprecated: the old Python engine lives only under [legacy/](legacy/README.md) until IXD-34 removes it
-(FR-034). Do not use it for new work.
+A repository that still has `docs/images/figures.py` follows [migration.md](references/migration.md); the
+old Python engine is removed from this skill.
 
 ## Workflow
 

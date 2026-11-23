@@ -1,2 +1,0 @@
-pytest>=8.0
-fonttools>=4.40
