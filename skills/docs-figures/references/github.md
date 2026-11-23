@@ -1,24 +1,32 @@
 # Embedding and docs pages
 
-`ixd build DEF --out docs/images/NAME` writes `figures/NAME.light.svg` and `figures/NAME.dark.svg`
-(transparent, text as outlines). Keep these paths stable once a README links them; during a migration
+`ixd build docs/images/figures.json --out docs/images` writes `ID-light.svg` and `ID-dark.svg` for each
+figure (transparent, text as outlines); a YAML scene build writes `figures/NAME.light.svg` and
+`figures/NAME.dark.svg` under its `--out`. Keep these paths stable once a README links them; during a migration
 leave the old SVGs in place until the new paths resolve, then update the references.
 
 ## README
 
 Paths are relative to the Markdown file. GitHub serves the dark source when the viewer's theme is dark.
 
+A `figures.json` build (primary) writes the pair into `--out` with no subdirectory:
+
 ```html
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/NAME/figures/NAME.dark.svg">
-  <img alt="FULL TITLE" src="docs/images/NAME/figures/NAME.light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/ID-dark.svg">
+  <img alt="FULL LABEL" src="docs/images/ID-light.svg">
 </picture>
 ```
 
-Copy `alt` from the definition's `title`, word for word; when the title changes, update the Markdown.
-For motion, link `docs/images/NAME/figures/NAME.animated.svg` (built with `--animated-svg`) and keep the
-static pair as the visible image. Link the interactive page (`docs/images/NAME/NAME.html`) as a
-file for readers who clone; GitHub does not run scripts in repository files.
+Copy `alt` from the figure's `label`, word for word; when the label changes, update the Markdown. For an
+animated figure (one with `cycle`) embed the still pair, `docs/images/ID-still-light.svg` and
+`docs/images/ID-still-dark.svg`, in the README.
+
+A YAML or Rust scene build (secondary) writes `docs/images/NAME/figures/NAME.light.svg` and
+`NAME.dark.svg`; use those paths in the same pattern, copying `alt` from the definition's `title`. For
+motion link `docs/images/NAME/figures/NAME.animated.svg` (built with `--animated-svg`) and keep the static
+pair as the visible image. Link the interactive page (`docs/images/NAME/NAME.html`) as a file for readers
+who clone; GitHub does not run scripts in repository files.
 
 ## Filament docs (Astro/Starlight)
 

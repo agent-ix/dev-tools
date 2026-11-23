@@ -12,6 +12,9 @@ requirement (FR) and its own role colours; do not draw one with another family's
 | "Which team or role owns each step, and where work is handed off" | Process and ownership swimlanes: lanes, decisions, gates, forks, joins, loops | Rust (`constructs::process`) | FR-017 |
 | "How big, how many, how far over a threshold" | Quantitative marks: bar, column, stack, count, threshold, dimension, legend | Rust (`constructs::mark_build::build_mark`) | FR-018 |
 
+These families are scenes: author them with the secondary YAML or Rust paths ([authoring.md](authoring.md)).
+Ordinary README figures are boxes, lines and text in [figures-json.md](figures-json.md).
+
 Rules:
 
 - Trust boundaries (who may access what) and deployment boundaries (what is replaced together) are

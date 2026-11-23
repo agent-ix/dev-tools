@@ -11,13 +11,15 @@ this skill. A repository that still carries `docs/images/figures.py` moves to a 
    `construct` entry each, for example `{"id": "ecosystem", "construct": {"name": "ecosystem", "here": "REPO"}}`.
 2. Bind values the repository can supply (counts, names, verdicts) to its own JSON or source files with
    `data` sources instead of typing them.
-3. Add Make targets: `figures` runs
-   `ixd build docs/images/figures.json --out docs/images` and `figures-check` runs the same with `--check`.
+3. Add the targets in [assets/figures.mk](../assets/figures.mk): `make figures` runs
+   `ixd build docs/images/figures.json --out docs/images` and `make figures-check` runs the same with
+   `--check`. The authoring reference is [figures-json.md](figures-json.md).
 4. Run `make figures`, review the regenerated SVGs in light and dark, and commit them with
    `figures.manifest.json`. The committed SVG paths stay the same, so README `<picture>` references
    keep working.
 5. Delete `docs/images/figures.py` and any committed `__pycache__` for it. Do not copy the engine or its
    styles into the repository.
 
-The old engine's last version is the commit before its removal in agent-ix/dev-tools; use it only to read
-an old definition, never to generate new figures.
+The engine's last version is dev-tools v0.3.2 (`dd3fa2a`); the last commit that still contains it is
+`ccff5e4` (`skills/docs-figures/legacy/`, deleted by the IXD-34 retirement change). Use it only to read an old
+definition, never to generate new figures: `git show ccff5e4:skills/docs-figures/legacy/README.md`.

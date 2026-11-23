@@ -21,11 +21,14 @@
       "files": [
         "SKILL.md",
         "assets/figures.mk",
+        "assets/scenes.mk",
         "assets/starter-definition.yaml",
+        "assets/starter-figures.json",
         "references/authoring.md",
         "references/commands.md",
         "references/design.md",
         "references/families.md",
+        "references/figures-json.md",
         "references/github.md",
         "references/migration.md",
         "references/recipes.md"
