@@ -13,8 +13,9 @@ git root, that directory: run from there or pass `--root`.
 `ixd build docs/images/figures.json --out DIR [--root DIR] [--check]`. A `.json` definition is built as README figures:
 it writes `<id>-light.svg` and `<id>-dark.svg` for each figure (plus `<id>-still-light.svg` and
 `<id>-still-dark.svg` for an animated one) and `figures.manifest.json` into `DIR` (default: the definition's
-directory). It takes no `--player-dist`, `--animated-svg`, `--scenario` or `--heading-level`. `--check` writes nothing:
-it prints `up to date: DIR` or fails with `IXD_CLI_STALE: missing or stale in DIR: FILE, ...`, exit 1,
+directory). `--heading-level` is refused for a figures.json build; `--player-dist`, `--animated-svg` and `--scenario` are accepted and ignored. `--check` writes nothing:
+it prints `up to date: DIR` or fails with `IXD_CLI_STALE: missing or stale in DIR: FILE, ...` followed by the line
+``run `ixd build DEF --out DIR [--root R]` to regenerate`` (the exact command), exit 1,
 also for an orphaned output the definition no longer produces. `ixd validate` is for YAML scenes, not
 figures.json; an invalid definition fails the build with `IXD_CLI_FIGURES` naming the figure and item.
 Reference: [figures-json.md](figures-json.md).
@@ -61,20 +62,20 @@ pass the same value to `--check`.
 ### Build from a scene
 
 `ixd build --scene SCENE.json [--id NAME] [--title TEXT] [--out DIR] [--player-dist DIR] [--animated-svg] [--scenario ID] [--heading-level N] [--check]`
-validates an already-produced scene and packages it in place of a definition, for example the
+validates an already-produced scene and packages it in place of a definition. Giving a positional definition as well is a usage error (exit 2), and `--root` is ignored because the scene has no sources to resolve, for example the
 `scene/NAME.scene.json` of an earlier build or one written by a Rust adapter. `--id` names the outputs
 (default: the file name without `.scene.json` or `.json`) and `--title` titles the figure (default: the id).
 
 ## check (no-write gate)
 
 The same `ixd build` line with `--check` writes nothing. It prints `up to date: DIR (N files)` and exits
-0, or `IXD_CLI_CHECK_FAILED: DIR is out of date (stale: FILE, ...); run ixd build` and exits 1.
-Pass the same `--animated-svg` and `--scenario` flags you built with. Run the check in the Make gate
+0, or fails with exit 1.
+The failure line is ``IXD_CLI_CHECK_FAILED: DIR is out of date (missing: ..; stale: ..; extra: ..); run `COMMAND` `` listing only the non-empty groups (`extra` is an output a previous build wrote that this one no longer produces, or an unexpected file under `assets/player/`), where COMMAND is the exact regenerate command rebuilt with the same `--out`, `--root`, `--player-dist`, `--scenario`, `--heading-level` and `--animated-svg`; paste the printed command. Pass the same flags you built with. Run the check in the Make gate
 and in CI.
 
 ## export
 
-`ixd export DEF --format svg|animated-svg|html [--scenario ID] [--heading-level N] [--out DIR] [--player-dist DIR]`
+`ixd export DEF --format svg|animated-svg|html [--root DIR] [--scenario ID] [--heading-level N] [--out DIR] [--player-dist DIR]`
 writes only the requested format (default `dist/ixd-export`), for example one animated SVG of the
 `late` scenario: `ixd export docs/diagrams/NAME.yaml --format animated-svg --scenario late --out docs/export --player-dist PLAYER`.
 Use `export` for a one-off share; use `build` for committed output.
@@ -98,7 +99,7 @@ There is no registry release yet and the repository is private, so installation 
 
 1. Clone `agent-ix/ix-diagrams` beside the consumer.
 2. `cargo build --release` gives `target/release/ixd`; put it on `PATH` or set `IXD=`.
-3. `make player-install player-build` gives `packages/player/dist/site`; set `IXD_PLAYER=` to it.
+3. `make player-install player-build` gives `packages/player/dist/site`; pass it as `--player-dist`. `IXD_PLAYER` is only a Make variable in `assets/scenes.mk`; `ixd` never reads it.
 4. `ixd --version` prints the package version (0.1.0 at the time of writing).
 
 For Rust adapters add `ix-diagrams = { git = "https://github.com/agent-ix/ix-diagrams", rev = "<full sha>" }`

@@ -28,7 +28,7 @@ identical input.
 | `<id>-still-light.svg`, `<id>-still-dark.svg` | Only for an animated figure (one with `cycle`): the resting frame for READMEs |
 | `figures.manifest.json` | Files of the last run; the next run deletes listed files the definition no longer produces and `--check` reports them as orphaned. Other files are never touched |
 
-`--check` prints `up to date: DIR` or `IXD_CLI_STALE: missing or stale in DIR: FILE, ...` and fails.
+`--check` prints `up to date: DIR` or `IXD_CLI_STALE: missing or stale in DIR: FILE, ...` plus the line ``run `ixd build DEF --out DIR [--root R]` to regenerate``, and fails.
 Commit the SVGs and the manifest. Wire the two targets in [assets/figures.mk](../assets/figures.mk).
 
 ## File shape

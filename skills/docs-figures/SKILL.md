@@ -1,14 +1,14 @@
 ---
 name: docs-figures
 description: Draw diagrams, charts and CSS animations for GitHub READMEs and documentation as transparent light and dark SVG pairs, with text drawn as glyph outlines so every viewer renders it identically. Use when a README or doc page needs a mechanism or flow diagram, a chart, an animated walkthrough, figures in the ix-docs style, or when a repository's docs/images figures must be regenerated or checked.
-compatibility: The `ixd` binary from agent-ix/ix-diagrams (Rust toolchain to build it) and a built player directory. No Python.
+compatibility: The `ixd` binary from agent-ix/ix-diagrams (Rust toolchain to build it). figures.json builds need only `ixd`; YAML and --scene builds also need the player directory (`--player-dist`). No Python.
 ---
 
 # Docs Figures
 
 If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
 
-Figures are drawn with [ix-diagrams](https://github.com/agent-ix/ix-diagrams) (`ixd`). Public reference:
+Figures are drawn with [ix-diagrams](https://github.com/agent-ix/ix-diagrams) (`ixd`). Reference in the ix-diagrams repository (private; needs `agent-ix` access):
 the [README](https://github.com/agent-ix/ix-diagrams/blob/main/README.md) (definition format and Rust
 authoring), [BUILDING.md](https://github.com/agent-ix/ix-diagrams/blob/main/BUILDING.md) (build and player),
 and the [examples catalog](https://github.com/agent-ix/ix-diagrams/blob/main/examples/README.md). A
