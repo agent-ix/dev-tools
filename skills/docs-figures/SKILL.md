@@ -8,15 +8,24 @@ compatibility: The `ixd` binary from agent-ix/ix-diagrams (Rust toolchain to bui
 
 If this plugin is not initialized or an Agent IX command fails, read [the dev-tools setup guide](https://github.com/agent-ix/dev-tools/blob/main/setup.md) for its prerequisites and local diagnosis.
 
-Figures are drawn with [ix-diagrams](https://github.com/agent-ix/ix-diagrams) (`ixd`). A repository keeps
-its figure definitions (`docs/diagrams/NAME.yaml`, or a small Rust program for rich families) and the
-generated output, never a copy of the engine. Output is deterministic: the same definition and data
-give byte-identical files, so `--check` can gate commits.
+Figures are drawn with [ix-diagrams](https://github.com/agent-ix/ix-diagrams) (`ixd`). Public reference:
+the [README](https://github.com/agent-ix/ix-diagrams/blob/main/README.md) (definition format and Rust
+authoring), [BUILDING.md](https://github.com/agent-ix/ix-diagrams/blob/main/BUILDING.md) (build and player),
+and the [examples catalog](https://github.com/agent-ix/ix-diagrams/blob/main/examples/README.md). A
+repository keeps its figure definitions and the generated output, never a copy of the engine. Output is
+deterministic: the same definition and data give byte-identical files, so `--check` can gate commits.
 
-The previous Python engine in this skill is deprecated and stays only until the last consumer has
-migrated (IXD-34, FR-034); its files are `scripts/`, `styles/` and `assets/starter_figures.py`. Do not use
-them for new figures. See [references/api.md](references/api.md)
-for its historical contract and the migration note.
+There are two authoring paths; say which one a figure uses:
+
+- **YAML path (generic elements):** `docs/diagrams/NAME.yaml` with `card`, `boundary`, `connection` and
+  `annotation` elements, built by `ixd build`. Use it for simple boxes-and-arrows claims.
+- **Rust path (rich families):** a small Rust adapter (a `[[bin]]` with `generate` and `check` commands, as
+  in ix-diagrams `ixd-example-fsl`, `ixd-example-arch`, `ixd-devteam-example`) that maps real producer output
+  to rich cards, state replay, architecture, swimlanes or marks. Use it whenever the figure needs those
+  families. Both walkthroughs are recorded in [recipes.md](references/recipes.md).
+
+Deprecated: the old Python engine lives only under [legacy/](legacy/README.md) until IXD-34 removes it
+(FR-034). Do not use it for new work.
 
 ## Workflow
 
@@ -79,4 +88,3 @@ The current CLI renders one style and has no style flag; see
 - [recipes.md](references/recipes.md): story recipes and the recorded create/revise walkthrough.
 - [github.md](references/github.md): README embedding, `<Explainer>` docs wrapper, link checks.
 - [design.md](references/design.md): layout and labelling guidance.
-- [api.md](references/api.md): deprecated Python engine contract (migration only).
