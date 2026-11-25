@@ -69,9 +69,9 @@ Round 2, head bce5f4a7a20000a56275e3bc49b290fc1053732d.
 | FND-007 | accepted-no-change | The limits are documented in README and reference; they are implementation bounds and do not change a build. |
 | FND-008 | still-open | The SIGCHLD, empty-store, abort and held-lock start gaps are closed. broken_stderr now passes on every version because the closed descriptor 2 is reopened as /dev/null, and the held-lock signal test passes on c4ef503. Test-only; verified edits are in the patch. |
 
-Round 3, fix commit `58fdfe8` based on round-two head `bce5f4a7a20000a56275e3bc49b290fc1053732d`. macOS: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test --locked` passed (45 unit, 69 observe, 15 supervision; one ignored unit fixture and one ignored supervision fixture). Titan Linux: observe suite 75 passed at `nice -n 19`.
+Round 3, head fd77413b7651a1a215bec613cef30349da8a45d4. Verified: the fd77413 source is the bce5f4a tree plus the round-two edit patch; only reference.md paragraphs are arranged differently, with the same content.
 
 | FND | outcome | reason |
 | --- | ------- | ------ |
-| FND-002 | fixed | Slow config-read and state-fsync injections verify command start before the 800 ms deadline; the combined late-preflight/stalled-completion test verifies one shared exit deadline. |
-| FND-008 | fixed | The broken-stderr test now passes an actual closed pipe instead of a closed descriptor that Rust reopens as `/dev/null`; the abort and held-lock regressions now fail against their prior broken behavior. |
+| FND-002 | fixed | 800 ms start bounds and a combined late-preflight and stalled-completion test fail on the old heads and pass on the edit. |
+| FND-008 | fixed | Broken stderr uses a closed pipe; it and the held-lock signal test fail on c4ef503. |

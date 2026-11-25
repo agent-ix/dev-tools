@@ -136,11 +136,11 @@ Round 2, head bce5f4a7a20000a56275e3bc49b290fc1053732d. macOS: fmt and clippy ex
 | FND-037 | still-open | Found in this pass; edit in swm242-round2-edits.patch. |
 | FND-038 | still-open | Found in this pass; replacement fixture in swm242-round2-edits.patch. |
 
-Round 3, fix commit `58fdfe8` based on round-two head `bce5f4a7a20000a56275e3bc49b290fc1053732d`. macOS: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test --locked` passed (45 unit, 69 observe, 15 supervision; one ignored unit fixture and one ignored supervision fixture). Titan Linux: observe suite 75 passed at `nice -n 19`.
+Round 3, head fd77413b7651a1a215bec613cef30349da8a45d4. Verified: the fd77413 source is the bce5f4a tree plus the round-two edit patch; only reference.md paragraphs are arranged differently, with the same content.
 
 | FND | outcome | reason |
 | --- | ------- | ------ |
-| FND-035 | fixed | SIGXFSZ remains handled for observer writes but is no longer forwarded to the observed command; `observer_file_size_limit_does_not_signal_the_command` passes. |
-| FND-036 | fixed | An empty admitted request list is unused only when `next_sequence` is 1; a pruned legacy admitted store remains admitted. |
-| FND-037 | fixed | Forwarded signal handlers register before spawn, while captured caller-ignored dispositions are restored in the child. The 200-iteration immediate-signal regression passes. |
-| FND-038 | fixed | Replaced the C interposer with a Rust `cdylib` fixture compiled with `rustc`; Linux config-read, state-fsync, and shared-deadline tests pass. |
+| FND-035 | fixed | SIGXFSZ is handled and not forwarded; the delta is the verified edit. |
+| FND-036 | fixed | A pruned legacy admitted store is refused. |
+| FND-037 | fixed | Handlers register before spawn and the child restores ignored signals. |
+| FND-038 | fixed | The C fixture is replaced by a Rust one. |
