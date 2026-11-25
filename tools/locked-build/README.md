@@ -63,6 +63,23 @@ named sidecar and survive restart and `prune`; gauges describe the current queue
 occupied units, and configured capacity. Admission-blocked time is counted once per
 host, even when several requests are waiting. No pause metric is exported.
 
+For read-only host observations, run the separate sampler once per timer interval:
+
+```sh
+locked-build sample --config /etc/locked-build/sampler.json \
+  --output "$HOME/.local/share/node_exporter/textfile/ix_build_metrics.prom"
+```
+
+The sampler does not use scheduler state or admission locks, and it does not inspect
+build lock paths by opening or statting them. It reads only the process and source
+paths declared in its strict sampler configuration, then atomically writes the
+selected output file. It emits busy slots, configured capacity only where sourced,
+and bytes under explicitly configured target directories. Unsupported queue and
+outcome metrics are omitted. An unreadable source omits its affected metric and emits
+a bounded `ix_build_probe_unavailable` signal. The sampler returns success after
+writing available observations; invalid configuration or output-write failures return
+an error.
+
 ## Scheduling
 
 Higher effective priority runs first; equal priority follows enqueue order.

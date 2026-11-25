@@ -8,6 +8,7 @@ mod metrics;
 mod model;
 mod process;
 mod runtime;
+mod sample;
 mod store;
 mod watchdog;
 
@@ -62,6 +63,11 @@ enum Action {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Sample configured read-only host sources into Prometheus text.
+    Sample {
+        #[arg(long)]
+        output: PathBuf,
+    },
     #[command(hide = true)]
     Worker { request: String },
     #[command(hide = true)]
@@ -71,6 +77,12 @@ enum Action {
 }
 
 fn execute(cli: Cli) -> Result<i32> {
+    if let Action::Sample { output } = &cli.command {
+        let config = cli.config.as_deref().ok_or_else(|| {
+            error::Error::new(error::ErrorCode::Configuration, "--config is required")
+        })?;
+        return sample::run(config, output);
+    }
     if matches!(cli.command, Action::Parking) {
         // EOF follows the watchdog's exit, including SIGKILL. No state access is needed.
         std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;
@@ -143,6 +155,7 @@ fn execute(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Action::Sample { .. } => unreachable!("sample handled before opening scheduler state"),
         Action::Worker { request } => {
             runtime::worker(&store, &RequestId(request))?;
             Ok(0)
