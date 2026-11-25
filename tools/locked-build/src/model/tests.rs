@@ -74,6 +74,7 @@ fn state(requests: Vec<Request>) -> State {
         next_sequence: 100,
         next_event: 1,
         pruned_events: 0,
+        metrics: MetricsState::default(),
         requests,
         events: Vec::new(),
     }

@@ -92,3 +92,15 @@ Diagnostics begin with a stable code:
 | `request` | Unknown request or invalid requested resource bounds. |
 
 A running command's nonzero result is preserved as its own outcome.
+
+## Prometheus metrics
+
+`metrics` writes Prometheus text to standard output. `metrics --output PATH` atomically
+replaces a textfile collector document. The exporter emits `ix_build_queue_depth` and
+`ix_build_queue_wait_seconds` by the FR-011 classes `check`, `test`, and `gate`,
+`ix_build_slots_busy`, and `ix_build_slots_configured` from the host policy's
+`capacity_units` field. It exports `ix_build_builds_total` for the closed FR-015
+outcome set and `ix_build_admission_blocked_seconds_total` by resource reason. Pause
+series are omitted. Outcome counters and histogram observations live in persisted
+state, so `recover`, process restart, and `prune` do not erase or count them again.
+The hold deadline remains enforced by the existing watchdog behavior.

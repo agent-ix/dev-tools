@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, HostSample};
 use crate::error::{Error, ErrorCode, Result};
+use crate::metrics::MetricsState;
 
 /// Globally random store identity plus monotonically increasing request number.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -105,6 +106,8 @@ pub(crate) struct State {
     pub next_sequence: u64,
     pub next_event: u64,
     pub pruned_events: u64,
+    #[serde(default)]
+    pub metrics: MetricsState,
     pub requests: Vec<Request>,
     pub events: Vec<Event>,
 }
@@ -316,6 +319,9 @@ impl State {
         now: u64,
         clock: u64,
     ) -> Result<()> {
+        if self.find(id)?.phase.terminal() {
+            return Ok(());
+        }
         let Completion {
             code,
             signal,
@@ -348,6 +354,8 @@ impl State {
             });
         request.ended_at_ms = Some(now);
         request.ended_clock_ms = Some(clock);
+        let completed = request.clone();
+        self.metrics.record_terminal(&completed)?;
         self.event(id, config, now, clock)
     }
 }

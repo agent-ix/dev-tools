@@ -4,6 +4,7 @@
 
 mod config;
 mod error;
+mod metrics;
 mod model;
 mod process;
 mod runtime;
@@ -56,6 +57,11 @@ enum Action {
     Recover,
     /// Remove terminal requests/events after the monitoring consumer saved them.
     Prune,
+    /// Export Prometheus text metrics to stdout or an atomic textfile-collector path.
+    Metrics {
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     #[command(hide = true)]
     Worker { request: String },
     #[command(hide = true)]
@@ -123,6 +129,15 @@ fn execute(cli: Cli) -> Result<i32> {
         }
         Action::Prune => {
             println!("{}", runtime::prune(&store)?);
+            Ok(0)
+        }
+        Action::Metrics { output } => {
+            let text = runtime::metrics(&store)?;
+            if let Some(output) = output {
+                metrics::write_atomic(&output, &text)?;
+            } else {
+                print!("{text}");
+            }
             Ok(0)
         }
         Action::Worker { request } => {

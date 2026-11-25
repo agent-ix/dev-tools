@@ -364,6 +364,47 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
     })
 }
 
+pub(crate) fn metrics(store: &Store) -> Result<String> {
+    store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        let blocking_reason = current_block_reason(state, config, now, clock)?;
+        state.metrics.observe_block(blocking_reason, clock)?;
+        state.metrics.exposition(state, config, clock)
+    })
+}
+
+fn current_block_reason(
+    state: &crate::model::State,
+    config: &crate::config::Config,
+    now: u64,
+    clock: u64,
+) -> Result<Option<&'static str>> {
+    let sample = config.sample(now).ok();
+    for request in state
+        .requests
+        .iter()
+        .filter(|request| request.phase == Phase::Queued)
+    {
+        let Some(reason) =
+            state.admission_reason(&request.id, config, sample.as_ref(), now, clock)?
+        else {
+            continue;
+        };
+        if matches!(
+            reason,
+            "memory_reserve"
+                | "disk_reserve"
+                | "host_load"
+                | "host_sample_unavailable"
+                | "host_sample_invalid_or_stale"
+        ) {
+            return Ok(Some(reason));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn cancel(store: &Store, id: &RequestId) -> Result<()> {
     store.transaction(|state, config| {
         let request = state.find_mut(id)?;
@@ -484,15 +525,22 @@ fn admit_worker(
         }
         let sample = config.sample(now).ok();
         let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
-        let request = state.find_mut(id)?;
-        request.heartbeat_at_ms = Some(now);
-        request.reason = reason.map(str::to_owned);
+        {
+            let request = state.find_mut(id)?;
+            request.heartbeat_at_ms = Some(now);
+            request.reason = reason.map(str::to_owned);
+        }
+        let blocked_reason = current_block_reason(state, config, now, clock)?;
+        state.metrics.observe_block(blocked_reason, clock)?;
         if reason.is_some() {
             return Ok(Admission::Waiting(config.poll_ms));
         }
+        let request = state.find_mut(id)?;
         request.phase = Phase::Running;
         request.started_at_ms = Some(now);
         request.started_clock_ms = Some(clock);
+        let wait_ms = clock.saturating_sub(request.enqueued_clock_ms);
+        state.metrics.record_queue_wait(request.priority, wait_ms)?;
         let admitted = request.clone();
         state.event(id, config, now, clock)?;
         Ok(Admission::Granted(Box::new(admitted)))

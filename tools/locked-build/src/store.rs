@@ -72,6 +72,7 @@ impl Store {
                 next_sequence: 1,
                 next_event: 1,
                 pruned_events: 0,
+                metrics: crate::metrics::MetricsState::default(),
                 requests: Vec::new(),
                 events: Vec::new(),
             },
