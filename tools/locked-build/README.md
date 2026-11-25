@@ -46,8 +46,12 @@ locked-build --state /tmp/build-queue --config /path/to/host-policy.json recover
 locked-build --state /tmp/build-queue --config /path/to/host-policy.json prune
 locked-build --state /tmp/build-queue --config /path/to/host-policy.json metrics
 locked-build --state /tmp/build-queue --config /path/to/host-policy.json metrics \
-  --output /var/lib/node_exporter/textfile_collector/locked-build.prom
+  --output "$HOME/.local/share/node_exporter/textfile/ix_build_metrics.prom"
 ```
+
+The default output path matches the per-user node_exporter textfile directory.
+Terra WSL uses the shared directory `/mnt/c/Users/Peter/.ix/metrics`; set the
+`--output` path there on that host.
 
 `status` emits JSON with host capacity, occupied/free units, overcommit, host samples,
 request wait/hold ages, uncertainty, outcomes, and stable transition events.

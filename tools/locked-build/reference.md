@@ -98,8 +98,11 @@ A running command's nonzero result is preserved as its own outcome.
 ## Prometheus metrics
 
 `metrics` writes Prometheus text to standard output. `metrics --output PATH` atomically
-replaces a textfile collector document. The exporter emits `ix_build_queue_depth` and
-`ix_build_queue_wait_seconds` by the FR-011 classes `check`, `test`, and `gate`;
+replaces a textfile collector document. The default per-user node_exporter collector
+path is `$HOME/.local/share/node_exporter/textfile/ix_build_metrics.prom`; Terra WSL
+uses the shared directory `/mnt/c/Users/Peter/.ix/metrics` instead. The exporter emits
+`ix_build_queue_depth` and `ix_build_queue_wait_seconds` by the FR-011 classes
+`check`, `test`, and `gate`;
 configured priorities above 2 use the `gate` series,
 `ix_build_slots_busy`, and `ix_build_slots_configured` from the host policy's
 `capacity_units` field, which is the source basis for this configured capacity
