@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, RefreshKind, System};
 
-use crate::config::Config;
+use crate::config::{Config, ObserveConfig};
 use crate::error::{Error, ErrorCode, Result as AppResult};
 
 const OBSERVE_LIMIT: u64 = 32 * 1024 * 1024;
@@ -585,14 +585,14 @@ fn preflight(
     command_pid: u32,
     cancellation: Arc<AtomicBool>,
     hints: ObserveHints,
-) -> Result<(PathBuf, String, Config), String> {
+) -> Result<(PathBuf, String, ObserveConfig), String> {
     let root = state.ok_or_else(|| "--state is required".to_owned())?;
     let config_path = config_path.ok_or_else(|| "--config is required".to_owned())?;
     let config_meta = fs::metadata(config_path).map_err(|error| error.to_string())?;
     if !config_meta.is_file() || config_meta.len() > 1_048_576 {
         return Err("config must be a bounded regular file".into());
     }
-    let config = Config::read(config_path).map_err(|error| error.to_string())?;
+    let config = Config::read_for_observe(config_path).map_err(|error| error.to_string())?;
     let root = crate::store::validate_state_directory(root).map_err(|error| error.to_string())?;
     let command_started = process_start(command_pid);
     let observer_started = process_start(std::process::id());
@@ -602,7 +602,9 @@ fn preflight(
             reclaim(state);
         }
         state.host = config.host.clone();
-        state.slots = config.capacity_units;
+        if let Some(capacity_units) = config.capacity_units {
+            state.slots = capacity_units;
+        }
         state.next_id = state
             .next_id
             .checked_add(1)
@@ -764,7 +766,7 @@ pub(crate) fn exposition(state_path: &Path, config_path: &Path) -> AppResult<Opt
     if !observed_mode(state_path)? {
         return Ok(None);
     }
-    let config = Config::read(config_path)?;
+    let config = Config::read_for_observe(config_path)?;
     let deadline = Instant::now() + OBSERVER_BOUND;
     let mut result = None;
     let cancellation = AtomicBool::new(false);
@@ -787,7 +789,7 @@ pub(crate) fn snapshot(
     if !observed_mode(state_path)? {
         return Ok(None);
     }
-    let config = Config::read(config_path)?;
+    let config = Config::read_for_observe(config_path)?;
     let deadline = Instant::now() + OBSERVER_BOUND;
     let mut result = None;
     let cancellation = AtomicBool::new(false);
@@ -858,13 +860,17 @@ fn reclaim(state: &mut ObservationState) {
     });
 }
 
-fn render(state: &ObservationState, host: &str, slots: u32) -> String {
+fn render(state: &ObservationState, host: &str, slots: Option<u32>) -> String {
     let host = crate::metrics::escape_label(host);
     let mut output = format!(
-        "# HELP ix_build_slots_busy Currently observed command slots.\n# TYPE ix_build_slots_busy gauge\nix_build_slots_busy{{host=\"{host}\"}} {}\n# HELP ix_build_slots_configured Configured slots from the host policy.\n# TYPE ix_build_slots_configured gauge\nix_build_slots_configured{{host=\"{host}\"}} {}\n",
-        state.busy.len(),
-        slots
+        "# HELP ix_build_slots_busy Currently observed command slots.\n# TYPE ix_build_slots_busy gauge\nix_build_slots_busy{{host=\"{host}\"}} {}\n",
+        state.busy.len()
     );
+    if let Some(slots) = slots {
+        output.push_str(&format!(
+            "# HELP ix_build_slots_configured Configured slots from the host policy.\n# TYPE ix_build_slots_configured gauge\nix_build_slots_configured{{host=\"{host}\"}} {slots}\n"
+        ));
+    }
     if !state.build_started.is_empty() {
         output.push_str("# HELP ix_build_builds_total Observed build outcomes by priority and result.\n# TYPE ix_build_builds_total counter\n");
     }
@@ -908,7 +914,7 @@ fn render(state: &ObservationState, host: &str, slots: u32) -> String {
     output
 }
 
-fn snapshot_json(state: &ObservationState, host: &str, slots: u32) -> serde_json::Value {
+fn snapshot_json(state: &ObservationState, host: &str, slots: Option<u32>) -> serde_json::Value {
     let mut snapshot = serde_json::Map::new();
     snapshot.insert("schema_version".into(), serde_json::json!(1));
     snapshot.insert("observed_at_ms".into(), serde_json::json!(now_ms()));
@@ -918,7 +924,9 @@ fn snapshot_json(state: &ObservationState, host: &str, slots: u32) -> serde_json
         "ix_build_slots_busy".into(),
         serde_json::json!(state.busy.len()),
     );
-    snapshot.insert("ix_build_slots_configured".into(), serde_json::json!(slots));
+    if let Some(slots) = slots {
+        snapshot.insert("ix_build_slots_configured".into(), serde_json::json!(slots));
+    }
     if !state.build_started.is_empty() {
         let builds = state
             .build_started

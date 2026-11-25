@@ -346,6 +346,94 @@ fn busy_slot_is_released_and_configured_slots_follow_host_policy() -> TestResult
     Ok(())
 }
 
+/// Trace: FR-015-AC-23
+#[test]
+fn missing_slot_limits_are_omitted_for_observe_but_required_for_run() -> TestResult {
+    let capacity_only = Fixture::new(1)?;
+    let mut policy: serde_json::Value = serde_json::from_slice(&fs::read(&capacity_only.config)?)?;
+    policy
+        .as_object_mut()
+        .ok_or("policy object")?
+        .remove("maximum_units");
+    fs::write(&capacity_only.config, serde_json::to_vec(&policy)?)?;
+    assert!(
+        capacity_only
+            .observe(&[], &["/usr/bin/true"])?
+            .status
+            .success()
+    );
+    let metrics = capacity_only.command().arg("metrics").output()?;
+    assert!(metrics.status.success());
+    assert!(
+        String::from_utf8(metrics.stdout)?
+            .contains("ix_build_slots_configured{host=\"observe-test\"} 1")
+    );
+
+    let unbounded = Fixture::new(1)?;
+    let mut policy: serde_json::Value = serde_json::from_slice(&fs::read(&unbounded.config)?)?;
+    policy
+        .as_object_mut()
+        .ok_or("policy object")?
+        .remove("capacity_units");
+    fs::write(&unbounded.config, serde_json::to_vec(&policy)?)?;
+    let mut observers = Vec::new();
+    for _ in 0..3 {
+        let observer = unbounded
+            .command()
+            .arg("observe")
+            .arg("--")
+            .arg("/bin/sleep")
+            .arg("1")
+            .spawn()?;
+        wait_for_command_identity(&unbounded.state, observer.id())?;
+        observers.push(observer);
+    }
+    let metrics = unbounded.command().arg("metrics").output()?;
+    assert!(metrics.status.success());
+    let text = String::from_utf8(metrics.stdout)?;
+    assert!(text.contains("ix_build_slots_busy{host=\"observe-test\"} 3"));
+    assert!(!text.contains("ix_build_slots_configured"));
+    for observer in &mut observers {
+        assert!(observer.wait()?.success());
+    }
+
+    let missing_both = Fixture::new(1)?;
+    let mut policy: serde_json::Value = serde_json::from_slice(&fs::read(&missing_both.config)?)?;
+    policy
+        .as_object_mut()
+        .ok_or("policy object")?
+        .remove("capacity_units");
+    policy
+        .as_object_mut()
+        .ok_or("policy object")?
+        .remove("maximum_units");
+    fs::write(&missing_both.config, serde_json::to_vec(&policy)?)?;
+    assert!(
+        missing_both
+            .observe(&[], &["/usr/bin/true"])?
+            .status
+            .success()
+    );
+    let metrics = missing_both.command().arg("metrics").output()?;
+    assert!(metrics.status.success());
+    let text = String::from_utf8(metrics.stdout)?;
+    assert!(text.contains("ix_build_slots_busy{host=\"observe-test\"} 0"));
+    assert!(!text.contains("ix_build_slots_configured"));
+    let status = missing_both.command().arg("status").output()?;
+    assert!(status.status.success());
+    let snapshot: serde_json::Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(snapshot["ix_build_slots_busy"], 0);
+    assert!(snapshot.get("ix_build_slots_configured").is_none());
+
+    let admitted = missing_both.admitted()?;
+    assert!(
+        !admitted.status.success(),
+        "run accepted policy without capacity limits: {}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+    Ok(())
+}
+
 /// Trace: FR-015-AC-17
 #[test]
 fn outcome_metrics_require_explicit_kind_and_build_priority() -> TestResult {

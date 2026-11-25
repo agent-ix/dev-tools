@@ -50,7 +50,40 @@ pub struct Config {
 
 impl Config {
     pub(crate) fn read(path: &Path) -> Result<Self> {
-        let mut config: Self = serde_json::from_reader(std::fs::File::open(path)?)
+        let value: serde_json::Value = serde_json::from_reader(std::fs::File::open(path)?)
+            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        Self::from_value(path, value)
+    }
+
+    pub(crate) fn read_for_observe(path: &Path) -> Result<ObserveConfig> {
+        let mut value: serde_json::Value = serde_json::from_reader(std::fs::File::open(path)?)
+            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        let capacity_units = optional_limit(&value, "capacity_units")?;
+        let maximum_units = optional_limit(&value, "maximum_units")?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| Error::new(ErrorCode::Configuration, "host policy must be an object"))?;
+        // Config::validate checks the entire existing policy schema. These local
+        // placeholders satisfy only its required numeric fields when absent; they
+        // are never returned to the observer or used for admission or exposition.
+        if capacity_units.is_none() {
+            object.insert("capacity_units".into(), serde_json::json!(0));
+        }
+        if maximum_units.is_none() {
+            object.insert(
+                "maximum_units".into(),
+                serde_json::json!(capacity_units.unwrap_or(0).max(1)),
+            );
+        }
+        let config = Self::from_value(path, value)?;
+        Ok(ObserveConfig {
+            host: config.host,
+            capacity_units,
+        })
+    }
+
+    fn from_value(path: &Path, value: serde_json::Value) -> Result<Self> {
+        let mut config: Self = serde_json::from_value(value)
             .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
         let directory = path
             .parent()
@@ -125,6 +158,20 @@ impl Config {
             load_one: System::load_average().one,
         })
     }
+}
+
+pub(crate) struct ObserveConfig {
+    pub(crate) host: String,
+    pub(crate) capacity_units: Option<u32>,
+}
+
+fn optional_limit(value: &serde_json::Value, key: &str) -> Result<Option<u32>> {
+    let Some(value) = value.get(key) else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))
 }
 
 /// Host-agent sample accepted by the same path as local measurements.
