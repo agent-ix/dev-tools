@@ -45,13 +45,16 @@ report the conflict when those authorities disagree.
   traces tests to requirements, bind each new test with `/// Trace:` or its
   declared trace attribute; do not hand-edit a Test Matrix. Use the
   repository's required gates and license header.
+- In that repository, mark new or changed production code that implements an
+  acceptance criterion with `#[implements("...")]`, so tools can find its
+  tests and the other code that implements the same criterion.
 
 ## Read the applicable detailed rules
 
 - [API design](references/api-design.md): public or cross-crate APIs, types,
   constructors, traits, ownership, and documentation.
 - [Implementation](references/implementation.md): modules, imports, naming,
-  control flow, formatting, macros, and ordinary Rust code.
+  control flow, formatting, macros, requirement links, and ordinary Rust code.
 - [Safety and concurrency](references/safety-concurrency.md): panic paths,
   unsafe, locks, cancellation, resource bounds, and concurrent state.
 - [Wire and persistence](references/wire-and-persistence.md): errors,
