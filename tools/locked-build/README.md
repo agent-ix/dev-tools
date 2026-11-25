@@ -87,8 +87,10 @@ the per-user node_exporter directory. Terra WSL uses the shared file path
 
 `status` emits JSON with host capacity, occupied/free units, overcommit, host samples,
 request wait/hold ages, uncertainty, outcomes, and stable transition events for
-admitted stores. Observed stores expose only observed occupancy, configured
-slots, and attributed outcomes or queue wait; they omit unknown scheduler values.
+admitted stores. Observed stores expose observed occupancy, configured slots when
+`capacity_units` is present, and attributed outcomes or queue wait. When it is
+absent, the configured-slots metric and JSON snapshot field are omitted. Observed
+stores omit unknown scheduler values.
 Both modes omit command arguments and environment values.
 Save terminal evidence before `prune`, which removes terminal requests, events, and output files.
 `metrics` writes Prometheus text to stdout or atomically replaces the selected textfile.

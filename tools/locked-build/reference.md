@@ -106,7 +106,11 @@ Terra WSL uses `/mnt/c/Users/<user>/.ix/metrics/ix_build_metrics.prom` instead. 
 configured priorities above 2 use the `gate` series,
 `ix_build_slots_busy`, and `ix_build_slots_configured` from the host policy's
 `capacity_units` field, which is the source basis for this configured capacity
-series; it does not label this value as sustainable capacity. It exports
+series; it does not label this value as sustainable capacity. Admitted stores
+still require both `capacity_units` and `maximum_units`. For observed stores,
+those two fields are optional. When `capacity_units` is absent, the configured
+slots series and JSON snapshot field are omitted; busy slots still report every
+concurrently observed command. It exports
 `ix_build_builds_total` for the closed FR-015 outcomes `ok`, `failed`, `cancelled`,
 `timed_out`, `aborted_memory`, `aborted_swap`, `aborted_compressor`,
 `aborted_host_load`, `aborted_thermal`, `rss_cap`, and `pause_exceeded`, plus
