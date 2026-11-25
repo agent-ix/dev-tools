@@ -178,10 +178,8 @@ impl Store {
             if state_changed {
                 self.write_atomic("state.json", &bytes)?;
             }
-            if metrics_changed {
-                if let Err(error) = self.write_atomic(METRICS_FILE, &metrics_bytes) {
-                    eprintln!("locked-build: metrics sidecar update failed: {error}");
-                }
+            if metrics_changed && let Err(error) = self.write_atomic(METRICS_FILE, &metrics_bytes) {
+                eprintln!("locked-build: metrics sidecar update failed: {error}");
             }
         }
         File::open(&self.path)?.sync_all()?;
