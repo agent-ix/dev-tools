@@ -366,10 +366,7 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
 
 pub(crate) fn metrics(store: &Store) -> Result<String> {
     store.transaction(|state, config| {
-        let now = now_ms()?;
         let clock = clock_ms()?;
-        let blocking_reason = current_block_reason(state, config, now, clock)?;
-        state.metrics.observe_block(blocking_reason, clock)?;
         state.metrics.exposition(state, config, clock)
     })
 }
@@ -377,18 +374,16 @@ pub(crate) fn metrics(store: &Store) -> Result<String> {
 fn current_block_reason(
     state: &crate::model::State,
     config: &crate::config::Config,
+    sample: Option<&HostSample>,
     now: u64,
     clock: u64,
 ) -> Result<Option<&'static str>> {
-    let sample = config.sample(now).ok();
     for request in state
         .requests
         .iter()
         .filter(|request| request.phase == Phase::Queued)
     {
-        let Some(reason) =
-            state.admission_reason(&request.id, config, sample.as_ref(), now, clock)?
-        else {
+        let Some(reason) = state.admission_reason(&request.id, config, sample, now, clock)? else {
             continue;
         };
         if matches!(
@@ -530,7 +525,7 @@ fn admit_worker(
             request.heartbeat_at_ms = Some(now);
             request.reason = reason.map(str::to_owned);
         }
-        let blocked_reason = current_block_reason(state, config, now, clock)?;
+        let blocked_reason = current_block_reason(state, config, sample.as_ref(), now, clock)?;
         state.metrics.observe_block(blocked_reason, clock)?;
         if reason.is_some() {
             return Ok(Admission::Waiting(config.poll_ms));
