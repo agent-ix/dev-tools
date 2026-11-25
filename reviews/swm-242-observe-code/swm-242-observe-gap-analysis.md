@@ -56,3 +56,22 @@ Round 1, head bbb3ede8ccacfc8a594e77e622cc95d7b2463c2d.
 | FND-005 | still-open | No test makes state unwritable or corrupt after start; the read-only test covers export. |
 | FND-006 | accepted-no-change | AC-18 and AC-20 parts are now tested; the AC-13 governor and hold clause has no producer in this build. |
 | FND-007 | still-open | No requirement or spec note added for the limits. |
+
+Round 2, head bce5f4a7a20000a56275e3bc49b290fc1053732d.
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | fixed | Default and ignored disposition probes and a process-group comparison with a direct run were added; the old SIGPIPE assertion is gone. |
+| FND-002 | still-open | I/O injection and an 800 ms held-lock start bound were added. slow_config_read (1500 ms) still passes on c4ef503, and preflight_and_completion_share_one_post_exit_deadline passes on bbb3ede. Test-only; verified edits are in the patch. |
+| FND-003 | fixed | The test reads observe.json before any export. |
+| FND-004 | fixed | A failed build is asserted. |
+| FND-005 | fixed | Unwritable and corrupted state after start are tested. |
+| FND-007 | accepted-no-change | The limits are documented in README and reference; they are implementation bounds and do not change a build. |
+| FND-008 | still-open | The SIGCHLD, empty-store, abort and held-lock start gaps are closed. broken_stderr now passes on every version because the closed descriptor 2 is reopened as /dev/null, and the held-lock signal test passes on c4ef503. Test-only; verified edits are in the patch. |
+
+Round 3, fix commit `58fdfe8` based on round-two head `bce5f4a7a20000a56275e3bc49b290fc1053732d`. macOS: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test --locked` passed (45 unit, 69 observe, 15 supervision; one ignored unit fixture and one ignored supervision fixture). Titan Linux: observe suite 75 passed at `nice -n 19`.
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-002 | fixed | Slow config-read and state-fsync injections verify command start before the 800 ms deadline; the combined late-preflight/stalled-completion test verifies one shared exit deadline. |
+| FND-008 | fixed | The broken-stderr test now passes an actual closed pipe instead of a closed descriptor that Rust reopens as `/dev/null`; the abort and held-lock regressions now fail against their prior broken behavior. |

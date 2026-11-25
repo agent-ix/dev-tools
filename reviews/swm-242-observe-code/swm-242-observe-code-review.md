@@ -72,6 +72,17 @@ Head bbb3ede8ccacfc8a594e77e622cc95d7b2463c2d. Findings about the fix diff only.
 | FND-033 | low | Observed export takes the export lock before validating the directory, so metrics --output on a rejected non-private directory leaves metrics-export.lock in it. Reproduced. Fix: validate the state directory before opening the lock. | tools/locked-build/src/main.rs:129-139 |
 | FND-034 | low | thread::spawn panics if a thread cannot be created; after the command is spawned that would exit the observer while the command runs. Read only. Fix: use thread::Builder and treat failure as an observer failure. | tools/locked-build/src/observe.rs:283; tools/locked-build/src/observe.rs:396; tools/locked-build/src/observe.rs:724 |
 
+## New findings (disposition pass 2)
+
+Head bce5f4a7a20000a56275e3bc49b290fc1053732d.
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-035 | medium | The observer forwards its own SIGXFSZ. Under a file-size limit smaller than the state being written (always at 0; 4 KiB after 300 runs on Linux) the preflight write raises SIGXFSZ, the observer's flag handler catches it and the wait loop sends it to the command, which dies (rc 153) where a direct run succeeds. Reproduced on macOS and Linux. Present since c4ef503 and missed in earlier passes. Fix: stop forwarding SIGXFSZ but keep a handler so the write returns EFBIG. | tools/locked-build/src/observe.rs:521-545 |
+| FND-036 | medium | Any empty request list now counts as unused, so an admitted store written before this PR and emptied by prune (no mode.json, next_sequence 2) accepts observe, which writes observe.json; every later run there is refused with a request error. Introduced by the FND-011 fix; FR-015 says prune does not reset the mode. Fix: unused only when requests is empty and next_sequence is 1. | tools/locked-build/src/observe.rs:669-680 |
+| FND-037 | medium | Signal handlers are registered after spawn. A forwarded signal sent to the observer PID after the command starts and before registration kills the observer while the command keeps running, so a cancel is lost and the wrapper sees the build end: 6 of 1000 on Linux at load 28, 0 of 1000 with early registration, 0 of 400 on macOS. When a test loses this race its looping child is orphaned and hangs the test output. Introduced by the FND-002 fix. Fix: register before spawn and re-ignore the caller's ignored signals in pre_exec. | tools/locked-build/src/observe.rs:227-262 |
+| FND-038 | medium | The fix adds an 87-line C interposer compiled with cc, against the ticket brief rule Rust only; its macOS branches are never built. Fix: replace it with a Rust cdylib fixture compiled with rustc (verified on Linux). | tools/locked-build/tests/fixtures/io_delay.c:1-87 |
+
 ## Dispositions
 
 Round 1, head bbb3ede8ccacfc8a594e77e622cc95d7b2463c2d. macOS gates: fmt and clippy exit 0, tests 44 unit, 53 observe, 15 supervision passed. Linux (temporary source copy, since removed): 55 observe tests passed.
@@ -102,3 +113,34 @@ Round 1, head bbb3ede8ccacfc8a594e77e622cc95d7b2463c2d. macOS gates: fmt and cli
 | FND-022 | fixed | Typed errors and schema_version added. |
 | FND-023 | still-open | Reference.md still states a before-start bound that no longer describes the design, and the migration guidance was not restored. |
 | FND-024 | fixed | Late preflight row is removed by completion; busy empty after run. |
+
+Round 2, head bce5f4a7a20000a56275e3bc49b290fc1053732d. macOS: fmt and clippy exit 0, tests 44 unit, 66 observe, 15 supervision passed. Linux (temporary copy, since removed): 71 observe tests passed.
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-011 | fixed | Status, metrics, prune, recover and a rejected run on an empty store now leave observe working. Legacy-store residue is FND-036. |
+| FND-020 | fixed | Equals forms are recorded in the fallback. |
+| FND-023 | accepted-no-change | The stale bound text is corrected. The dropped README migration lines concern admitted-mode adoption and no build result depends on them; restoring them is optional. |
+| FND-025 | fixed | Direct and observed dispositions, mask, pipeline hang case and pipefail status match for default and ignored callers on macOS and Linux. |
+| FND-026 | fixed | SIGPIPE is no longer forwarded; stalled preflight with broken stderr completes 3 of 3. |
+| FND-027 | fixed | Observer start time is recorded; a reused PID reports busy 0. |
+| FND-028 | fixed | Compound preflight and completion stall returns at 1.03 s. |
+| FND-029 | accepted-no-change | Stop signals keep default job control. README and reference tell wrappers to target the process group or cgroup; the contract wording is dev-team#43. |
+| FND-030 | fixed | Linux caller-ignored SIGCHLD is preserved and exit statuses match. |
+| FND-031 | fixed | Unsafe code is denied except in the inherit module and the single pre_exec installer. |
+| FND-032 | accepted-no-change | The code keeps start-first with an overlapping lock; the contract is changed to match in dev-team#43, which must merge with this PR. |
+| FND-033 | fixed | A rejected 0755 directory receives no file. |
+| FND-034 | fixed | All observer threads use thread::Builder and handle spawn errors. |
+| FND-035 | still-open | Found in this pass; edit in swm242-round2-edits.patch. |
+| FND-036 | still-open | Found in this pass; edit in swm242-round2-edits.patch. |
+| FND-037 | still-open | Found in this pass; edit in swm242-round2-edits.patch. |
+| FND-038 | still-open | Found in this pass; replacement fixture in swm242-round2-edits.patch. |
+
+Round 3, fix commit `58fdfe8` based on round-two head `bce5f4a7a20000a56275e3bc49b290fc1053732d`. macOS: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test --locked` passed (45 unit, 69 observe, 15 supervision; one ignored unit fixture and one ignored supervision fixture). Titan Linux: observe suite 75 passed at `nice -n 19`.
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-035 | fixed | SIGXFSZ remains handled for observer writes but is no longer forwarded to the observed command; `observer_file_size_limit_does_not_signal_the_command` passes. |
+| FND-036 | fixed | An empty admitted request list is unused only when `next_sequence` is 1; a pruned legacy admitted store remains admitted. |
+| FND-037 | fixed | Forwarded signal handlers register before spawn, while captured caller-ignored dispositions are restored in the child. The 200-iteration immediate-signal regression passes. |
+| FND-038 | fixed | Replaced the C interposer with a Rust `cdylib` fixture compiled with `rustc`; Linux config-read, state-fsync, and shared-deadline tests pass. |
