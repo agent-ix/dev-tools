@@ -178,7 +178,6 @@ name = "locked-build"
 version = "0.1.0"
 dependencies = [
  "clap",
- "libc",
  "nix",
  "rustix",
  "serde",
