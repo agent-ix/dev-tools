@@ -39,6 +39,20 @@ choose a representation whose coverage can be audited directly.
    finding using the contract and consequence below, then write the review
    artifact and dispositions as required by `code-review`.
 
+## Change impact and requirement trace
+
+For Agent IX repositories, apply the exact requirements in the session's
+`AGENTS.md` instructions under **Requirement tags and changing untagged code**
+and **Dependency version moves** (on Codex, `~/.codex/AGENTS.md`). Use those
+sections as the shared authority; do not copy or paraphrase their procedure in
+this skill.
+
+When requirement specs and a trace library apply, check the changed functions'
+criterion links, new tests' trace tags, related code examined, and the PR's list
+of criteria and tests. For a dependency version move, check the old and new
+revisions, changed files and public items, local references, focused tests, and
+the PR's comparison of those results.
+
 ## Core review checks
 
 - **API and docs:** For changed public items, check intended consumers,
