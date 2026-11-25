@@ -393,6 +393,110 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
 
 /// Trace: FR-015-AC-11
 #[test]
+fn host_interval_reselects_the_next_queued_reason_after_head_cancellation() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let config_path = root.path().join("policy.json");
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    policy.maximum_units = 2;
+    policy.memory_per_unit_bytes = 100;
+    policy.memory_reserve_bytes = 0;
+    policy.disk_reserve_bytes = 2_000_000;
+    let sample_path = policy
+        .sample_file
+        .clone()
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "sample path missing"))?;
+    let mut sample: crate::config::HostSample =
+        serde_json::from_slice(&std::fs::read(&sample_path)?)?;
+    sample.memory_available_bytes = 150;
+    sample.disk_available_bytes = 1_000_000;
+    std::fs::write(&sample_path, serde_json::to_vec(&sample)?)?;
+    std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
+
+    let first = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-LARGE",
+        2,
+        0,
+        &["/usr/bin/true".into()],
+    )?;
+    let second = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-SMALL",
+        1,
+        0,
+        &["/usr/bin/true".into()],
+    )?;
+    for (id, pid) in [(&first, u32::MAX - 5), (&second, u32::MAX - 6)] {
+        let fence = claim_worker(
+            &store,
+            id,
+            &ProcessIdentity {
+                pid,
+                started_seconds: 1,
+            },
+        )?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+        assert!(matches!(
+            admit_worker(&store, id, &fence, &AtomicBool::new(false))?,
+            Admission::Waiting(_)
+        ));
+    }
+    let before = metrics(&store)?;
+    cancel(&store, &first)?;
+    let after = metrics(&store)?;
+    let memory_before = metric_value(
+        &before,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let memory_after = metric_value(
+        &after,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let disk_after = metric_value(
+        &after,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"target_disk\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "target disk series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert!(memory_after >= memory_before);
+    assert!(
+        disk_after > 0.0,
+        "next queued request's reason was not selected"
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    let later = metrics(&store)?;
+    let memory_later = metric_value(
+        &later,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let disk_later = metric_value(
+        &later,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"target_disk\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "target disk series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert_eq!(memory_later, memory_after);
+    assert!(disk_later >= disk_after);
+    cancel(&store, &second)?;
+    Ok(())
+}
+
+/// Trace: FR-015-AC-11
+#[test]
 fn hold_expiry_of_running_request_does_not_reset_queued_host_interval() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
