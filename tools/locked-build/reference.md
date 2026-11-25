@@ -99,8 +99,14 @@ A running command's nonzero result is preserved as its own outcome.
 replaces a textfile collector document. The exporter emits `ix_build_queue_depth` and
 `ix_build_queue_wait_seconds` by the FR-011 classes `check`, `test`, and `gate`,
 `ix_build_slots_busy`, and `ix_build_slots_configured` from the host policy's
-`capacity_units` field. It exports `ix_build_builds_total` for the closed FR-015
-outcome set and `ix_build_admission_blocked_seconds_total` by resource reason. Pause
-series are omitted. Outcome counters and histogram observations live in persisted
-state, so `recover`, process restart, and `prune` do not erase or count them again.
-The hold deadline remains enforced by the existing watchdog behavior.
+`capacity_units` field, which is the source basis for this configured capacity
+series; it does not label this value as sustainable capacity. It exports
+`ix_build_builds_total` for the closed FR-015 outcomes `ok`, `failed`, `cancelled`,
+`timed_out`, `aborted_memory`, `aborted_swap`, `aborted_compressor`,
+`aborted_host_load`, `aborted_thermal`, `rss_cap`, and `pause_exceeded`, plus
+`ix_build_admission_blocked_seconds_total` by resource reason. This slice adds no
+pause or abort mechanism, so those outcome series are present at zero and are not
+claimed as covered by FR-015-AC-8. Pause series are omitted. Outcome counters and
+histogram observations live in persisted state, so `recover`, process restart, and
+`prune` do not erase or count them again. The hold deadline remains enforced by the
+existing watchdog behavior.
