@@ -330,7 +330,7 @@ impl MetricsState {
             &mut output,
             "ix_build_slots_configured",
             "gauge",
-            "Currently configured build admission units from host policy capacity_units.",
+            "Configured build admission units from locked-build JSON host policy capacity_units until the SWM-239 TOML profile exists; no sustainable capacity is derived.",
         );
         output.push_str(&format!(
             "ix_build_slots_configured{{host=\"{host}\"}} {}\n",
