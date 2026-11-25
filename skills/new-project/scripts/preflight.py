@@ -16,8 +16,10 @@ PROTECTED_SUFFIXES = {".doc", ".docx", ".pdf", ".xls", ".xlsx"}
 # suffix (LICENSE, Makefile, dotfiles); a binary one fails the UTF-8 read.
 # ".lock" admits the Cargo.lock that rust-lib-cookiecutter renders and ".svg"
 # the figures the docs-figures skill draws; both are plain text. ".native" and
-# ".qsl" are Quire Specification Language source, and ".license" is a REUSE
-# sidecar carrying the SPDX line for a file that cannot hold a header.
+# ".qsl" are Quire Specification Language source, ".tsp" is TypeSpec source,
+# and ".license" is a REUSE sidecar carrying the SPDX line for a file that
+# cannot hold a header. These source formats are read as UTF-8 and scanned;
+# their inclusion does not authorize third-party content.
 TEXT_SUFFIXES = {
     "",
     ".css",
@@ -38,6 +40,7 @@ TEXT_SUFFIXES = {
     ".toml",
     ".ts",
     ".tsx",
+    ".tsp",
     ".txt",
     ".yaml",
     ".yml",

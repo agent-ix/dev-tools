@@ -23,9 +23,12 @@ license. External material is prohibited by default.
 These exclusions apply to ignored files, Git LFS, branches, issues, pull requests, commit
 messages, CI artifacts, and private repositories as well as the default branch.
 
-The project preflight rejects unreviewed file types by default. Add a format to its text
-allowlist only after deciding how its contents will be inspected; separately review any
-original binary asset before admitting its exact format.
+The project preflight rejects unreviewed file types by default. Its text allowlist includes
+`.tsp` TypeSpec source, which is read as UTF-8 and checked by the existing forbidden-content
+scanner. This classification does not establish first-party authorship or authorize
+third-party/protected source text. Add a format to the text allowlist only after deciding how
+its contents will be inspected; separately review any original binary asset before
+admitting its exact format.
 
 ## Review
 
