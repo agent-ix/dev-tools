@@ -16,7 +16,7 @@ use nix::unistd::{Pid, mkfifo};
 use serde_json::json;
 use tempfile::TempDir;
 
-#[allow(unsafe_code)]
+#[allow(unsafe_code, dead_code)]
 #[path = "../src/inherit.rs"]
 mod inherit;
 
@@ -168,23 +168,24 @@ fn spawn_with_closed_stderr(mut command: Command) -> std::io::Result<std::proces
 fn build_io_delay_interposer(
     directory: &std::path::Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/io_delay.c");
-    let library = directory.join(if cfg!(target_os = "macos") {
-        "libio_delay.dylib"
-    } else {
-        "libio_delay.so"
-    });
-    let mut compiler = Command::new("cc");
-    compiler.arg(&source);
-    if cfg!(target_os = "macos") {
-        compiler.arg("-dynamiclib");
-    } else {
-        compiler.args(["-shared", "-fPIC", "-ldl"]);
-    }
-    let output = compiler.arg("-o").arg(&library).output()?;
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/io_delay.rs");
+    let library = directory.join("libio_delay.so");
+    let output = Command::new("rustc")
+        .args([
+            "--edition",
+            "2024",
+            "--crate-type",
+            "cdylib",
+            "--crate-name",
+            "io_delay",
+        ])
+        .arg("-o")
+        .arg(&library)
+        .arg(&source)
+        .output()?;
     assert!(
         output.status.success(),
-        "cc: {}",
+        "rustc: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(library)
@@ -203,14 +204,10 @@ fn assert_delayed_observer_io_does_not_delay_command(mode: &str) -> TestResult {
         .arg(&marker)
         .env("LOCKED_BUILD_DELAY_IO", mode)
         .stderr(Stdio::piped());
-    if cfg!(target_os = "macos") {
-        command.env("DYLD_INSERT_LIBRARIES", &library);
-    } else {
-        command.env("LD_PRELOAD", &library);
-    }
+    command.env("LD_PRELOAD", &library);
     let started = std::time::Instant::now();
     let observer = command.spawn()?;
-    let deadline = started + Duration::from_millis(1_500);
+    let deadline = started + Duration::from_millis(800);
     while !marker.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -278,7 +275,10 @@ fn broken_stderr_does_not_prevent_observed_command_from_running() -> TestResult 
         .arg("/usr/bin/touch")
         .arg(&marker)
         .stdout(Stdio::null());
-    let mut child = spawn_with_closed_stderr(command)?;
+    let (reader, writer) = std::io::pipe()?;
+    drop(reader);
+    command.stderr(writer);
+    let mut child = command.spawn()?;
     assert!(child.wait()?.success());
     assert!(marker.exists());
     Ok(())
@@ -485,7 +485,7 @@ fn pid_only_abort_reaches_handling_child_without_killing_observer() -> TestResul
         .arg("--")
         .arg("/bin/sh")
         .arg("-c")
-        .arg("echo $$ > \"$1\"; trap 'touch \"$2\"; exit 0' ABRT; while :; do sleep 0.02; done")
+        .arg("trap 'touch \"$2\"; exit 0' ABRT; echo $$ > \"$1\"; i=0; while [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done; exit 3")
         .arg("abort-test")
         .arg(&pid_file)
         .arg(&marker)
@@ -1397,7 +1397,7 @@ fn held_state_lock_does_not_delay_pid_only_signal_forwarding() -> TestResult {
         .arg(&pid_file)
         .process_group(0)
         .spawn()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + Duration::from_millis(800);
     while !pid_file.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -2155,4 +2155,108 @@ fn wait_for_command_identity(
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Trace: FR-015-AC-15
+#[allow(unsafe_code)]
+#[test]
+fn observer_file_size_limit_does_not_signal_the_command() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let marker = fixture.root.path().join("ran-under-file-limit");
+    let mut command = fixture.command();
+    command
+        .arg("observe")
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("sleep 0.3; : > \"$1\"")
+        .arg("file-limit-test")
+        .arg(&marker);
+    // SAFETY: pre_exec only calls setrlimit before exec.
+    unsafe {
+        command.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output()?;
+    assert!(
+        output.status.success(),
+        "observer exited {:?}",
+        output.status
+    );
+    assert!(marker.exists());
+    Ok(())
+}
+
+/// Trace: FR-015-AC-22
+#[test]
+fn pruned_legacy_admitted_store_stays_admitted() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let run = fixture
+        .command()
+        .arg("run")
+        .arg("--owner")
+        .arg("test:team:lead")
+        .arg("--ticket")
+        .arg("SWM-242")
+        .arg("--")
+        .arg("/usr/bin/true")
+        .output()?;
+    assert!(run.status.success());
+    assert!(fixture.command().arg("prune").output()?.status.success());
+    fs::remove_file(fixture.state.join("mode.json"))?;
+    let observed = fixture.observe(&[], &["/usr/bin/true"])?;
+    assert!(observed.status.success());
+    assert!(!fixture.state.join("observe.json").exists());
+    Ok(())
+}
+
+/// Trace: FR-015-AC-21
+#[cfg(target_os = "linux")]
+#[test]
+fn late_preflight_and_stalled_completion_share_one_post_exit_deadline() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let library = build_io_delay_interposer(fixture.root.path())?;
+    let started = std::time::Instant::now();
+    let output = fixture
+        .command()
+        .arg("observe")
+        .arg("--")
+        .arg("/bin/true")
+        .env("LOCKED_BUILD_DELAY_IO", "late-then-stalled")
+        .env("LD_PRELOAD", &library)
+        .output()?;
+    assert!(output.status.success());
+    assert!(started.elapsed() < Duration::from_millis(1_400));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-15
+#[test]
+fn signal_sent_as_soon_as_the_command_starts_does_not_end_the_observer() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    for _ in 0..200 {
+        let output = fixture.observe(
+            &[],
+            &[
+                "/bin/sh",
+                "-c",
+                "trap 'exit 0' TERM; kill -TERM $PPID; i=0; \
+                 while [ $i -lt 100 ]; do sleep 0.01; i=$((i+1)); done; exit 3",
+            ],
+        )?;
+        assert!(
+            output.status.success(),
+            "observer exited {:?}",
+            output.status
+        );
+    }
+    Ok(())
 }

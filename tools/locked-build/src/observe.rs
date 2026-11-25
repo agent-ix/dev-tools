@@ -218,8 +218,16 @@ pub(crate) fn run(
     let restore_sigpipe_ignore = crate::inherit::sigpipe_ignored();
     #[cfg(target_os = "linux")]
     let restore_sigchld_ignore = crate::inherit::sigchld_ignored();
+    // Register before spawn so that no forwarded signal can end the observer while the
+    // command runs. Read the caller's ignored set first; the child restores it before exec.
+    let ignored = SignalFlags::inherited_ignored();
+    let (signal_flags, signal_error) = match SignalFlags::register() {
+        Ok(flags) => (Some(flags), None),
+        Err(error) => (None, Some(error)),
+    };
     install_inherited_signal_dispositions(
         &mut command_builder,
+        ignored,
         restore_sigpipe_ignore,
         #[cfg(target_os = "linux")]
         restore_sigchld_ignore,
@@ -246,19 +254,13 @@ pub(crate) fn run(
         );
         print_warning(&warning_message, &mut warning_printed);
     }
-    // Register only after spawn so the child inherits the caller's dispositions. Stop
-    // signals retain their normal job-control behavior; both processes stop together.
-    let signal_flags = match SignalFlags::register() {
-        Ok(flags) => Some(flags),
-        Err(error) => {
-            set_warning(
-                &mut warning_message,
-                &format!("signal observer unavailable: {error}"),
-            );
-            print_warning(&warning_message, &mut warning_printed);
-            None
-        }
-    };
+    if let Some(error) = signal_error {
+        set_warning(
+            &mut warning_message,
+            &format!("signal observer unavailable: {error}"),
+        );
+        print_warning(&warning_message, &mut warning_printed);
+    }
     let pid = child.id();
     let start_ms = now_ms();
     let cancellation = Arc::new(AtomicBool::new(false));
@@ -473,6 +475,7 @@ pub(crate) fn run(
 #[allow(unsafe_code)]
 fn install_inherited_signal_dispositions(
     command: &mut Command,
+    ignored: Vec<nix::sys::signal::Signal>,
     restore_sigpipe_ignore: bool,
     #[cfg(target_os = "linux")] restore_sigchld_ignore: bool,
 ) {
@@ -480,6 +483,15 @@ fn install_inherited_signal_dispositions(
     // signal-safe operation; it does not access shared Rust state.
     unsafe {
         command.pre_exec(move || {
+            for signal in &ignored {
+                let action = nix::sys::signal::SigAction::new(
+                    nix::sys::signal::SigHandler::SigIgn,
+                    nix::sys::signal::SaFlags::empty(),
+                    nix::sys::signal::SigSet::empty(),
+                );
+                nix::sys::signal::sigaction(*signal, &action)
+                    .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+            }
             if restore_sigpipe_ignore {
                 let action = nix::sys::signal::SigAction::new(
                     nix::sys::signal::SigHandler::SigIgn,
@@ -504,6 +516,27 @@ fn install_inherited_signal_dispositions(
     }
 }
 
+const FORWARDED: [nix::sys::signal::Signal; 18] = [
+    nix::sys::signal::Signal::SIGHUP,
+    nix::sys::signal::Signal::SIGINT,
+    nix::sys::signal::Signal::SIGQUIT,
+    nix::sys::signal::Signal::SIGALRM,
+    nix::sys::signal::Signal::SIGTERM,
+    nix::sys::signal::Signal::SIGUSR1,
+    nix::sys::signal::Signal::SIGUSR2,
+    nix::sys::signal::Signal::SIGCONT,
+    nix::sys::signal::Signal::SIGURG,
+    nix::sys::signal::Signal::SIGXCPU,
+    nix::sys::signal::Signal::SIGABRT,
+    nix::sys::signal::Signal::SIGTRAP,
+    nix::sys::signal::Signal::SIGBUS,
+    nix::sys::signal::Signal::SIGSYS,
+    nix::sys::signal::Signal::SIGVTALRM,
+    nix::sys::signal::Signal::SIGPROF,
+    nix::sys::signal::Signal::SIGWINCH,
+    nix::sys::signal::Signal::SIGIO,
+];
+
 struct SignalFlags {
     items: Vec<(nix::sys::signal::Signal, Arc<AtomicBool>)>,
 }
@@ -517,34 +550,30 @@ impl SignalFlags {
         Ok(())
     }
 
+    /// Signals the caller ignored, among those whose handler the observer replaces.
+    fn inherited_ignored() -> Vec<nix::sys::signal::Signal> {
+        FORWARDED
+            .into_iter()
+            .chain([nix::sys::signal::Signal::SIGXFSZ])
+            .filter(|signal| crate::inherit::is_ignored(*signal as libc::c_int))
+            .collect()
+    }
+
     fn register() -> Result<Self, String> {
         let mut items = Vec::new();
-        for signal in [
-            nix::sys::signal::Signal::SIGHUP,
-            nix::sys::signal::Signal::SIGINT,
-            nix::sys::signal::Signal::SIGQUIT,
-            nix::sys::signal::Signal::SIGALRM,
-            nix::sys::signal::Signal::SIGTERM,
-            nix::sys::signal::Signal::SIGUSR1,
-            nix::sys::signal::Signal::SIGUSR2,
-            nix::sys::signal::Signal::SIGCONT,
-            nix::sys::signal::Signal::SIGURG,
-            nix::sys::signal::Signal::SIGXCPU,
-            nix::sys::signal::Signal::SIGXFSZ,
-            nix::sys::signal::Signal::SIGABRT,
-            nix::sys::signal::Signal::SIGTRAP,
-            nix::sys::signal::Signal::SIGBUS,
-            nix::sys::signal::Signal::SIGSYS,
-            nix::sys::signal::Signal::SIGVTALRM,
-            nix::sys::signal::Signal::SIGPROF,
-            nix::sys::signal::Signal::SIGWINCH,
-            nix::sys::signal::Signal::SIGIO,
-        ] {
+        for signal in FORWARDED {
             let flag = Arc::new(AtomicBool::new(false));
             signal_hook::flag::register(signal as i32, flag.clone())
                 .map_err(|error| error.to_string())?;
             items.push((signal, flag));
         }
+        // A file-size limit hit by the observer's own state write must come back to that
+        // write as EFBIG. It must neither kill the observer nor reach the command.
+        signal_hook::flag::register(
+            nix::sys::signal::Signal::SIGXFSZ as i32,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .map_err(|error| error.to_string())?;
         Ok(Self { items })
     }
 }
@@ -676,7 +705,12 @@ fn has_admitted_requests(root: &Path) -> AppResult<bool> {
         .get("requests")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| Error::new(ErrorCode::State, "invalid admitted store"))?;
-    Ok(!requests.is_empty())
+    let unused = requests.is_empty()
+        && state
+            .get("next_sequence")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1);
+    Ok(!unused)
 }
 
 fn acquire(lock: &File, deadline: Instant, cancellation: &AtomicBool) -> AppResult<()> {

@@ -152,10 +152,15 @@ without opening or modifying state, so wrappers can capture queue start before
 waiting. Existing admitted stores that contain requests but predate
 `mode.json` remain admitted; an empty query does not select a mode.
 Use a fresh private directory for observation when the current directory holds
-admitted requests, including requests retained after `prune`. Host policy files
-must be regular files no larger than 1 MiB; observed state is limited to 32 MiB,
-and at most 10,000 raw command statuses are retained. State-directory and
-state-file symlinks are rejected.
+admitted requests, including requests retained after `prune`.
+
+Accepted observation limits: host-policy files must be regular files no larger
+than 1 MiB; observed state is limited to 32 MiB; at most 10,000 raw command
+statuses are retained. State-directory and state-file symlinks are rejected.
+If the caller starts with stdin closed, Rust's process API may supply `/dev/null`
+to the child, which then sees EOF rather than `EBADF`. PID-only delivery of
+`SIGTSTP`, `SIGTTIN`, or `SIGTTOU` may stop the observer while its command keeps
+running, so wrappers must target the process group or cgroup for these signals.
 
 The observed command inherits the caller's process group. Group signals reach
 the command directly, and catchable signals sent only to the caller-started PID
@@ -163,12 +168,5 @@ are forwarded. A lost observer retains its busy slot while the child identity is
 verified alive; after both are gone, the next observation or export reclaims the
 slot without adding an outcome.
 
-`observe` does not forward `SIGPIPE` to the command. It preserves whether the
-caller ignored `SIGPIPE` and, on Linux, `SIGCHLD`. PID-only delivery of
-`SIGTSTP`, `SIGTTIN`, or `SIGTTOU` can stop the observer while its command keeps
-running; host wrappers must target the process group or cgroup for stop signals.
-
-One standard-stream limitation remains: when the caller starts with file
-descriptor 0 closed, the Rust process API may supply `/dev/null` to the child.
-Such a program sees EOF where a direct exec with a closed descriptor would see
-`EBADF`.
+`observe` does not forward `SIGPIPE` or `SIGXFSZ` to the command. It preserves
+whether the caller ignored `SIGPIPE` and, on Linux, `SIGCHLD`.

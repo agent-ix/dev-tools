@@ -28,6 +28,13 @@ fn capture(signal: libc::c_int, destination: &AtomicBool) {
     }
 }
 
+/// Whether `signal` is ignored right now.
+pub(crate) fn is_ignored(signal: libc::c_int) -> bool {
+    let ignored = AtomicBool::new(false);
+    capture(signal, &ignored);
+    ignored.load(Ordering::Relaxed)
+}
+
 pub(crate) fn sigpipe_ignored() -> bool {
     SIGPIPE_IGNORED.load(Ordering::Relaxed)
 }
