@@ -68,14 +68,15 @@ of truth can be checked directly.
 
 ## Requirement links
 
-These apply in a repository with requirement specs and a trace library such as
-`ix-trace-rs`. They cover production code; see [testing](testing.md) for test
-trace tags.
+These apply in a repository that traces requirements to code and tests. They
+cover production code; see [testing](testing.md) for test trace tags.
 
 - Mark a new or changed function that implements an acceptance criterion with
-  `#[implements("FR-106-AC-80")]`, or the repository's declared
-  `/// Implements: FR-106-AC-80` comment form. Both bind functions and
-  containers such as modules.
+  `#[implements("FR-106-AC-80")]`. Use the
+  `/// Implements: FR-106-AC-80` comment form only where the repository keeps
+  it; `quire coverage` reports it as legacy.
+- Both forms bind functions, methods, and `mod`, `struct`, `enum` and
+  `trait` items. Neither binds an `impl` block or a `const`; tag the methods.
 - Import the macro with `use ix_trace_rs::implements;` and write the bare
   attribute. A path-qualified `#[ix_trace_rs::implements(...)]` compiles, but
   the trace tools do not read it. The crate must be a normal dependency, not

@@ -46,9 +46,8 @@ report the conflict when those authorities disagree.
   declared trace attribute; do not hand-edit a Test Matrix. Use the
   repository's required gates and license header.
 - In that repository, mark new or changed production code that implements an
-  acceptance criterion with `#[implements("...")]` or the declared
-  `/// Implements:` form, so tools can find its tests and the other code
-  that implements the same criterion.
+  acceptance criterion with `#[implements("...")]`, so tools can find its
+  tests and the other code that implements the same criterion.
 
 ## Read the applicable detailed rules
 
