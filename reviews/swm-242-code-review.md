@@ -101,6 +101,9 @@ Round 2, head f4c1fab8eac28c9a7c5c20702c20adef427e43e3. Supersedes the round 1 c
 | FND-028 | still-open | Found in round 4; no fix yet. |
 | FND-029 | still-open | Found in round 4; no fix yet. |
 | FND-030 | still-open | Found in round 4; no fix yet. |
+| FND-028 | fixed | Round 5, head cc0a563: the end-of-transaction reclassification is removed. Metrics median 20 ms at 1 waiter and 325 ms at 8 (bf7b218: 13 and 299; 88ea2d1: 62-63 and 767-890); cancel at 8 waiters 374 ms. |
+| FND-029 | fixed | Round 5: exposition checkpoints both start stamps first. Stalled then killed waiters read 11.723 s before and after; the head-cancel case went 9.007 to 9.090 s; the capped reboot case read 5.500 s; a 120-scrape churn run showed no decrease. The new test fails when the checkpoint call is removed. |
+| FND-030 | fixed | Round 5: the note is deleted and quire validate of reviews/**/*.md exits 0. |
 
 ## New findings (disposition pass 2)
 
