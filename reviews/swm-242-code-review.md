@@ -92,6 +92,15 @@ Round 2, head f4c1fab8eac28c9a7c5c20702c20adef427e43e3. Supersedes the round 1 c
 | FND-025 | still-open | Found in round 3; no fix yet. |
 | FND-026 | still-open | Found in round 3 at head bf7b218; no fix yet. |
 | FND-027 | still-open | Found in round 3 at head bf7b218; no fix yet. |
+| FND-022 | fixed | Round 4, head 88ea2d1: the interval is a host-level accumulator; cancel and interrupt of the head with another waiter no longer drop it (8.726 then 9.002 s; 14.153 then 15.258 s). |
+| FND-023 | fixed | Round 4: a stale heartbeat no longer expires an interval while a queued worker is alive; 8 waiters counted 23.7 of 23.7 s, 16 waiters 35.7 of 38.6 s between scrapes lasting about 1.9 s each. |
+| FND-024 | fixed | Round 4: expiry is persisted; 80 scrapes after all waiters died showed no decrease and active_block was cleared. |
+| FND-025 | fixed | Round 4: from_label is removed; the persisted reason is the enum. |
+| FND-026 | fixed | Round 4: both documents give the full Terra file path and state that --output has no default. |
+| FND-027 | fixed | Round 4: the user directory is a placeholder and no tracked file holds the personal path. |
+| FND-028 | still-open | Found in round 4; no fix yet. |
+| FND-029 | still-open | Found in round 4; no fix yet. |
+| FND-030 | still-open | Found in round 4; no fix yet. |
 
 ## New findings (disposition pass 2)
 
@@ -119,3 +128,13 @@ Fix diffs f4c1fab..bf7b218 only (bf7b218 changes README.md and reference.md; cod
 | FND-025 | low | BlockReason::from_label restates the label strings of label() in reverse, a second copy the compiler does not keep in step. | tools/locked-build/src/metrics.rs:120-147 |
 | FND-026 | low | The Terra WSL text gives only a directory and no file name: passing it as --output fails with Is a directory, and a file named other than ix_build_metrics.prom is not matched by the staleness alert of ix-local-observability PR 33. README also calls this a default output path, but --output has no default and metrics prints to stdout without it. | tools/locked-build/README.md:52-54; tools/locked-build/reference.md:101-103 |
 | FND-027 | low | The commit puts a personal Windows user path into README.md and reference.md of this public repository; a placeholder for the user directory would carry the same instruction. | tools/locked-build/README.md:53; tools/locked-build/reference.md:103 |
+
+## New findings (disposition pass 4)
+
+Fix diff bf7b218..88ea2d1 only, rated by real impact. Gates at 88ea2d1: fmt check, clippy with warnings denied, and locked tests exit 0 (58 passed, 2 ignored). A 120-scrape run with cancels, reason switches and worker kills showed no counter decrease, and the capped reboot case read the expected 5.500 s. Requirement tags were not checked: no specs or trace library.
+
+| ID | Severity | Summary | Refs |
+|---|---|---|---|
+| FND-028 | medium | Every transaction with an open interval, including metrics and status reads, now takes a full host sample under the state lock. Against bf7b218 with real sampling: 1 waiter, metrics 11-13 to 62-63 ms and client CPU 11-24 to 46-54 percent; 8 waiters, metrics 219-267 to 767-890 ms and cancel 233-256 to 812-1405 ms; 16 waiters, cancel 0.85 to 1.9 s. FR-015 says a metrics read takes no admission decision. | tools/locked-build/src/store.rs:171-175 |
+| FND-029 | low | Exposition counts the open interval up to now, but expiry and the reboot cap can commit less. Reproduced: waiters stopped, scraped 12.010 s, killed, next scrape 4.296 s. With the head cancelled while the only other queued request has no heartbeat yet (state edited to that shape), 9.001 fell to 0.500 s. Both need an unusual timing. | tools/locked-build/src/metrics.rs:358-381,512-519 |
+| FND-030 | low | The added note is not an artifact and makes quire validate of reviews/**/*.md fail. | reviews/swm-242-round3-fix-dispositions.md:1 |

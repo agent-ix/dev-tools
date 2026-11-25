@@ -379,9 +379,10 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
 
 pub(crate) fn metrics(store: &Store) -> Result<String> {
     store.transaction(|state, config| {
-        state
-            .metrics
-            .exposition(state, config, now_ms()?, clock_ms()?)
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        state.metrics.checkpoint_active(clock, now)?;
+        state.metrics.exposition(state, config, now, clock)
     })
 }
 

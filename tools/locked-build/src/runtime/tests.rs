@@ -393,6 +393,78 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
 
 /// Trace: FR-015-AC-11
 #[test]
+fn metrics_exposition_checkpoints_monotonic_and_utc_block_starts() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let config_path = root.path().join("policy.json");
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    policy.memory_reserve_bytes = 2_000_000;
+    std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
+    let id = queued(&store)?;
+    let fence = claim_worker(
+        &store,
+        &id,
+        &ProcessIdentity {
+            pid: u32::MAX - 7,
+            started_seconds: 1,
+        },
+    )?
+    .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    assert!(matches!(
+        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+
+    let first = metrics(&store)?;
+    let first_value = metric_value(
+        &first,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let checkpoint_before: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path.join("metrics.json"))?)?;
+    let clock_before = checkpoint_before["active_block"][1]
+        .as_u64()
+        .ok_or_else(|| Error::new(ErrorCode::State, "monotonic start missing"))?;
+    let utc_before = checkpoint_before["active_started_at_ms"]
+        .as_u64()
+        .ok_or_else(|| Error::new(ErrorCode::State, "UTC start missing"))?;
+
+    std::thread::sleep(Duration::from_millis(30));
+    let second = metrics(&store)?;
+    let second_value = metric_value(
+        &second,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let checkpoint_after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path.join("metrics.json"))?)?;
+    assert!(second_value >= first_value);
+    assert!(
+        checkpoint_after["blocked_millis"]["memory"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
+        checkpoint_after["active_block"][1]
+            .as_u64()
+            .is_some_and(|after| after > clock_before)
+    );
+    assert!(
+        checkpoint_after["active_started_at_ms"]
+            .as_u64()
+            .is_some_and(|after| after > utc_before)
+    );
+    Ok(())
+}
+
+/// Trace: FR-015-AC-11
+#[test]
 fn host_interval_reselects_the_next_queued_reason_after_head_cancellation() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;

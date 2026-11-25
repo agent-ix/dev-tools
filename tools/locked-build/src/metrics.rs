@@ -284,14 +284,14 @@ impl MetricsState {
         {
             return Ok(());
         }
-        self.close_block(clock_ms)?;
+        self.close_block(clock_ms, now_ms)?;
         self.blocked.active_block = next.map(|block_reason| (block_reason, clock_ms));
         self.blocked.active_started_at_ms = next.map(|_| now_ms);
         Ok(())
     }
 
     /// Persist elapsed blocked time before reboot can reset the monotonic clock.
-    pub(crate) fn checkpoint_active(&mut self, clock_ms: u64) -> Result<()> {
+    pub(crate) fn checkpoint_active(&mut self, clock_ms: u64, now_ms: u64) -> Result<()> {
         if let Some((reason, started)) = self.blocked.active_block {
             let elapsed = clock_ms.saturating_sub(started);
             let total = self
@@ -303,13 +303,14 @@ impl MetricsState {
                 .checked_add(elapsed)
                 .ok_or_else(|| Error::new(ErrorCode::State, "admission metric counter overflow"))?;
             self.blocked.active_block = Some((reason, clock_ms));
+            self.blocked.active_started_at_ms = Some(now_ms);
         }
         Ok(())
     }
 
     /// Close the interval when no queued request remains.
-    pub(crate) fn close_block(&mut self, clock_ms: u64) -> Result<()> {
-        self.checkpoint_active(clock_ms)?;
+    pub(crate) fn close_block(&mut self, clock_ms: u64, now_ms: u64) -> Result<()> {
+        self.checkpoint_active(clock_ms, now_ms)?;
         self.blocked.active_block = None;
         self.blocked.active_started_at_ms = None;
         Ok(())
@@ -378,14 +379,12 @@ impl MetricsState {
         let expiry_ms = last_poll_ms.saturating_add(grace_ms);
         let elapsed_after_expiry = now_ms.saturating_sub(expiry_ms);
         let expiry_clock_ms = clock_ms.saturating_sub(elapsed_after_expiry);
-        self.checkpoint_active(expiry_clock_ms.max(started_clock_ms))?;
+        let checkpoint_at_ms =
+            expiry_ms.max(self.blocked.active_started_at_ms.unwrap_or(expiry_ms));
+        self.checkpoint_active(expiry_clock_ms.max(started_clock_ms), checkpoint_at_ms)?;
         self.blocked.active_block = None;
         self.blocked.active_started_at_ms = None;
         Ok(true)
-    }
-
-    pub(crate) fn has_active_block(&self) -> bool {
-        self.blocked.active_block.is_some()
     }
 
     pub(crate) fn exposition(
@@ -766,8 +765,8 @@ mod tests {
         let mut metrics = MetricsState::default();
         metrics.observe_block(Some("memory_reserve"), 10, 100)?;
         metrics.observe_block(Some("memory_reserve"), 20, 350)?;
-        metrics.checkpoint_active(600)?;
-        metrics.close_block(1_000)?;
+        metrics.checkpoint_active(600, 20)?;
+        metrics.close_block(1_000, 30)?;
         let empty = state(Vec::new());
         let text = metrics.exposition(&empty, &policy()?, 0, 0)?;
         assert_eq!(

@@ -167,12 +167,7 @@ impl Store {
             .iter()
             .any(|request| request.phase == crate::model::Phase::Queued)
         {
-            state.metrics.close_block(clock)?;
-        } else if state.metrics.has_active_block() {
-            let sample = config.sample(now).ok();
-            let reason =
-                crate::runtime::current_block_reason(&state, &config, sample.as_ref(), now, clock)?;
-            state.metrics.observe_block(reason, now, clock)?;
+            state.metrics.close_block(clock, now)?;
         }
         state.validate(&config)?;
         let bytes = serde_json::to_vec(&state)?;
