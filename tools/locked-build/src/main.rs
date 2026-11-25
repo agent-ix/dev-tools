@@ -4,6 +4,7 @@
 
 mod config;
 mod error;
+mod metrics;
 mod model;
 mod process;
 mod runtime;
@@ -56,6 +57,11 @@ enum Action {
     Recover,
     /// Remove terminal requests/events after the monitoring consumer saved them.
     Prune,
+    /// Export Prometheus text metrics to stdout or an atomic textfile-collector path.
+    Metrics {
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     #[command(hide = true)]
     Worker { request: String },
     #[command(hide = true)]
@@ -90,7 +96,11 @@ fn execute(cli: Cli) -> Result<i32> {
     let config = cli.config.as_deref().ok_or_else(|| {
         error::Error::new(error::ErrorCode::Configuration, "--config is required")
     })?;
-    let store = runtime::open(state, config)?;
+    let store = if matches!(&cli.command, Action::Metrics { .. }) {
+        store::Store::open_existing(std::path::Path::new(state), std::path::Path::new(config))?
+    } else {
+        runtime::open(state, config)?
+    };
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
         Action::Parking => Ok(0),
@@ -123,6 +133,14 @@ fn execute(cli: Cli) -> Result<i32> {
         }
         Action::Prune => {
             println!("{}", runtime::prune(&store)?);
+            Ok(0)
+        }
+        Action::Metrics { output } => {
+            if let Some(output) = output {
+                runtime::metrics_to_file(&store, &output)?;
+            } else {
+                print!("{}", runtime::metrics(&store)?);
+            }
             Ok(0)
         }
         Action::Worker { request } => {

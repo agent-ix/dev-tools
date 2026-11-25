@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, HostSample};
 use crate::error::{Error, ErrorCode, Result};
+use crate::metrics::MetricsState;
 
 /// Globally random store identity plus monotonically increasing request number.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -105,8 +106,18 @@ pub(crate) struct State {
     pub next_sequence: u64,
     pub next_event: u64,
     pub pruned_events: u64,
+    #[serde(default, skip_serializing, deserialize_with = "ignore_legacy_metrics")]
+    pub metrics: MetricsState,
     pub requests: Vec<Request>,
     pub events: Vec<Event>,
+}
+
+fn ignore_legacy_metrics<'de, D>(deserializer: D) -> std::result::Result<MetricsState, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _ = serde_json::Value::deserialize(deserializer)?;
+    Ok(MetricsState::default())
 }
 
 /// Stable transition evidence; command arguments and environment are excluded.
@@ -128,7 +139,7 @@ pub struct Event {
     /// Transition UTC time.
     pub observed_at_ms: u64,
     /// Resulting phase.
-    pub state: String,
+    pub(crate) state: Phase,
     /// Claimed units.
     pub units: u32,
     /// Base priority.
@@ -219,6 +230,10 @@ impl State {
         clock: u64,
     ) -> Result<()> {
         let request = self.find(id)?;
+        let monotonic_wait = request
+            .started_clock_ms
+            .unwrap_or(clock)
+            .saturating_sub(request.enqueued_clock_ms);
         let event = Event {
             schema_version: 1,
             event_id: format!("{}:e{}", self.store_id, self.next_event),
@@ -227,18 +242,12 @@ impl State {
             owner: request.owner.clone(),
             ticket: request.ticket.clone(),
             observed_at_ms: now,
-            state: serde_json::to_value(request.phase)?
-                .as_str()
-                .ok_or_else(|| Error::new(ErrorCode::State, "invalid phase serialization"))?
-                .to_owned(),
+            state: request.phase,
             units: request.units,
             priority: request.priority,
             capacity_units: config.capacity_units,
             free_units: config.capacity_units.saturating_sub(self.used()),
-            wait_ms: request
-                .started_clock_ms
-                .unwrap_or(clock)
-                .saturating_sub(request.enqueued_clock_ms),
+            wait_ms: monotonic_wait,
             hold_ms: request
                 .started_clock_ms
                 .map(|started| clock.saturating_sub(started)),
@@ -316,6 +325,9 @@ impl State {
         now: u64,
         clock: u64,
     ) -> Result<()> {
+        if self.find(id)?.phase.terminal() {
+            return Ok(());
+        }
         let Completion {
             code,
             signal,

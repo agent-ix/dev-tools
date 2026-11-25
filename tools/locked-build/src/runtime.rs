@@ -220,6 +220,19 @@ fn recover_with_processes(
         let clock = clock_ms()?;
         let processes = read_processes();
         let rebooted = state.boot_time != sysinfo::System::boot_time();
+        if rebooted {
+            let new_boot_ms = sysinfo::System::boot_time().saturating_mul(1_000);
+            for request in state
+                .requests
+                .iter()
+                .filter(|request| request.phase == Phase::Queued)
+            {
+                state.metrics.record_pre_reboot_wait(
+                    &request.id.0,
+                    new_boot_ms.saturating_sub(request.enqueued_at_ms),
+                );
+            }
+        }
         let mut respawn = Vec::new();
         let mut finish = Vec::new();
         for request in &mut state.requests {
@@ -364,6 +377,35 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
     })
 }
 
+pub(crate) fn metrics(store: &Store) -> Result<String> {
+    store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        state.metrics.checkpoint_active(clock, now)?;
+        state.metrics.exposition(state, config, now, clock)
+    })
+}
+
+pub(crate) fn metrics_to_file(store: &Store, path: &Path) -> Result<()> {
+    let _export_lock = store.lock_metrics_export()?;
+    let text = metrics(store)?;
+    crate::metrics::write_atomic(path, &text)
+}
+
+pub(crate) fn current_block_reason(
+    state: &crate::model::State,
+    config: &crate::config::Config,
+    sample: Option<&HostSample>,
+    now: u64,
+    clock: u64,
+) -> Result<Option<&'static str>> {
+    let Some(next) = state.next(config, clock) else {
+        return Ok(None);
+    };
+    let reason = state.admission_reason(&next.id, config, sample, now, clock)?;
+    Ok(reason)
+}
+
 pub(crate) fn cancel(store: &Store, id: &RequestId) -> Result<()> {
     store.transaction(|state, config| {
         let request = state.find_mut(id)?;
@@ -484,16 +526,23 @@ fn admit_worker(
         }
         let sample = config.sample(now).ok();
         let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
-        let request = state.find_mut(id)?;
-        request.heartbeat_at_ms = Some(now);
-        request.reason = reason.map(str::to_owned);
+        {
+            let request = state.find_mut(id)?;
+            request.heartbeat_at_ms = Some(now);
+            request.reason = reason.map(str::to_owned);
+        }
+        let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
+        state.metrics.observe_block(blocked, now, clock)?;
         if reason.is_some() {
             return Ok(Admission::Waiting(config.poll_ms));
         }
-        request.phase = Phase::Running;
-        request.started_at_ms = Some(now);
-        request.started_clock_ms = Some(clock);
-        let admitted = request.clone();
+        let admitted = {
+            let request = state.find_mut(id)?;
+            request.phase = Phase::Running;
+            request.started_at_ms = Some(now);
+            request.started_clock_ms = Some(clock);
+            request.clone()
+        };
         state.event(id, config, now, clock)?;
         Ok(Admission::Granted(Box::new(admitted)))
     })
