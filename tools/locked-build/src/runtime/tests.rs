@@ -204,20 +204,37 @@ fn outcome_counters_survive_store_reopen_and_prune() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let id = queued(&store)?;
+    let recovered_id = queued(&store)?;
     store.transaction(|state, config| {
         state.find_mut(&id)?.stop = Some(crate::model::StopReason::Cancelled);
-        state.finish(&id, Completion::default(), config, now_ms()?, clock_ms()?)
+        state.finish(&id, Completion::default(), config, now_ms()?, clock_ms()?)?;
+        let request = state.find_mut(&recovered_id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now_ms()?);
+        request.started_clock_ms = Some(clock_ms()?);
+        request.worker = Some(ProcessIdentity {
+            pid: u32::MAX - 1,
+            started_seconds: 1,
+        });
+        request.worker_generation = 1;
+        state.boot_time = 0;
+        Ok(())
     })?;
+    recover(&store)?;
     drop(store);
 
     let reopened = Store::open(&root.path().join("queue"), &root.path().join("policy.json"))?;
-    assert_eq!(prune(&reopened)?, 1);
+    recover(&reopened)?;
+    assert_eq!(prune(&reopened)?, 2);
     let output = metrics(&reopened)?;
     assert!(output.contains(
         "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"cancelled\"} 1"
     ));
     assert!(output.contains(
         "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"aborted_thermal\"} 0"
+    ));
+    assert!(output.contains(
+        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"failed\"} 1"
     ));
     Ok(())
 }
