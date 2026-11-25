@@ -217,7 +217,7 @@ fn outcome_counters_survive_store_reopen_and_prune() -> Result<()> {
             started_seconds: 1,
         });
         request.worker_generation = 1;
-        state.boot_time = 0;
+        state.boot_time = u64::MAX;
         Ok(())
     })?;
     recover(&store)?;
