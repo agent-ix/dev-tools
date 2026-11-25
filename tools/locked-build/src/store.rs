@@ -119,9 +119,17 @@ impl Store {
         let metrics_before = serde_json::to_vec(&state.metrics)?;
         let metrics_identity_changed = state.metrics.bind_store(&state.store_id);
         if state.boot_time != sysinfo::System::boot_time() {
-            state
-                .metrics
-                .finish_for_reboot(sysinfo::System::boot_time().saturating_mul(1_000))?;
+            let last_host_poll_at_ms = state
+                .requests
+                .iter()
+                .filter(|request| request.phase == crate::model::Phase::Queued)
+                .filter_map(|request| request.heartbeat_at_ms)
+                .max();
+            state.metrics.finish_for_reboot(
+                sysinfo::System::boot_time().saturating_mul(1_000),
+                last_host_poll_at_ms,
+                config.poll_ms,
+            )?;
         }
         let now = crate::runtime::now_ms()?;
         let clock = crate::runtime::clock_ms()?;

@@ -316,11 +316,20 @@ impl MetricsState {
     }
 
     /// Checkpoint an open interval at the new boot boundary.
-    pub(crate) fn finish_for_reboot(&mut self, new_boot_at_ms: u64) -> Result<()> {
+    pub(crate) fn finish_for_reboot(
+        &mut self,
+        new_boot_at_ms: u64,
+        last_host_poll_at_ms: Option<u64>,
+        poll_ms: u64,
+    ) -> Result<()> {
         if let (Some((reason, _)), Some(started)) =
             (self.blocked.active_block, self.blocked.active_started_at_ms)
         {
-            let elapsed = new_boot_at_ms.saturating_sub(started);
+            let end_at_ms = last_host_poll_at_ms
+                .unwrap_or(started)
+                .saturating_add(poll_ms.saturating_mul(2))
+                .min(new_boot_at_ms);
+            let elapsed = end_at_ms.saturating_sub(started);
             let total = self
                 .blocked
                 .blocked_millis
@@ -779,7 +788,7 @@ mod tests {
     fn accumulated_block_time_survives_monotonic_clock_reset_after_reboot() -> Result<()> {
         let mut metrics = MetricsState::default();
         metrics.observe_block(Some("memory_reserve"), 1_000, 10)?;
-        metrics.finish_for_reboot(3_000)?;
+        metrics.finish_for_reboot(3_000, Some(1_900), 100)?;
         let empty = state(Vec::new());
         let text = metrics.exposition(&empty, &policy()?, 0, 0)?;
         assert_eq!(
@@ -787,7 +796,7 @@ mod tests {
                 &text,
                 "ix_build_admission_blocked_seconds_total{host=\"draco\",reason=\"memory\"} "
             ),
-            Some("2.000")
+            Some("1.100")
         );
         Ok(())
     }
