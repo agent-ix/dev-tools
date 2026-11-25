@@ -535,13 +535,18 @@ fn admit_worker(
         if reason.is_some() {
             return Ok(Admission::Waiting(config.poll_ms));
         }
-        let request = state.find_mut(id)?;
-        request.phase = Phase::Running;
-        request.started_at_ms = Some(now);
-        request.started_clock_ms = Some(clock);
-        let wait_ms = clock.saturating_sub(request.enqueued_clock_ms);
-        state.metrics.record_queue_wait(request.priority, wait_ms)?;
-        let admitted = request.clone();
+        let (priority, wait_ms, admitted) = {
+            let request = state.find_mut(id)?;
+            request.phase = Phase::Running;
+            request.started_at_ms = Some(now);
+            request.started_clock_ms = Some(clock);
+            (
+                request.priority,
+                clock.saturating_sub(request.enqueued_clock_ms),
+                request.clone(),
+            )
+        };
+        state.metrics.record_queue_wait(priority, wait_ms)?;
         state.event(id, config, now, clock)?;
         Ok(Admission::Granted(Box::new(admitted)))
     })

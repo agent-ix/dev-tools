@@ -197,3 +197,27 @@ fn recovery_keeps_actual_occupancy_for_a_command_born_after_pid_capture() -> Res
         Ok(())
     })
 }
+
+/// Trace: FR-015-AC-3, FR-015-AC-10
+#[test]
+fn outcome_counters_survive_store_reopen_and_prune() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    store.transaction(|state, config| {
+        state.find_mut(&id)?.stop = Some(crate::model::StopReason::Cancelled);
+        state.finish(&id, Completion::default(), config, now_ms()?, clock_ms()?)
+    })?;
+    drop(store);
+
+    let reopened = Store::open(&root.path().join("queue"), &root.path().join("policy.json"))?;
+    assert_eq!(prune(&reopened)?, 1);
+    let output = metrics(&reopened)?;
+    assert!(output.contains(
+        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"cancelled\"} 1"
+    ));
+    assert!(output.contains(
+        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"aborted_thermal\"} 0"
+    ));
+    Ok(())
+}

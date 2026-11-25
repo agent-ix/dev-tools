@@ -270,10 +270,10 @@ impl MetricsState {
         );
         let labels = ["memory", "target_disk", "host_load", "probe", "operator"];
         let mut blocked = self.blocked_millis;
-        if let Some((index, start)) = self.active_block {
-            if let Some(value) = blocked.get_mut(index) {
-                *value = value.saturating_add(now_clock_ms.saturating_sub(start));
-            }
+        if let Some((index, start)) = self.active_block
+            && let Some(value) = blocked.get_mut(index)
+        {
+            *value = value.saturating_add(now_clock_ms.saturating_sub(start));
         }
         for (label, value) in labels.iter().zip(blocked) {
             output.push_str(&format!("ix_build_admission_blocked_seconds_total{{host=\"{host}\",reason=\"{label}\"}} {}\n", seconds(value)));
@@ -337,8 +337,10 @@ mod tests {
     use crate::config::Config;
     use crate::model::{Completion, RequestId};
 
-    fn policy() -> Config {
-        serde_json::from_str(include_str!("../policy.example.json")).expect("valid example policy")
+    fn policy() -> Result<Config> {
+        Ok(serde_json::from_str(include_str!(
+            "../policy.example.json"
+        ))?)
     }
 
     fn request(sequence: u64, priority: u32, phase: Phase) -> Request {
@@ -389,7 +391,7 @@ mod tests {
     /// Trace: FR-015-AC-3, FR-015-AC-8, FR-015-AC-9, FR-015-AC-10
     #[test]
     fn outcome_counts_and_wait_histogram_survive_serialization_and_pruning() -> Result<()> {
-        let config = policy();
+        let config = policy()?;
         let empty = state(Vec::new());
         let initial = empty.metrics.exposition(&empty, &config, 100)?;
         for priority in PRIORITIES {
@@ -514,7 +516,7 @@ mod tests {
         metrics.observe_block(Some("memory_reserve"), 350)?;
         metrics.observe_block(Some("memory_reserve"), 600)?;
         let state = state(Vec::new());
-        let text = metrics.exposition(&state, &policy(), 1_000)?;
+        let text = metrics.exposition(&state, &policy()?, 1_000)?;
         assert!(text.contains(
             "ix_build_admission_blocked_seconds_total{host=\"draco\",reason=\"memory\"} 0.900"
         ));
