@@ -65,3 +65,30 @@ of truth can be checked directly.
   avoid project-private abbreviations in a public API.
 - Put the repository's SPDX and copyright header on every source file,
   using its own license and holder rather than a hard-coded example.
+
+## Requirement links
+
+These apply in a repository with requirement specs and a trace library such as
+`ix-trace-rs`. They cover production code; see [testing](testing.md) for test
+trace tags.
+
+- Mark a new or changed function that implements an acceptance criterion with
+  `#[implements("FR-106-AC-80")]`, or the repository's declared
+  `/// Implements: FR-106-AC-80` comment form. Both bind functions and
+  containers such as modules.
+- Import the macro with `use ix_trace_rs::implements;` and write the bare
+  attribute. A path-qualified `#[ix_trace_rs::implements(...)]` compiles, but
+  the trace tools do not read it. The crate must be a normal dependency, not
+  only a dev dependency.
+- Name the criterion, not only its requirement, so that a change to the
+  function selects a narrow set of tests.
+- Tag only what the code itself implements. A helper with no criterion of its
+  own gets no tag. If unsure, leave it untagged and say so in the change
+  description.
+- Add and update links as you touch code. Backfill in bulk only when the work
+  asks for it.
+- `implements` records which code a requirement is about. It is never evidence
+  that the requirement is verified.
+- The macro checks the shape of an id, not that the id exists. In review, check
+  each id against the spec, and ask whether other code that implements the same
+  criterion needs the same change.
