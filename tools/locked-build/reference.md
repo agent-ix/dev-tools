@@ -110,9 +110,11 @@ series; it does not label this value as sustainable capacity. It exports
 `ix_build_admission_blocked_seconds_total` for memory, target disk, host load, and
 probe failures. A blocked interval is counted once per host and closes when the last
 queued request leaves. This slice adds no pause or abort mechanism: abort outcome
-series are exported at zero and are not claimed as covered by FR-015-AC-8, while pause
-series are omitted. Named metrics data is stored in a separate `metrics.json` sidecar
-so old scheduler state remains readable. Event counters and histogram observations
-survive `recover`, process restart, and `prune` without being counted twice. Queue wait
-uses the UTC admission timestamps so it remains measurable across reboot. The hold
-deadline remains enforced by the existing watchdog behavior.
+names remain in the closed outcome set but never increment here; FR-015-AC-8 coverage
+is limited to non-abort outcomes. The pause-specific metric series is omitted entirely;
+`pause_exceeded` is present only as a closed build outcome label. Named metrics data is
+stored in a separate `metrics.json` sidecar so old scheduler state remains readable.
+Event counters and histogram observations survive `recover`, process restart, and
+`prune` without being counted twice. Queue-wait histograms add the pre-reboot age
+captured at recovery to monotonic time after recovery. The hold deadline remains
+enforced by the existing watchdog behavior.
