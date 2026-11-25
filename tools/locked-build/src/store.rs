@@ -81,6 +81,21 @@ impl Store {
             .mode(0o600)
             .open(self.path.join("lock"))?;
         lock.lock()?;
+        let mode_path = self.path.join("mode.json");
+        self.reject_link("mode.json")?;
+        let mode = match fs::read_to_string(&mode_path) {
+            Ok(mode) => mode,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.reject_observed_store()?;
+                self.write_atomic("mode.json", b"\"admitted\"")?;
+                "\"admitted\"".to_owned()
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if serde_json::from_str::<String>(&mode)? != "admitted" {
+            return Err(Error::new(ErrorCode::Request, "store is in observed mode"));
+        }
+        self.reject_observed_store()?;
         let config = Config::read(&self.config_path)?;
         self.reject_link("state.json")?;
         let mut state = match File::open(self.path.join("state.json")) {
@@ -214,6 +229,18 @@ impl Store {
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(self.path.join(next), self.path.join(name))?;
+        Ok(())
+    }
+
+    fn reject_observed_store(&self) -> Result<()> {
+        self.reject_link("observe.json")?;
+        if self.path.join("observe.json").exists() {
+            let observed = fs::read(self.path.join("observe.json"))?;
+            let value: serde_json::Value = serde_json::from_slice(&observed)?;
+            if value.get("mode").and_then(serde_json::Value::as_str) == Some("observed") {
+                return Err(Error::new(ErrorCode::Request, "store is in observed mode"));
+            }
+        }
         Ok(())
     }
 

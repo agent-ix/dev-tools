@@ -6,11 +6,13 @@ mod config;
 mod error;
 mod metrics;
 mod model;
+mod observe;
 mod process;
 mod runtime;
 mod store;
 mod watchdog;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -62,6 +64,17 @@ enum Action {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Run an already admitted command immediately while recording telemetry only.
+    Observe {
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        priority: Option<String>,
+        #[arg(long)]
+        queued_at_ms: Option<String>,
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<OsString>,
+    },
     #[command(hide = true)]
     Worker { request: String },
     #[command(hide = true)]
@@ -71,6 +84,23 @@ enum Action {
 }
 
 fn execute(cli: Cli) -> Result<i32> {
+    if let Action::Observe {
+        kind,
+        priority,
+        queued_at_ms,
+        command,
+    } = &cli.command
+    {
+        return Ok(observe::run(
+            cli.state.as_deref(),
+            cli.config.as_deref(),
+            kind.as_deref(),
+            priority.as_deref(),
+            queued_at_ms.as_deref(),
+            command,
+            false,
+        ));
+    }
     if matches!(cli.command, Action::Parking) {
         // EOF follows the watchdog's exit, including SIGKILL. No state access is needed.
         std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;
@@ -87,6 +117,26 @@ fn execute(cli: Cli) -> Result<i32> {
             "{}",
             serde_json::to_string(&codes.iter().map(|code| code.as_str()).collect::<Vec<_>>())?
         );
+        return Ok(0);
+    }
+    if let Action::Metrics { output } = &cli.command
+        && let Some(state) = cli.state.as_deref()
+        && let Some(text) = observe::exposition(state)
+            .map_err(|message| error::Error::new(error::ErrorCode::State, message))?
+    {
+        if let Some(path) = output {
+            metrics::write_atomic(path, &text)?;
+        } else {
+            print!("{text}");
+        }
+        return Ok(0);
+    }
+    if matches!(&cli.command, Action::Status)
+        && let Some(state) = cli.state.as_deref()
+        && let Some(snapshot) = observe::snapshot(state)
+            .map_err(|message| error::Error::new(error::ErrorCode::State, message))?
+    {
+        println!("{}", serde_json::to_string(&snapshot)?);
         return Ok(0);
     }
     let state = cli
@@ -143,6 +193,7 @@ fn execute(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Action::Observe { .. } => unreachable!("observe handled before opening the store"),
         Action::Worker { request } => {
             runtime::worker(&store, &RequestId(request))?;
             Ok(0)
@@ -158,12 +209,18 @@ fn execute(cli: Cli) -> Result<i32> {
 }
 
 fn main() {
-    let code = match execute(Cli::parse()) {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!("{}: {}", error.code.as_str(), error.message);
-            2
-        }
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let parsed = Cli::try_parse_from(&args);
+    let code = match parsed {
+        Ok(cli) => match execute(cli) {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("{}: {}", error.code.as_str(), error.message);
+                2
+            }
+        },
+        Err(_error) if args.iter().any(|arg| arg == "observe") => observe::run_parse_failure(&args),
+        Err(error) => error.exit(),
     };
     std::process::exit(code);
 }

@@ -121,3 +121,29 @@ Event counters and histogram observations survive `recover`, process restart, an
 `prune` without being counted twice. Queue-wait histograms add the pre-reboot age
 captured at recovery to monotonic time after recovery. The hold deadline remains
 enforced by the existing watchdog behavior.
+
+### Observed stores
+
+`observe [--kind build|test] [--priority check|test|gate] [--queued-at-ms N] -- <command...>`
+runs a command immediately after an external wrapper admits it. It does not make
+admission, resource, priority, hold, pause, signal, or termination decisions.
+The configured slots gauge reads JSON host policy `capacity_units`; busy slots
+are reported without clamping. Observed and admitted stores are mutually
+exclusive, and the first run request or observation fixes the store mode under
+the shared state lock. `run` and other scheduler transactions refuse observed
+stores; pruning cannot erase the mode.
+
+For observed stores, the closed admitted-store outcome zero set is overridden:
+`ix_build_builds_total` has only `ok` and `failed` for a priority after a matching
+build starts; `ix_build_test_runs_total` has only `ok` and `failed` after a test
+starts; and queue-wait series appear only for priorities with an observation.
+Queue depth, admission-blocked time, pause, and paused-orphan series are absent
+from both Prometheus text and the JSON snapshot. Invalid hints warn once and are
+treated as absent. Observer work is bounded to 1000 ms before command start and
+after command exit; failures fail open while preserving the command.
+
+The observed command inherits the caller's process group. Group signals reach
+the command directly, and catchable signals sent only to the caller-started PID
+are forwarded. A lost observer retains its busy slot while the child identity is
+verified alive; after both are gone, the next observation or export reclaims the
+slot without adding an outcome.

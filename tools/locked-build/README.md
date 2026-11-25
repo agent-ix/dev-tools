@@ -37,6 +37,21 @@ Command output goes to private `<request-id>.stdout` and `<request-id>.stderr` f
 Exit 75 remains exit 75 and runs once.
 A signal produces a nonzero exit; timeout returns 124 and cancellation returns 130.
 
+For a wrapper that already admits work, `observe` records occupancy and
+outcomes without making an admission decision:
+
+```sh
+locked-build --state /tmp/build-observations --config /path/to/host-policy.json \
+  observe --kind build --priority check --queued-at-ms 1795120000000 \
+  -- cargo test -p selected-package
+```
+
+The command starts immediately and inherits the caller's standard streams,
+environment, working directory, and process group. `--kind` and `--priority`
+are attribution hints only. Observed and admitted data use separate store
+modes; admission commands refuse an observed store, while observe fails open
+when given an admitted store.
+
 Inspect, cancel, recover, or prune requests using the same state and policy options:
 
 ```sh
@@ -54,14 +69,19 @@ the per-user node_exporter directory. Terra WSL uses the shared file path
 `/mnt/c/Users/<user>/.ix/metrics/ix_build_metrics.prom` instead.
 
 `status` emits JSON with host capacity, occupied/free units, overcommit, host samples,
-request wait/hold ages, uncertainty, outcomes, and stable transition events.
-It omits command arguments and environment values.
+request wait/hold ages, uncertainty, outcomes, and stable transition events for
+admitted stores. Observed stores expose only observed occupancy, configured
+slots, and attributed outcomes or queue wait; they omit unknown scheduler values.
+Both modes omit command arguments and environment values.
 Save terminal evidence before `prune`, which removes terminal requests, events, and output files.
 `metrics` writes Prometheus text to stdout or atomically replaces the selected textfile.
 Outcome counters, queue-wait histograms, and admission-blocked time are persisted in a
 named sidecar and survive restart and `prune`; gauges describe the current queue,
 occupied units, and configured capacity. Admission-blocked time is counted once per
 host, even when several requests are waiting. No pause metric is exported.
+An observed store exports only `ok` and `failed` outcomes after the matching
+kind and priority have started, queue-wait series only for observed priorities,
+and no queue-depth, admission-blocked, pause, or paused-orphan series.
 
 ## Scheduling
 
@@ -102,9 +122,9 @@ Use [the reference](reference.md) for field and telemetry definitions.
 
 ## Migration
 
-Point new build invocations at the shared state directory and host policy.
-Route every cooperating wrapper through this executable before treating its capacity view as complete.
-Let existing builds finish under their original wrappers before retiring those wrappers.
+An external wrapper may use `observe` after it admits a build. Keep that wrapper
+as the admission authority; `observe` records metrics and does not schedule or
+terminate work.
 Operator agent-count annotations describe planning capacity.
 Read measured build leases from the shared scheduler.
 
