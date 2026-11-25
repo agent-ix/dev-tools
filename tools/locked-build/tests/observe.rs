@@ -16,6 +16,10 @@ use nix::unistd::{Pid, mkfifo};
 use serde_json::json;
 use tempfile::TempDir;
 
+#[allow(unsafe_code)]
+#[path = "../src/inherit.rs"]
+mod inherit;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct Fixture {
@@ -82,6 +86,144 @@ impl Fixture {
     }
 }
 
+fn signal_probe_command() -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap_or_default());
+    command
+        .arg("--exact")
+        .arg("inherited_signal_probe_process")
+        .arg("--nocapture");
+    command
+}
+
+fn observed_signal_probe_command(fixture: &Fixture) -> Command {
+    let mut command = fixture.command();
+    command
+        .arg("observe")
+        .arg("--")
+        .arg(std::env::current_exe().unwrap_or_default())
+        .arg("--exact")
+        .arg("inherited_signal_probe_process")
+        .arg("--nocapture")
+        .env("SWM_SIGNAL_PROBE_EXPECT", "false false");
+    command
+}
+
+/// Trace: FR-015-AC-15
+#[test]
+fn inherited_signal_probe_process() {
+    let actual = format!(
+        "{} {}",
+        inherit::sigpipe_ignored(),
+        inherit::sigchld_ignored()
+    );
+    let expected =
+        std::env::var("SWM_SIGNAL_PROBE_EXPECT").unwrap_or_else(|_| "false false".into());
+    assert_eq!(actual, expected);
+    println!("inherited dispositions: {actual}");
+}
+
+#[allow(unsafe_code)]
+fn output_with_ignored_signals(
+    mut command: Command,
+    signals: &[Signal],
+) -> std::io::Result<std::process::Output> {
+    let signals = signals.to_vec();
+    let expected = format!(
+        "{} {}",
+        signals.contains(&Signal::SIGPIPE),
+        signals.contains(&Signal::SIGCHLD)
+    );
+    command.env("SWM_SIGNAL_PROBE_EXPECT", expected);
+    // SAFETY: pre_exec sets only dispositions using sigaction before exec.
+    unsafe {
+        command.pre_exec(move || {
+            for signal in &signals {
+                let action = nix::sys::signal::SigAction::new(
+                    nix::sys::signal::SigHandler::SigIgn,
+                    nix::sys::signal::SaFlags::empty(),
+                    nix::sys::signal::SigSet::empty(),
+                );
+                nix::sys::signal::sigaction(*signal, &action)
+                    .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+            }
+            Ok(())
+        });
+    }
+    command.output()
+}
+
+#[allow(unsafe_code)]
+fn spawn_with_closed_stderr(mut command: Command) -> std::io::Result<std::process::Child> {
+    // SAFETY: The child closes only its own standard-error descriptor before exec.
+    unsafe {
+        command.pre_exec(|| {
+            libc::close(libc::STDERR_FILENO);
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
+#[cfg(target_os = "linux")]
+fn build_io_delay_interposer(
+    directory: &std::path::Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/io_delay.c");
+    let library = directory.join(if cfg!(target_os = "macos") {
+        "libio_delay.dylib"
+    } else {
+        "libio_delay.so"
+    });
+    let mut compiler = Command::new("cc");
+    compiler.arg(&source);
+    if cfg!(target_os = "macos") {
+        compiler.arg("-dynamiclib");
+    } else {
+        compiler.args(["-shared", "-fPIC", "-ldl"]);
+    }
+    let output = compiler.arg("-o").arg(&library).output()?;
+    assert!(
+        output.status.success(),
+        "cc: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(library)
+}
+
+#[cfg(target_os = "linux")]
+fn assert_delayed_observer_io_does_not_delay_command(mode: &str) -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let library = build_io_delay_interposer(fixture.root.path())?;
+    let marker = fixture.root.path().join(format!("started-{mode}"));
+    let mut command = fixture.command();
+    command
+        .arg("observe")
+        .arg("--")
+        .arg("/usr/bin/touch")
+        .arg(&marker)
+        .env("LOCKED_BUILD_DELAY_IO", mode)
+        .stderr(Stdio::piped());
+    if cfg!(target_os = "macos") {
+        command.env("DYLD_INSERT_LIBRARIES", &library);
+    } else {
+        command.env("LD_PRELOAD", &library);
+    }
+    let started = std::time::Instant::now();
+    let observer = command.spawn()?;
+    let deadline = started + Duration::from_millis(1_500);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        marker.exists(),
+        "observer {mode} delayed the admitted command"
+    );
+    let output = observer.wait_with_output()?;
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("1000 ms"));
+    Ok(())
+}
+
 /// Trace: FR-015-AC-13
 #[test]
 fn observe_runs_immediately_when_configured_capacity_is_zero() -> TestResult {
@@ -127,18 +269,16 @@ fn missing_state_fails_open_with_one_warning_and_no_state_creation() -> TestResu
 fn broken_stderr_does_not_prevent_observed_command_from_running() -> TestResult {
     let fixture = Fixture::new(1)?;
     let marker = fixture.root.path().join("ran-broken-stderr");
-    let mut child = fixture
-        .command()
+    let mut command = fixture.command();
+    command
         .arg("observe")
         .arg("--state")
         .arg(fixture.root.path().join("missing-state"))
         .arg("--")
         .arg("/usr/bin/touch")
         .arg(&marker)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    drop(child.stderr.take());
+        .stdout(Stdio::null());
+    let mut child = spawn_with_closed_stderr(command)?;
     assert!(child.wait()?.success());
     assert!(marker.exists());
     Ok(())
@@ -163,7 +303,7 @@ fn observe_preserves_command_output_environment_and_working_directory() -> TestR
     assert_eq!(String::from_utf8(pwd.stdout)?.trim(), cwd.to_string_lossy());
     assert_eq!(output.stderr, Vec::<u8>::new());
 
-    let mut command = fixture
+    let mut observer = fixture
         .command()
         .arg("observe")
         .arg("--")
@@ -172,12 +312,12 @@ fn observe_preserves_command_output_environment_and_working_directory() -> TestR
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    command
+    observer
         .stdin
         .take()
         .ok_or("child stdin")?
         .write_all(b"stdin-forwarded")?;
-    let echoed = command.wait_with_output()?;
+    let echoed = observer.wait_with_output()?;
     assert_eq!(echoed.stdout, b"stdin-forwarded");
     assert!(echoed.status.success());
 
@@ -335,22 +475,33 @@ fn handled_pid_only_signal_does_not_change_successful_command_result() -> TestRe
 
 /// Trace: FR-015-AC-15
 #[test]
-fn pid_only_abort_is_forwarded_and_waited_as_signal_death() -> TestResult {
+fn pid_only_abort_reaches_handling_child_without_killing_observer() -> TestResult {
     let fixture = Fixture::new(1)?;
+    let marker = fixture.root.path().join("abort-received-by-child");
+    let pid_file = fixture.root.path().join("abort-child.pid");
     let mut observer = fixture
         .command()
         .arg("observe")
         .arg("--")
-        .arg("/bin/sleep")
-        .arg("30")
-        .process_group(0)
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("echo $$ > \"$1\"; trap 'touch \"$2\"; exit 0' ABRT; while :; do sleep 0.02; done")
+        .arg("abort-test")
+        .arg(&pid_file)
+        .arg(&marker)
         .spawn()?;
-    wait_for_child(&fixture.state, observer.id())?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !pid_file.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(pid_file.exists(), "observed command did not start");
     nix::sys::signal::kill(
         Pid::from_raw(i32::try_from(observer.id())?),
         Signal::SIGABRT,
     )?;
-    assert_eq!(observer.wait()?.signal(), Some(Signal::SIGABRT as i32));
+    let status = observer.wait()?;
+    assert!(status.success(), "observer exited {status:?}");
+    assert!(marker.exists(), "SIGABRT did not reach the command");
     Ok(())
 }
 
@@ -562,11 +713,131 @@ fn fail_open_signal_path_still_forwards_pid_only_hangup() -> TestResult {
 
 /// Trace: FR-015-AC-15
 #[test]
-fn runtime_ignored_sigpipe_remains_ignored_by_observed_command() -> TestResult {
+fn observer_sigpipe_is_not_forwarded_to_the_child() -> TestResult {
     let fixture = Fixture::new(1)?;
-    let output = fixture.observe(&[], &["/bin/sh", "-c", "kill -PIPE $$; echo survived"])?;
-    assert!(output.status.success());
-    assert_eq!(output.stdout, b"survived\n");
+    let pid_file = fixture.root.path().join("child.pid");
+    let mut command = fixture.command();
+    command
+        .arg("--state")
+        .arg(fixture.root.path().join("missing-state"))
+        .arg("observe")
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg("echo $$ > \"$1\"; exec /bin/sleep 30")
+        .arg("sigpipe-test")
+        .arg(&pid_file);
+    let mut observer = spawn_with_closed_stderr(command)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !pid_file.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(pid_file.exists(), "observed command did not start");
+    let mut pid_text = String::new();
+    while pid_text.trim().is_empty() && std::time::Instant::now() < deadline {
+        pid_text = fs::read_to_string(&pid_file).unwrap_or_default();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let command_pid = pid_text.trim().parse::<u32>()?;
+    nix::sys::signal::kill(
+        Pid::from_raw(i32::try_from(observer.id())?),
+        Signal::SIGPIPE,
+    )?;
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        nix::sys::signal::kill(Pid::from_raw(i32::try_from(command_pid)?), None).is_ok(),
+        "observer forwarded its own SIGPIPE to the command"
+    );
+    nix::sys::signal::kill(
+        Pid::from_raw(i32::try_from(observer.id())?),
+        Signal::SIGTERM,
+    )?;
+    assert_eq!(observer.wait()?.signal(), Some(Signal::SIGTERM as i32));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-15
+#[test]
+fn default_signal_dispositions_match_a_direct_command() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let direct = signal_probe_command().output()?;
+    let observed = observed_signal_probe_command(&fixture).output()?;
+    assert!(direct.status.success());
+    assert!(observed.status.success());
+    assert!(String::from_utf8(direct.stdout)?.contains("inherited dispositions: false false"));
+    assert!(String::from_utf8(observed.stdout)?.contains("inherited dispositions: false false"));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-15
+#[test]
+fn ignored_sigpipe_disposition_matches_a_direct_command() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let direct = output_with_ignored_signals(signal_probe_command(), &[Signal::SIGPIPE])?;
+    let observed =
+        output_with_ignored_signals(observed_signal_probe_command(&fixture), &[Signal::SIGPIPE])?;
+    assert!(direct.status.success());
+    assert!(observed.status.success());
+    assert!(String::from_utf8(direct.stdout)?.contains("inherited dispositions: true false"));
+    assert!(String::from_utf8(observed.stdout)?.contains("inherited dispositions: true false"));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-15
+#[cfg(target_os = "linux")]
+#[test]
+fn ignored_sigchld_disposition_matches_a_direct_command() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let signals = [Signal::SIGPIPE, Signal::SIGCHLD];
+    let direct = output_with_ignored_signals(signal_probe_command(), &signals)?;
+    let observed = output_with_ignored_signals(observed_signal_probe_command(&fixture), &signals)?;
+    assert!(direct.status.success());
+    assert!(observed.status.success());
+    assert!(String::from_utf8(direct.stdout)?.contains("inherited dispositions: true true"));
+    assert!(String::from_utf8(observed.stdout)?.contains("inherited dispositions: true true"));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-15
+#[test]
+fn pipefail_status_matches_a_direct_command_for_default_and_ignored_sigpipe() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let pipe = || {
+        let mut command = Command::new("/bin/bash");
+        command
+            .arg("-o")
+            .arg("pipefail")
+            .arg("-c")
+            .arg("yes | head -n 1");
+        command
+    };
+    let direct = pipe().output()?;
+    let mut observed_command = fixture.command();
+    observed_command
+        .arg("observe")
+        .arg("--")
+        .arg("/bin/bash")
+        .arg("-o")
+        .arg("pipefail")
+        .arg("-c")
+        .arg("yes | head -n 1");
+    let observed = observed_command.output()?;
+    assert_eq!(observed.status.code(), direct.status.code());
+    assert_eq!(observed.status.signal(), direct.status.signal());
+
+    let direct = output_with_ignored_signals(pipe(), &[Signal::SIGPIPE])?;
+    let mut observed_command = fixture.command();
+    observed_command
+        .arg("observe")
+        .arg("--")
+        .arg("/bin/bash")
+        .arg("-o")
+        .arg("pipefail")
+        .arg("-c")
+        .arg("yes | head -n 1");
+    let observed = output_with_ignored_signals(observed_command, &[Signal::SIGPIPE])?;
+    assert_eq!(observed.status.code(), direct.status.code());
+    assert_eq!(observed.status.signal(), direct.status.signal());
     Ok(())
 }
 
@@ -642,6 +913,75 @@ fn empty_admitted_queries_do_not_fix_store_mode() -> TestResult {
     let metrics = fixture.command().arg("metrics").output()?;
     assert!(metrics.status.success());
     assert!(!fixture.state.join("mode.json").exists());
+    Ok(())
+}
+
+/// Trace: FR-015-AC-16
+#[test]
+fn empty_admitted_store_created_by_queries_can_start_observation() -> TestResult {
+    for command_name in ["status", "metrics", "prune", "recover", "rejected-run"] {
+        let fixture = Fixture::new(1)?;
+        let command = match command_name {
+            "status" | "metrics" | "prune" | "recover" => {
+                fixture.command().arg(command_name).output()?
+            }
+            "rejected-run" => fixture
+                .command()
+                .arg("run")
+                .arg("--owner")
+                .arg("test:team:lead")
+                .arg("--ticket")
+                .arg("SWM-242")
+                .arg("--units")
+                .arg("0")
+                .arg("--")
+                .arg("/usr/bin/true")
+                .output()?,
+            _ => unreachable!(),
+        };
+        if command_name == "rejected-run" {
+            assert!(!command.status.success());
+        } else {
+            assert!(
+                command.status.success() || command_name == "metrics",
+                "{command_name}: {}",
+                String::from_utf8_lossy(&command.stderr)
+            );
+        }
+        let observed = fixture.observe(&[], &["/usr/bin/true"])?;
+        assert!(
+            observed.status.success(),
+            "{command_name}: {}",
+            String::from_utf8_lossy(&observed.stderr)
+        );
+        assert!(fixture.state.join("observe.json").exists());
+    }
+    Ok(())
+}
+
+/// Trace: FR-015-AC-14
+#[test]
+fn parse_fallback_preserves_equals_form_attribution_and_store_options() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let marker = fixture.root.path().join("ran-equals-options");
+    let output = Command::new(env!("CARGO_BIN_EXE_locked-build"))
+        .arg(format!("--state={}", fixture.state.display()))
+        .arg(format!("--config={}", fixture.config.display()))
+        .arg("observe")
+        .arg("--kind=build")
+        .arg("--priority=check")
+        .arg("--unknown=value")
+        .arg("--")
+        .arg("/usr/bin/touch")
+        .arg(&marker)
+        .output()?;
+    assert!(output.status.success());
+    assert!(marker.exists());
+    assert!(fixture.state.join("observe.json").exists());
+    let metrics = fixture.command().arg("metrics").output()?;
+    assert!(String::from_utf8(metrics.stdout)?.contains(
+        "ix_build_builds_total{host=\"observe-test\",priority=\"check\",outcome=\"ok\"} 1"
+    ));
     Ok(())
 }
 
@@ -788,6 +1128,22 @@ fn metrics_textfile_updates_share_the_export_lock() -> TestResult {
     drop(lock);
     assert!(exporter.wait()?.success());
     assert!(output_path.exists());
+    Ok(())
+}
+
+/// Trace: FR-015-AC-14
+#[test]
+fn rejected_state_directory_does_not_receive_an_export_lock_file() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    fs::set_permissions(&fixture.state, fs::Permissions::from_mode(0o755))?;
+    let output = fixture
+        .command()
+        .arg("metrics")
+        .arg("--output")
+        .arg(fixture.root.path().join("metrics.prom"))
+        .output()?;
+    assert!(!output.status.success());
+    assert!(!fixture.state.join("metrics-export.lock").exists());
     Ok(())
 }
 
@@ -975,7 +1331,7 @@ fn held_state_lock_does_not_delay_command_start() -> TestResult {
         .arg("/usr/bin/touch")
         .arg(&marker)
         .spawn()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + Duration::from_millis(800);
     while !marker.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -984,7 +1340,37 @@ fn held_state_lock_does_not_delay_command_start() -> TestResult {
         "command was delayed behind observer state I/O"
     );
     drop(lock);
-    assert!(observer.wait()?.success());
+    let status = observer.wait()?;
+    assert!(status.success(), "observer exited {status:?}");
+    Ok(())
+}
+
+/// Trace: FR-015-AC-14
+#[cfg(target_os = "linux")]
+#[test]
+fn slow_config_read_does_not_delay_command_start() -> TestResult {
+    assert_delayed_observer_io_does_not_delay_command("config-read")
+}
+
+/// Trace: FR-015-AC-14
+#[cfg(target_os = "linux")]
+#[test]
+fn slow_state_fsync_does_not_delay_command_start() -> TestResult {
+    assert_delayed_observer_io_does_not_delay_command("state-fsync")
+}
+
+/// Trace: FR-015-AC-15
+#[test]
+fn process_group_matches_a_direct_command() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let direct = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("ps -o pgid= -p $$ | tr -d ' '")
+        .output()?;
+    let observed = fixture.observe(&[], &["/bin/sh", "-c", "ps -o pgid= -p $$ | tr -d ' '"])?;
+    assert!(direct.status.success());
+    assert!(observed.status.success());
+    assert_eq!(observed.stdout, direct.stdout);
     Ok(())
 }
 
@@ -1256,10 +1642,40 @@ fn next_observe_reclaims_dead_observer_and_command_slot() -> TestResult {
     nix::sys::signal::kill(Pid::from_raw(i32::try_from(command_pid)?), Signal::SIGTERM)?;
     let output = fixture.observe(&[], &["/usr/bin/true"])?;
     assert!(output.status.success());
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.state.join("observe.json"))?)?;
+    assert_eq!(snapshot["busy"], json!({}));
     let metrics = fixture.command().arg("metrics").output()?;
     assert!(
         String::from_utf8(metrics.stdout)?.contains("ix_build_slots_busy{host=\"observe-test\"} 0")
     );
+    Ok(())
+}
+
+/// Trace: FR-015-AC-16
+#[test]
+fn observed_busy_row_records_the_observer_process_start_time() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let mut observer = fixture
+        .command()
+        .arg("observe")
+        .arg("--")
+        .arg("/bin/sleep")
+        .arg("30")
+        .spawn()?;
+    let (_, snapshot) = wait_for_command_identity(&fixture.state, observer.id())?;
+    let row = snapshot["busy"]
+        .as_object()
+        .ok_or("busy rows")?
+        .values()
+        .next()
+        .ok_or("busy row")?;
+    assert!(row["observer_started"].as_u64().is_some());
+    nix::sys::signal::kill(
+        Pid::from_raw(i32::try_from(observer.id())?),
+        Signal::SIGTERM,
+    )?;
+    let _ = observer.wait()?;
     Ok(())
 }
 
@@ -1319,6 +1735,26 @@ fn test_outcomes_and_raw_status_are_recorded_without_priority() -> TestResult {
         serde_json::from_slice(&fs::read(fixture.state.join("observe.json"))?)?;
     assert_eq!(state["raw_statuses"][0]["exit_code"], 1);
     assert!(state["raw_statuses"][0]["signal"].is_null());
+    Ok(())
+}
+
+/// Trace: FR-015-AC-17
+#[test]
+fn failed_build_increments_only_the_failed_outcome() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let output = fixture.observe(
+        &["--kind", "build", "--priority", "gate"],
+        &["/usr/bin/false"],
+    )?;
+    assert_eq!(output.status.code(), Some(1));
+    let metrics = fixture.command().arg("metrics").output()?;
+    let text = String::from_utf8(metrics.stdout)?;
+    assert!(text.contains(
+        "ix_build_builds_total{host=\"observe-test\",priority=\"gate\",outcome=\"failed\"} 1"
+    ));
+    assert!(text.contains(
+        "ix_build_builds_total{host=\"observe-test\",priority=\"gate\",outcome=\"ok\"} 0"
+    ));
     Ok(())
 }
 
@@ -1522,6 +1958,112 @@ fn post_start_lock_timeout_preserves_status_and_records_no_partial_outcome() -> 
     assert!(output.status.success());
     assert!(started.elapsed() < Duration::from_millis(1_500));
     drop(lock);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("observe warning:")
+            .count(),
+        1
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.state.join("observe.json"))?)?;
+    assert_eq!(state["builds"], json!({}));
+    assert_eq!(state["raw_statuses"], json!([]));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-21
+#[test]
+fn preflight_and_completion_share_one_post_exit_deadline() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(fixture.state.join("lock"))?;
+    lock.lock()?;
+    let started = std::time::Instant::now();
+    let observer = fixture
+        .command()
+        .arg("observe")
+        .arg("--kind")
+        .arg("test")
+        .arg("--")
+        .arg("/bin/sleep")
+        .arg("0.1")
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let output = observer.wait_with_output()?;
+    assert!(output.status.success());
+    assert!(
+        started.elapsed() < Duration::from_millis(1_400),
+        "preflight and completion waits exceeded one shared exit budget"
+    );
+    drop(lock);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("observe warning:")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+/// Trace: FR-015-AC-21
+#[test]
+fn corruption_after_start_preserves_command_status_without_partial_outcome() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let observer = fixture
+        .command()
+        .arg("observe")
+        .arg("--kind")
+        .arg("test")
+        .arg("--")
+        .arg("/bin/sleep")
+        .arg("0.2")
+        .stderr(Stdio::piped())
+        .spawn()?;
+    wait_for_command_identity(&fixture.state, observer.id())?;
+    fs::write(fixture.state.join("observe.json"), b"{broken")?;
+    let output = observer.wait_with_output()?;
+    assert!(output.status.success());
+    assert_eq!(fs::read(fixture.state.join("observe.json"))?, b"{broken");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("observe warning:")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+/// Trace: FR-015-AC-21
+#[test]
+fn unwritable_state_after_start_preserves_command_status_without_partial_outcome() -> TestResult {
+    let fixture = Fixture::new(1)?;
+    let observer = fixture
+        .command()
+        .arg("observe")
+        .arg("--kind")
+        .arg("build")
+        .arg("--priority")
+        .arg("check")
+        .arg("--")
+        .arg("/bin/sleep")
+        .arg("0.2")
+        .stderr(Stdio::piped())
+        .spawn()?;
+    wait_for_command_identity(&fixture.state, observer.id())?;
+    fs::set_permissions(&fixture.state, fs::Permissions::from_mode(0o500))?;
+    let probe = fixture.state.join("permission-probe");
+    if fs::File::create(&probe).is_ok() {
+        let _ = fs::remove_file(probe);
+        fs::set_permissions(&fixture.state, fs::Permissions::from_mode(0o700))?;
+        return Ok(());
+    }
+    let output = observer.wait_with_output()?;
+    fs::set_permissions(&fixture.state, fs::Permissions::from_mode(0o700))?;
+    assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stderr)
             .matches("observe warning:")

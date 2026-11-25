@@ -4,6 +4,8 @@
 
 mod config;
 mod error;
+#[allow(unsafe_code)]
+mod inherit;
 mod metrics;
 mod model;
 mod observe;
@@ -130,6 +132,7 @@ fn execute(cli: Cli) -> Result<i32> {
         && let (Some(state), Some(config)) = (cli.state.as_deref(), cli.config.as_deref())
     {
         let _export_lock = if output.is_some() {
+            store::validate_state_directory(state)?;
             Some(store::lock_metrics_export_at(state).map_err(|message| {
                 error::Error::new(error::ErrorCode::State, message.to_string())
             })?)

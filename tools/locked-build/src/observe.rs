@@ -93,16 +93,10 @@ pub(crate) fn run_parse_failure(args: &[OsString]) -> i32 {
     let mut config = None;
     let mut cursor = 1;
     while cursor < end {
-        match args[cursor].to_str() {
-            Some("--state") if cursor + 1 < end => {
-                cursor += 1;
-                state = Some(PathBuf::from(&args[cursor]));
-            }
-            Some("--config") if cursor + 1 < end => {
-                cursor += 1;
-                config = Some(PathBuf::from(&args[cursor]));
-            }
-            _ => {}
+        if let Some(value) = take_option_value(&args[..end], &mut cursor, "--state") {
+            state = Some(PathBuf::from(value));
+        } else if let Some(value) = take_option_value(&args[..end], &mut cursor, "--config") {
+            config = Some(PathBuf::from(value));
         }
         cursor += 1;
     }
@@ -117,28 +111,16 @@ pub(crate) fn run_parse_failure(args: &[OsString]) -> i32 {
             delimiter = Some(cursor + 1);
             break;
         }
-        match args[cursor].to_str() {
-            Some("--kind") if args.get(cursor + 1).is_some_and(|value| value != "--") => {
-                cursor += 1;
-                kind = args[cursor].to_str().map(str::to_owned);
-            }
-            Some("--priority") if args.get(cursor + 1).is_some_and(|value| value != "--") => {
-                cursor += 1;
-                priority = args[cursor].to_str().map(str::to_owned);
-            }
-            Some("--queued-at-ms") if args.get(cursor + 1).is_some_and(|value| value != "--") => {
-                cursor += 1;
-                queued = args[cursor].to_str().map(str::to_owned);
-            }
-            Some("--state") if args.get(cursor + 1).is_some_and(|value| value != "--") => {
-                cursor += 1;
-                state = Some(PathBuf::from(&args[cursor]));
-            }
-            Some("--config") if args.get(cursor + 1).is_some_and(|value| value != "--") => {
-                cursor += 1;
-                config = Some(PathBuf::from(&args[cursor]));
-            }
-            _ => {}
+        if let Some(value) = take_option_value(args, &mut cursor, "--kind") {
+            kind = value.to_str().map(str::to_owned);
+        } else if let Some(value) = take_option_value(args, &mut cursor, "--priority") {
+            priority = value.to_str().map(str::to_owned);
+        } else if let Some(value) = take_option_value(args, &mut cursor, "--queued-at-ms") {
+            queued = value.to_str().map(str::to_owned);
+        } else if let Some(value) = take_option_value(args, &mut cursor, "--state") {
+            state = Some(PathBuf::from(value));
+        } else if let Some(value) = take_option_value(args, &mut cursor, "--config") {
+            config = Some(PathBuf::from(value));
         }
         cursor += 1;
     }
@@ -154,8 +136,24 @@ pub(crate) fn run_parse_failure(args: &[OsString]) -> i32 {
     )
 }
 
+fn take_option_value(args: &[OsString], cursor: &mut usize, option: &str) -> Option<OsString> {
+    let value = args.get(*cursor)?.to_str()?;
+    if value == option {
+        let next = args.get(*cursor + 1)?;
+        if next == "--" {
+            return None;
+        }
+        *cursor += 1;
+        Some(next.clone())
+    } else {
+        value
+            .strip_prefix(option)
+            .and_then(|value| value.strip_prefix('='))
+            .map(OsString::from)
+    }
+}
+
 /// Execute an observed child without making admission or resource decisions.
-#[allow(unsafe_code)]
 pub(crate) fn run(
     state_path: Option<&Path>,
     config_path: Option<&Path>,
@@ -215,22 +213,17 @@ pub(crate) fn run(
     let sigchld_error = SignalFlags::register_sigchld().err();
     let mut command_builder = Command::new(program);
     command_builder.args(command.iter().skip(1));
-    // Rust ignores SIGPIPE in its runtime; Command resets it in the child. Restore that
-    // inherited disposition so observed children match their caller's behavior.
-    // SAFETY: The closure runs in the post-fork child and performs only sigaction(2), a
-    // signal-safe operation; it does not access shared Rust state.
-    unsafe {
-        command_builder.pre_exec(|| {
-            let action = nix::sys::signal::SigAction::new(
-                nix::sys::signal::SigHandler::SigIgn,
-                nix::sys::signal::SaFlags::empty(),
-                nix::sys::signal::SigSet::empty(),
-            );
-            nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGPIPE, &action)
-                .map(|_| ())
-                .map_err(|error| std::io::Error::from_raw_os_error(error as i32))
-        });
-    }
+    // Rust ignores SIGPIPE in its runtime; Command resets it in the child. Restore the
+    // caller's ignored dispositions, captured before Rust startup changed them.
+    let restore_sigpipe_ignore = crate::inherit::sigpipe_ignored();
+    #[cfg(target_os = "linux")]
+    let restore_sigchld_ignore = crate::inherit::sigchld_ignored();
+    install_inherited_signal_dispositions(
+        &mut command_builder,
+        restore_sigpipe_ignore,
+        #[cfg(target_os = "linux")]
+        restore_sigchld_ignore,
+    );
     let mut child = match command_builder.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -280,20 +273,41 @@ pub(crate) fn run(
         started_at_ms: start_ms,
     };
     let worker_cancellation = Arc::clone(&cancellation);
-    let _preflight_worker = thread::spawn(move || {
-        let deadline = Instant::now() + OBSERVER_BOUND;
-        let _ = started_sender.send(deadline);
-        let result = preflight(
-            state_path_owned.as_deref(),
-            config_path_owned.as_deref(),
-            deadline,
-            pid,
-            worker_cancellation,
-            hints,
-        );
-        let _ = sender.send(result);
-    });
-    let mut preflight_result = None;
+    let cancellation_check = Arc::clone(&cancellation);
+    let preflight_spawn = thread::Builder::new()
+        .name("locked-build-observe-preflight".to_owned())
+        .spawn(move || {
+            let deadline = Instant::now() + OBSERVER_BOUND;
+            let _ = started_sender.send(deadline);
+            let result = preflight(
+                state_path_owned.as_deref(),
+                config_path_owned.as_deref(),
+                deadline,
+                pid,
+                worker_cancellation,
+                hints,
+            );
+            if cancellation_check.load(Ordering::SeqCst) {
+                if let Ok((root, id, _)) = &result {
+                    let cleanup_cancelled = AtomicBool::new(false);
+                    let _ = update(
+                        root,
+                        Instant::now() + OBSERVER_BOUND,
+                        &cleanup_cancelled,
+                        |state| {
+                            state.busy.remove(id);
+                            Ok(())
+                        },
+                    );
+                }
+                let _ = sender.send(Err("observer preflight exceeded 1000 ms".to_owned()));
+            } else {
+                let _ = sender.send(result);
+            }
+        });
+    let mut preflight_result = preflight_spawn
+        .err()
+        .map(|error| Err(format!("observer preflight worker unavailable: {error}")));
     let mut preflight_cancelled = false;
     let mut preflight_deadline = None;
     let mut writes_ok = false;
@@ -361,10 +375,11 @@ pub(crate) fn run(
         }
         thread::sleep(Duration::from_millis(5));
     };
+    let exit_deadline = Instant::now() + OBSERVER_BOUND;
     if preflight_result.is_none() {
         let deadline = preflight_deadline
             .or_else(|| started_receiver.recv_timeout(OBSERVER_BOUND).ok())
-            .unwrap_or_else(Instant::now);
+            .map_or(exit_deadline, |deadline| deadline.min(exit_deadline));
         let remaining = deadline.saturating_duration_since(Instant::now());
         preflight_result = Some(match receiver.recv_timeout(remaining) {
             Ok(result) => result,
@@ -393,13 +408,11 @@ pub(crate) fn run(
         let kind = kind.map(str::to_owned);
         let priority = priority.map(str::to_owned);
         let (sender, receiver) = std::sync::mpsc::channel();
-        let _completion_worker = thread::spawn(move || {
-            let cancellation = AtomicBool::new(false);
-            let result = update(
-                &root,
-                Instant::now() + OBSERVER_BOUND,
-                &cancellation,
-                |state| {
+        let worker_cancellation = Arc::clone(&cancellation);
+        let completion_spawn = thread::Builder::new()
+            .name("locked-build-observe-completion".to_owned())
+            .spawn(move || {
+                let result = update(&root, exit_deadline, &worker_cancellation, |state| {
                     state.busy.remove(&id);
                     if writes_ok && status_known {
                         let outcome = if status.success() { "ok" } else { "failed" };
@@ -425,11 +438,16 @@ pub(crate) fn run(
                         }
                     }
                     Ok(())
-                },
+                });
+                let _ = sender.send(result);
+            });
+        if let Err(error) = completion_spawn {
+            set_warning(
+                &mut warning_message,
+                &format!("observer completion worker unavailable: {error}"),
             );
-            let _ = sender.send(result);
-        });
-        match receiver.recv_timeout(OBSERVER_BOUND) {
+        }
+        match receiver.recv_timeout(exit_deadline.saturating_duration_since(Instant::now())) {
             Ok(Err(error)) => set_warning(&mut warning_message, &error.to_string()),
             Err(_) => set_warning(
                 &mut warning_message,
@@ -452,6 +470,40 @@ pub(crate) fn run(
     })
 }
 
+#[allow(unsafe_code)]
+fn install_inherited_signal_dispositions(
+    command: &mut Command,
+    restore_sigpipe_ignore: bool,
+    #[cfg(target_os = "linux")] restore_sigchld_ignore: bool,
+) {
+    // SAFETY: The closure runs in the post-fork child and performs only sigaction(2), a
+    // signal-safe operation; it does not access shared Rust state.
+    unsafe {
+        command.pre_exec(move || {
+            if restore_sigpipe_ignore {
+                let action = nix::sys::signal::SigAction::new(
+                    nix::sys::signal::SigHandler::SigIgn,
+                    nix::sys::signal::SaFlags::empty(),
+                    nix::sys::signal::SigSet::empty(),
+                );
+                nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGPIPE, &action)
+                    .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+            }
+            #[cfg(target_os = "linux")]
+            if restore_sigchld_ignore {
+                let action = nix::sys::signal::SigAction::new(
+                    nix::sys::signal::SigHandler::SigIgn,
+                    nix::sys::signal::SaFlags::empty(),
+                    nix::sys::signal::SigSet::empty(),
+                );
+                nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGCHLD, &action)
+                    .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+            }
+            Ok(())
+        });
+    }
+}
+
 struct SignalFlags {
     items: Vec<(nix::sys::signal::Signal, Arc<AtomicBool>)>,
 }
@@ -472,7 +524,6 @@ impl SignalFlags {
             nix::sys::signal::Signal::SIGINT,
             nix::sys::signal::Signal::SIGQUIT,
             nix::sys::signal::Signal::SIGALRM,
-            nix::sys::signal::Signal::SIGPIPE,
             nix::sys::signal::Signal::SIGTERM,
             nix::sys::signal::Signal::SIGUSR1,
             nix::sys::signal::Signal::SIGUSR2,
@@ -515,6 +566,7 @@ fn preflight(
     let config = Config::read(config_path).map_err(|error| error.to_string())?;
     let root = crate::store::validate_state_directory(root).map_err(|error| error.to_string())?;
     let command_started = process_start(command_pid);
+    let observer_started = process_start(std::process::id());
     let mut id = String::new();
     update(&root, deadline, &cancellation, |state| {
         if !state.busy.is_empty() {
@@ -531,7 +583,7 @@ fn preflight(
             id.clone(),
             Busy {
                 observer_pid: std::process::id(),
-                observer_started: None,
+                observer_started,
                 command_pid: Some(command_pid),
                 command_started,
             },
@@ -592,7 +644,7 @@ fn update(
             return Err(Error::new(ErrorCode::Request, "store is in admitted mode"));
         }
     }
-    if root.join("state.json").exists() {
+    if has_admitted_requests(root)? {
         return Err(Error::new(ErrorCode::Request, "store is in admitted mode"));
     }
     let path = root.join("observe.json");
@@ -612,6 +664,19 @@ fn update(
         return Err(Error::new(ErrorCode::Io, "observer I/O deadline expired"));
     }
     write_state(&path, &state, deadline, cancellation)
+}
+
+fn has_admitted_requests(root: &Path) -> AppResult<bool> {
+    let path = root.join("state.json");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let state: serde_json::Value = serde_json::from_slice(&bounded_read(&path)?)?;
+    let requests = state
+        .get("requests")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| Error::new(ErrorCode::State, "invalid admitted store"))?;
+    Ok(!requests.is_empty())
 }
 
 fn acquire(lock: &File, deadline: Instant, cancellation: &AtomicBool) -> AppResult<()> {
@@ -721,21 +786,26 @@ fn reclaim(state: &mut ObservationState) {
         .map(sysinfo::Pid::from_u32)
         .collect();
     let (sender, receiver) = std::sync::mpsc::channel();
-    let _worker = thread::spawn(move || {
-        let mut system = System::new_with_specifics(RefreshKind::nothing());
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&pids),
-            true,
-            ProcessRefreshKind::everything(),
-        );
-        let alive = system
-            .processes()
-            .iter()
-            .filter(|(_, process)| process.status() != ProcessStatus::Zombie)
-            .map(|(pid, process)| (pid.as_u32(), process.start_time()))
-            .collect::<BTreeMap<_, _>>();
-        let _ = sender.send(alive);
-    });
+    let Ok(_worker) = thread::Builder::new()
+        .name("locked-build-observe-reclaim".to_owned())
+        .spawn(move || {
+            let mut system = System::new_with_specifics(RefreshKind::nothing());
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids),
+                true,
+                ProcessRefreshKind::everything(),
+            );
+            let alive = system
+                .processes()
+                .iter()
+                .filter(|(_, process)| process.status() != ProcessStatus::Zombie)
+                .map(|(pid, process)| (pid.as_u32(), process.start_time()))
+                .collect::<BTreeMap<_, _>>();
+            let _ = sender.send(alive);
+        })
+    else {
+        return;
+    };
     let Ok(alive) = receiver.recv_timeout(Duration::from_millis(250)) else {
         return;
     };

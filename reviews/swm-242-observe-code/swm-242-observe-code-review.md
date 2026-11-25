@@ -54,3 +54,51 @@ Linux paths were read only, not run (FND-007, FND-017). No AssuranceProfile exis
 
 - examined: tools/locked-build/src/observe.rs, main.rs, store.rs, runtime.rs (metrics dispatch), Cargo.toml, README.md, reference.md, tests/observe.rs.
 - context_only: metrics.rs, process.rs, config.rs; dev-team FR-015; sysinfo 0.37.2 and signal-hook 0.3.18 sources.
+
+## New findings (disposition pass 1)
+
+Head bbb3ede8ccacfc8a594e77e622cc95d7b2463c2d. Findings about the fix diff only.
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-025 | high | A pre_exec closure sets SIGPIPE to ignored in every command, whatever the caller had. A build script loop piped into head hangs forever (macOS and Linux), pipefail status changes from 141 to 1, and kill -PIPE no longer terminates. The added test asserts this behaviour. Fix: run the closure only when the caller really ignored SIGPIPE, captured before the Rust runtime changes it, or delete the closure and document the ignored-caller limit. | tools/locked-build/src/observe.rs:218-233; tools/locked-build/tests/observe.rs:563-571 |
+| FND-026 | medium | SIGPIPE is registered and forwarded, so when the observer writes a warning to a broken stderr it signals the command; a command using default SIGPIPE dies with 141 although it never touched stderr. Reproduced 3 of 3. Fix: remove SIGPIPE from the forwarded list; fix together with FND-025. | tools/locked-build/src/observe.rs:475; tools/locked-build/src/observe.rs:349-361 |
+| FND-027 | medium | The busy row now stores observer_started null, so any process that reuses a dead observer PID counts as a live observer and the slot stays busy. FR-015-AC-16 says a reused process ID does not count. Reproduced. Fix: record process_start of the observer in preflight, which is safe after spawn. | tools/locked-build/src/observe.rs:534; tools/locked-build/src/observe.rs:743-746 |
+| FND-028 | low | Preflight remainder and completion write have separate budgets after command exit, so exit and stdio were held 1.95 s after an instant command (900 ms preflight stall, 5 s completion stall). Fix: one exit deadline for both waits. | tools/locked-build/src/observe.rs:361-445 |
+| FND-029 | low | Stop signals are no longer registered, so SIGTSTP sent only to the started PID stops the observer while the command keeps running. Reproduced. Fix: record the limit in FR-015, or forward then stop self. | tools/locked-build/src/observe.rs:465-487 |
+| FND-030 | low | On Linux the SIGCHLD handler installed before spawn resets a caller-ignored SIGCHLD to default in the command (SigIgn 0x10000 direct, absent observed). Fix: capture the inherited disposition and restore it in pre_exec. | tools/locked-build/src/observe.rs:214-215; tools/locked-build/src/observe.rs:459-465 |
+| FND-031 | low | The crate-wide forbid(unsafe_code) gate was removed and the whole run function allows unsafe. Fix: keep forbid if the closure is deleted, otherwise confine the allow to a small module. | tools/locked-build/src/main.rs:3; tools/locked-build/Cargo.toml:24; tools/locked-build/src/observe.rs:158 |
+| FND-032 | low | Preflight now runs beside the command and takes the state lock while it runs; FR-015 says the lock is released before the command starts and not held while it runs. Fix: amend FR-015 for start-first observation. | tools/locked-build/src/observe.rs:281-296 |
+| FND-033 | low | Observed export takes the export lock before validating the directory, so metrics --output on a rejected non-private directory leaves metrics-export.lock in it. Reproduced. Fix: validate the state directory before opening the lock. | tools/locked-build/src/main.rs:129-139 |
+| FND-034 | low | thread::spawn panics if a thread cannot be created; after the command is spawned that would exit the observer while the command runs. Read only. Fix: use thread::Builder and treat failure as an observer failure. | tools/locked-build/src/observe.rs:283; tools/locked-build/src/observe.rs:396; tools/locked-build/src/observe.rs:724 |
+
+## Dispositions
+
+Round 1, head bbb3ede8ccacfc8a594e77e622cc95d7b2463c2d. macOS gates: fmt and clippy exit 0, tests 44 unit, 53 observe, 15 supervision passed. Linux (temporary source copy, since removed): 55 observe tests passed.
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | fixed | Handled TERM, INT, USR1, HUP exit 0; WINCH then TERM death reports signal 15. |
+| FND-002 | fixed | Caller-ignored 1,2,3,13,15 preserved on macOS and Linux; nohup rc 0. The new default-caller SIGPIPE defect is FND-025. |
+| FND-003 | fixed | Group TSTP, TTIN, TTOU stop both; stop and continue completes with rc 0. PID-only residue is FND-029. |
+| FND-004 | fixed | Broken and full-disk stderr: command runs, status preserved. Forwarded SIGPIPE residue is FND-026. |
+| FND-005 | fixed | All valueless hint forms run the command. |
+| FND-006 | fixed | 3 s preflight stall did not delay start; PID-only TERM delivered in 2 ms; single completion stall returned at 1.05 s. Combined case is FND-028. |
+| FND-007 | fixed | Linux: nofile 1024 soft, 524288 hard both direct and observed. |
+| FND-008 | fixed | Bounded histogram persisted. |
+| FND-009 | fixed | Buckets, histogram, escaping, seconds, atomic write and directory check reused. |
+| FND-010 | fixed | 126 for non-executable and directory, 127 for missing. |
+| FND-011 | still-open | Status, prune and recover still write state.json on an empty store and observe still rejects any state.json; reproduced on macOS and Linux. The added test only checks mode.json. |
+| FND-012 | fixed | Identity is inserted with the row in one write; no row without it. |
+| FND-013 | fixed | Newer export survives the stalled older one. |
+| FND-014 | fixed | Export reads current policy capacity. |
+| FND-015 | fixed | Snapshot has version, time, zero series and histogram. |
+| FND-016 | fixed | Symlinked policy recorded. |
+| FND-017 | fixed | Linux with SIGCHLD ignored by sigaction: new rc 7 and 0 over 50 runs, old rc 1. |
+| FND-018 | fixed | ABRT, TRAP, BUS, SYS, VTALRM forwarded; EMT, FPE, ILL remain unforwarded. |
+| FND-019 | accepted-no-change | Limit documented in README and reference. |
+| FND-020 | still-open | Help is fixed, but equals-form options are still dropped in the fallback, so an unknown option with --state=X records nothing. |
+| FND-021 | fixed | Stdout export works on read-only and full state directories. |
+| FND-022 | fixed | Typed errors and schema_version added. |
+| FND-023 | still-open | Reference.md still states a before-start bound that no longer describes the design, and the migration guidance was not restored. |
+| FND-024 | fixed | Late preflight row is removed by completion; busy empty after run. |

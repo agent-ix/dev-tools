@@ -48,13 +48,26 @@ locked-build --state /tmp/build-observations --config /path/to/host-policy.json 
   -- cargo test -p selected-package
 ```
 
-The state directory must exist and be private (mode `0700`). The command starts
-immediately and inherits the caller's streams, environment, working directory,
-and process group. If the caller starts with stdin closed, Rust's process API
-opens `/dev/null` for the child; programs can observe EOF rather than `EBADF`.
+The state directory must exist, be private (mode `0700`), and must not be a
+symlink. The already-admitted command starts before policy or state I/O; the
+observer runs bounded preflight and completion writes on worker threads. Its
+preflight lock can overlap command execution, but neither command start nor
+signal forwarding waits for state I/O. The command inherits the caller's
+streams, environment, working directory, process group, signal dispositions,
+and signal mask. Host wrappers must send stop signals to the process group or
+cgroup; sending `SIGTSTP`, `SIGTTIN`, or `SIGTTOU` only to the observer PID can
+stop the observer while its command continues. If the caller starts with stdin
+closed, Rust's process API opens `/dev/null` for the child; programs can observe
+EOF rather than `EBADF`.
 `--kind` and `--priority` are attribution hints only. Observed and admitted data use separate store
 modes; admission commands refuse an observed store, while observe fails open
 when given an admitted store.
+
+An existing admitted store with recorded requests stays admitted, including
+after `prune`; use a fresh private directory for observation. The observer
+accepts a regular host-policy file up to 1 MiB and observed state up to 32 MiB.
+It retains at most 10,000 raw command statuses. State-directory and state-file
+symlinks are rejected.
 
 Inspect, cancel, recover, or prune requests using the same state and policy options:
 

@@ -34,3 +34,25 @@ Ticket: SWM-242. Checked FR-015-AC-13..22 against the 29 tests in tests/observe.
 - Reverse gap and stubs: no stub, placeholder or skipped observe test found; unowned behaviour is FND-007.
 - Semantic review: not opted in; only a bounded intent check of AC-13..22.
 - Plan completion: not assessed
+
+## New findings (disposition pass 1)
+
+Head bbb3ede8ccacfc8a594e77e622cc95d7b2463c2d. The new test file run against the c4ef503 source on Linux gave 36 passed, 19 failed.
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-008 | medium | Several added tests do not detect their defect. The ignored SIGCHLD, PID-only abort and both held-lock tests pass 5 of 5 on the old source (sh trap does not ignore SIGCHLD; the abort test checks only the observer; thresholds are 2 s). The empty-store test checks mode.json and never runs observe. The broken-stderr test fails on old source in isolation but passed in the parallel suite. | tools/locked-build/tests/observe.rs:338-390; tools/locked-build/tests/observe.rs:636-646; tools/locked-build/tests/observe.rs:961-1032 |
+
+## Dispositions
+
+Round 1, head bbb3ede8ccacfc8a594e77e622cc95d7b2463c2d.
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | still-open | Handled-signal, nohup, descriptor and mask tests were added, but the SIGPIPE test asserts the defect SR-005 FND-025 and process group is not compared. |
+| FND-002 | still-open | No slow read or write is injected, the new held-lock tests pass on the old source, and the post-exit bound still allows 1.5 s. |
+| FND-003 | still-open | Next_observe_reclaims_dead_observer_and_command_slot is unchanged. |
+| FND-004 | still-open | Wait value, buckets and count are now asserted; no build is asserted counted as failed. |
+| FND-005 | still-open | No test makes state unwritable or corrupt after start; the read-only test covers export. |
+| FND-006 | accepted-no-change | AC-18 and AC-20 parts are now tested; the AC-13 governor and hold clause has no producer in this build. |
+| FND-007 | still-open | No requirement or spec note added for the limits. |
