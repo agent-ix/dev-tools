@@ -96,6 +96,21 @@ fn equal_priority_is_fifo_and_priority_wins_before_reservation() {
     );
 }
 
+/// Trace: FR-015-AC-3
+#[test]
+fn queue_wait_event_uses_utc_age_when_monotonic_clock_resets_after_reboot() -> Result<()> {
+    let config = policy();
+    let mut queued = request(1, 0, 1, 1_000);
+    queued.enqueued_clock_ms = 80_000;
+    queued.phase = Phase::Running;
+    queued.started_at_ms = Some(5_000);
+    queued.started_clock_ms = Some(100);
+    let mut state = state(vec![queued]);
+    state.event(&RequestId("r1".into()), &config, 5_000, 100)?;
+    assert_eq!(state.events[0].wait_ms, 4_000);
+    Ok(())
+}
+
 /// Trace: FR-005-AC-1, FR-005-AC-8
 #[test]
 fn large_old_request_reserves_total_capacity_under_sustained_priority_arrivals() -> Result<()> {

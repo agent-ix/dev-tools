@@ -54,10 +54,10 @@ request wait/hold ages, uncertainty, outcomes, and stable transition events.
 It omits command arguments and environment values.
 Save terminal evidence before `prune`, which removes terminal requests, events, and output files.
 `metrics` writes Prometheus text to stdout or atomically replaces the selected textfile.
-Outcome counters and queue-wait histograms are persisted in scheduler state and survive
-restart and `prune`; gauges describe the current queue, occupied units, and configured
-capacity. Admission-blocked time is counted once per host, even when several requests
-are waiting. No pause metric is exported.
+Outcome counters, queue-wait histograms, and admission-blocked time are persisted in a
+named sidecar and survive restart and `prune`; gauges describe the current queue,
+occupied units, and configured capacity. Admission-blocked time is counted once per
+host, even when several requests are waiting. No pause metric is exported.
 
 ## Scheduling
 

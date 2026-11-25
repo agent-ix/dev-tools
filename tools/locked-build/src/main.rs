@@ -96,7 +96,11 @@ fn execute(cli: Cli) -> Result<i32> {
     let config = cli.config.as_deref().ok_or_else(|| {
         error::Error::new(error::ErrorCode::Configuration, "--config is required")
     })?;
-    let store = runtime::open(state, config)?;
+    let store = if matches!(&cli.command, Action::Metrics { .. }) {
+        store::Store::open_existing(std::path::Path::new(state), std::path::Path::new(config))?
+    } else {
+        runtime::open(state, config)?
+    };
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
         Action::Parking => Ok(0),
@@ -132,11 +136,10 @@ fn execute(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Action::Metrics { output } => {
-            let text = runtime::metrics(&store)?;
             if let Some(output) = output {
-                metrics::write_atomic(&output, &text)?;
+                runtime::metrics_to_file(&store, &output)?;
             } else {
-                print!("{text}");
+                print!("{}", runtime::metrics(&store)?);
             }
             Ok(0)
         }

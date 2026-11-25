@@ -366,9 +366,30 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
 
 pub(crate) fn metrics(store: &Store) -> Result<String> {
     store.transaction(|state, config| {
-        let clock = clock_ms()?;
-        state.metrics.exposition(state, config, clock)
+        refresh_metric_interval(state)?;
+        state.metrics.exposition(state, config)
     })
+}
+
+pub(crate) fn metrics_to_file(store: &Store, path: &Path) -> Result<()> {
+    store.transaction(|state, config| {
+        refresh_metric_interval(state)?;
+        let text = state.metrics.exposition(state, config)?;
+        crate::metrics::write_atomic(path, &text)
+    })
+}
+
+fn refresh_metric_interval(state: &mut crate::model::State) -> Result<()> {
+    let clock = clock_ms()?;
+    if state
+        .requests
+        .iter()
+        .any(|request| request.phase == Phase::Queued)
+    {
+        state.metrics.checkpoint_active(clock)
+    } else {
+        state.metrics.close_block(clock)
+    }
 }
 
 fn current_block_reason(
@@ -378,26 +399,26 @@ fn current_block_reason(
     now: u64,
     clock: u64,
 ) -> Result<Option<&'static str>> {
-    for request in state
-        .requests
-        .iter()
-        .filter(|request| request.phase == Phase::Queued)
-    {
-        let Some(reason) = state.admission_reason(&request.id, config, sample, now, clock)? else {
-            continue;
-        };
-        if matches!(
-            reason,
+    let Some(next) = state.next(config, clock) else {
+        return Ok(None);
+    };
+    if u64::from(state.used()) + u64::from(next.units) > u64::from(config.capacity_units) {
+        return Ok(None);
+    }
+    let reason = match sample {
+        Some(sample) => sample.block_reason(config, now, state.used(), next.units),
+        None => Some("host_sample_unavailable"),
+    };
+    Ok(reason.filter(|reason| {
+        matches!(
+            *reason,
             "memory_reserve"
                 | "disk_reserve"
                 | "host_load"
                 | "host_sample_unavailable"
                 | "host_sample_invalid_or_stale"
-        ) {
-            return Ok(Some(reason));
-        }
-    }
-    Ok(None)
+        )
+    }))
 }
 
 pub(crate) fn cancel(store: &Store, id: &RequestId) -> Result<()> {
@@ -530,18 +551,13 @@ fn admit_worker(
         if reason.is_some() {
             return Ok(Admission::Waiting(config.poll_ms));
         }
-        let (priority, wait_ms, admitted) = {
+        let admitted = {
             let request = state.find_mut(id)?;
             request.phase = Phase::Running;
             request.started_at_ms = Some(now);
             request.started_clock_ms = Some(clock);
-            (
-                request.priority,
-                clock.saturating_sub(request.enqueued_clock_ms),
-                request.clone(),
-            )
+            request.clone()
         };
-        state.metrics.record_queue_wait(priority, wait_ms)?;
         state.event(id, config, now, clock)?;
         Ok(Admission::Granted(Box::new(admitted)))
     })

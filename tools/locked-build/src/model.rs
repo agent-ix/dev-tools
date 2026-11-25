@@ -106,10 +106,18 @@ pub(crate) struct State {
     pub next_sequence: u64,
     pub next_event: u64,
     pub pruned_events: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing, deserialize_with = "ignore_legacy_metrics")]
     pub metrics: MetricsState,
     pub requests: Vec<Request>,
     pub events: Vec<Event>,
+}
+
+fn ignore_legacy_metrics<'de, D>(deserializer: D) -> std::result::Result<MetricsState, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _ = serde_json::Value::deserialize(deserializer)?;
+    Ok(MetricsState::default())
 }
 
 /// Stable transition evidence; command arguments and environment are excluded.
@@ -131,7 +139,7 @@ pub struct Event {
     /// Transition UTC time.
     pub observed_at_ms: u64,
     /// Resulting phase.
-    pub state: String,
+    pub(crate) state: Phase,
     /// Claimed units.
     pub units: u32,
     /// Base priority.
@@ -230,18 +238,15 @@ impl State {
             owner: request.owner.clone(),
             ticket: request.ticket.clone(),
             observed_at_ms: now,
-            state: serde_json::to_value(request.phase)?
-                .as_str()
-                .ok_or_else(|| Error::new(ErrorCode::State, "invalid phase serialization"))?
-                .to_owned(),
+            state: request.phase,
             units: request.units,
             priority: request.priority,
             capacity_units: config.capacity_units,
             free_units: config.capacity_units.saturating_sub(self.used()),
             wait_ms: request
-                .started_clock_ms
-                .unwrap_or(clock)
-                .saturating_sub(request.enqueued_clock_ms),
+                .started_at_ms
+                .unwrap_or(now)
+                .saturating_sub(request.enqueued_at_ms),
             hold_ms: request
                 .started_clock_ms
                 .map(|started| clock.saturating_sub(started)),
@@ -354,8 +359,6 @@ impl State {
             });
         request.ended_at_ms = Some(now);
         request.ended_clock_ms = Some(clock);
-        let completed = request.clone();
-        self.metrics.record_terminal(&completed)?;
         self.event(id, config, now, clock)
     }
 }
