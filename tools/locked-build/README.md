@@ -41,14 +41,18 @@ For a wrapper that already admits work, `observe` records occupancy and
 outcomes without making an admission decision:
 
 ```sh
+mkdir -m 700 -p /tmp/build-observations
+queued_at_ms=$(locked-build now-ms)
 locked-build --state /tmp/build-observations --config /path/to/host-policy.json \
-  observe --kind build --priority check --queued-at-ms 1795120000000 \
+  observe --kind build --priority check --queued-at-ms "$queued_at_ms" \
   -- cargo test -p selected-package
 ```
 
-The command starts immediately and inherits the caller's standard streams,
-environment, working directory, and process group. `--kind` and `--priority`
-are attribution hints only. Observed and admitted data use separate store
+The state directory must exist and be private (mode `0700`). The command starts
+immediately and inherits the caller's streams, environment, working directory,
+and process group. If the caller starts with stdin closed, Rust's process API
+opens `/dev/null` for the child; programs can observe EOF rather than `EBADF`.
+`--kind` and `--priority` are attribution hints only. Observed and admitted data use separate store
 modes; admission commands refuse an observed store, while observe fails open
 when given an admitted store.
 

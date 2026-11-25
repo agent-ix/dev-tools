@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Shared persistent build admission and safe supervision (FR-005).
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 mod config;
 mod error;
@@ -13,6 +13,7 @@ mod store;
 mod watchdog;
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -59,6 +60,8 @@ enum Action {
     Recover,
     /// Remove terminal requests/events after the monitoring consumer saved them.
     Prune,
+    /// Print Unix epoch milliseconds without opening the state store.
+    NowMs,
     /// Export Prometheus text metrics to stdout or an atomic textfile-collector path.
     Metrics {
         #[arg(long)]
@@ -106,6 +109,10 @@ fn execute(cli: Cli) -> Result<i32> {
         std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;
         return Ok(0);
     }
+    if matches!(cli.command, Action::NowMs) {
+        println!("{}", observe::now_ms());
+        return Ok(0);
+    }
     if let Action::ErrorCodes { code } = &cli.command {
         let codes = match code {
             Some(code) => vec![error::ErrorCode::from_code(code).ok_or_else(|| {
@@ -120,21 +127,28 @@ fn execute(cli: Cli) -> Result<i32> {
         return Ok(0);
     }
     if let Action::Metrics { output } = &cli.command
-        && let Some(state) = cli.state.as_deref()
-        && let Some(text) = observe::exposition(state)
-            .map_err(|message| error::Error::new(error::ErrorCode::State, message))?
+        && let (Some(state), Some(config)) = (cli.state.as_deref(), cli.config.as_deref())
     {
-        if let Some(path) = output {
-            metrics::write_atomic(path, &text)?;
+        let _export_lock = if output.is_some() {
+            Some(store::lock_metrics_export_at(state).map_err(|message| {
+                error::Error::new(error::ErrorCode::State, message.to_string())
+            })?)
         } else {
-            print!("{text}");
+            None
+        };
+        if let Some(text) = observe::exposition(state, config)? {
+            if let Some(path) = output {
+                metrics::write_atomic(path, &text)?;
+            } else {
+                print!("{text}");
+            }
+            return Ok(0);
         }
-        return Ok(0);
     }
     if matches!(&cli.command, Action::Status)
         && let Some(state) = cli.state.as_deref()
-        && let Some(snapshot) = observe::snapshot(state)
-            .map_err(|message| error::Error::new(error::ErrorCode::State, message))?
+        && let Some(config) = cli.config.as_deref()
+        && let Some(snapshot) = observe::snapshot(state, config)?
     {
         println!("{}", serde_json::to_string(&snapshot)?);
         return Ok(0);
@@ -153,6 +167,7 @@ fn execute(cli: Cli) -> Result<i32> {
     };
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
+        Action::NowMs => Ok(0),
         Action::Parking => Ok(0),
         Action::Run {
             owner,
@@ -215,12 +230,47 @@ fn main() {
         Ok(cli) => match execute(cli) {
             Ok(code) => code,
             Err(error) => {
-                eprintln!("{}: {}", error.code.as_str(), error.message);
+                observe::report_stderr(&format!("{}: {}\n", error.code.as_str(), error.message));
                 2
             }
         },
-        Err(_error) if args.iter().any(|arg| arg == "observe") => observe::run_parse_failure(&args),
-        Err(error) => error.exit(),
+        Err(error)
+            if is_observe_command(&args)
+                && !matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+        {
+            observe::run_parse_failure(&args)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let rendered = if message.ends_with('\n') {
+                message
+            } else {
+                format!("{message}\n")
+            };
+            if error.use_stderr() {
+                observe::report_stderr(&rendered);
+            } else {
+                let _ = std::io::stdout().lock().write_all(rendered.as_bytes());
+            }
+            error.exit_code()
+        }
     };
     std::process::exit(code);
+}
+
+fn is_observe_command(args: &[OsString]) -> bool {
+    let mut cursor = 1;
+    while cursor < args.len() {
+        match args[cursor].to_str() {
+            Some("--") => return false,
+            Some("--state" | "--config") => cursor += 2,
+            Some("observe") => return true,
+            Some(value) if value.starts_with('-') => cursor += 1,
+            Some(_) | None => return false,
+        }
+    }
+    false
 }

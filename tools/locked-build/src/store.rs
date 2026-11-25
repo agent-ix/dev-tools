@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
@@ -56,16 +57,7 @@ impl Store {
     }
 
     pub(crate) fn lock_metrics_export(&self) -> Result<File> {
-        self.reject_link("metrics-export.lock")?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(self.path.join("metrics-export.lock"))?;
-        lock.lock()?;
-        Ok(lock)
+        lock_metrics_export_at(&self.path)
     }
 
     pub(crate) fn transaction<T>(
@@ -83,11 +75,12 @@ impl Store {
         lock.lock()?;
         let mode_path = self.path.join("mode.json");
         self.reject_link("mode.json")?;
+        let mut write_mode_after_request = false;
         let mode = match fs::read_to_string(&mode_path) {
             Ok(mode) => mode,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.reject_observed_store()?;
-                self.write_atomic("mode.json", b"\"admitted\"")?;
+                write_mode_after_request = true;
                 "\"admitted\"".to_owned()
             }
             Err(error) => return Err(error.into()),
@@ -172,6 +165,9 @@ impl Store {
         let before = serde_json::to_vec(&state)?;
         let previous_pruned = state.pruned_events;
         let output = operation(&mut state, &config)?;
+        if write_mode_after_request && !state.requests.is_empty() {
+            self.write_atomic("mode.json", b"\"admitted\"")?;
+        }
         state
             .metrics
             .reconcile_events(&state.events, state.next_event)?;
@@ -220,16 +216,13 @@ impl Store {
     fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<()> {
         let next = format!("{name}.next");
         self.reject_link(&next)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(self.path.join(&next))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(self.path.join(next), self.path.join(name))?;
-        Ok(())
+        write_atomic_path(
+            &self.path.join(name),
+            &self.path.join(next),
+            bytes,
+            0o600,
+            None,
+        )
     }
 
     fn reject_observed_store(&self) -> Result<()> {
@@ -257,13 +250,37 @@ impl Store {
     }
 }
 
+pub(crate) fn lock_metrics_export_at(path: &Path) -> Result<File> {
+    let lock_path = path.join("metrics-export.lock");
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(Error::new(
+                ErrorCode::State,
+                "metrics export lock is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        _ => {}
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(lock_path)?;
+    lock.lock()?;
+    Ok(lock)
+}
+
 fn random_id() -> Result<String> {
     let mut bytes = [0_u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn validate_state_directory(path: &Path) -> Result<PathBuf> {
+pub(crate) fn validate_state_directory(path: &Path) -> Result<PathBuf> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             Error::new(ErrorCode::State, "state directory does not exist")
@@ -278,6 +295,52 @@ fn validate_state_directory(path: &Path) -> Result<PathBuf> {
         ));
     }
     path.canonicalize().map_err(Into::into)
+}
+
+pub(crate) fn write_atomic_path(
+    target: &Path,
+    temporary: &Path,
+    bytes: &[u8],
+    mode: u32,
+    cancelled: Option<&AtomicBool>,
+) -> Result<()> {
+    for path in [target, temporary] {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "atomic state path is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            _ => {}
+        }
+    }
+    if temporary.exists() {
+        fs::remove_file(temporary)?;
+    }
+    if cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        return Err(Error::new(ErrorCode::Io, "atomic state write cancelled"));
+    }
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(mode)
+            .open(temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        if cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err(Error::new(ErrorCode::Io, "atomic state write cancelled"));
+        }
+        fs::rename(temporary, target)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 fn load_metrics(path: &Path) -> crate::metrics::MetricsState {

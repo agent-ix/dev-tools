@@ -142,8 +142,19 @@ from both Prometheus text and the JSON snapshot. Invalid hints warn once and are
 treated as absent. Observer work is bounded to 1000 ms before command start and
 after command exit; failures fail open while preserving the command.
 
+Before first use, create the state directory with mode `0700`; `observe` never
+creates it. `locked-build now-ms` prints current Unix epoch milliseconds
+without opening or modifying state, so wrappers can capture queue start before
+waiting. Existing admitted stores that contain requests but predate
+`mode.json` remain admitted; an empty query does not select a mode.
+
 The observed command inherits the caller's process group. Group signals reach
 the command directly, and catchable signals sent only to the caller-started PID
 are forwarded. A lost observer retains its busy slot while the child identity is
 verified alive; after both are gone, the next observation or export reclaims the
 slot without adding an outcome.
+
+One standard-stream limitation remains: when the caller starts with file
+descriptor 0 closed, the Rust process API may supply `/dev/null` to the child.
+Such a program sees EOF where a direct exec with a closed descriptor would see
+`EBADF`.

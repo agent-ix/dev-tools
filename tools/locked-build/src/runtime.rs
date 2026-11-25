@@ -378,9 +378,7 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
 }
 
 pub(crate) fn metrics(store: &Store) -> Result<String> {
-    if let Some(observed) = crate::observe::exposition(&store.path)
-        .map_err(|message| Error::new(ErrorCode::State, message))?
-    {
+    if let Some(observed) = crate::observe::exposition(&store.path, &store.config_path)? {
         return Ok(observed);
     }
     store.transaction(|state, config| {

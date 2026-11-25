@@ -11,7 +11,8 @@ use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Event, Request, State};
 
-const BUCKETS_SECONDS: [u64; 12] = [1, 5, 10, 30, 60, 120, 300, 600, 1_200, 1_800, 3_600, 7_200];
+pub(crate) const BUCKETS_SECONDS: [u64; 12] =
+    [1, 5, 10, 30, 60, 120, 300, 600, 1_200, 1_800, 3_600, 7_200];
 
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
@@ -148,7 +149,7 @@ pub(crate) struct MetricsState {
     builds: BTreeMap<String, BTreeMap<String, u64>>,
     /// Queue wait observations by priority, with named bucket bounds in seconds.
     #[serde(default)]
-    queue_wait: BTreeMap<String, Histogram>,
+    pub(crate) queue_wait: BTreeMap<String, Histogram>,
     /// Next transition sequence already folded into the counters.
     #[serde(default)]
     last_event_sequence: u64,
@@ -174,13 +175,35 @@ struct BlockedAccumulator {
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
-struct Histogram {
+pub(crate) struct Histogram {
     #[serde(default)]
-    buckets: BTreeMap<u64, u64>,
+    pub(crate) buckets: BTreeMap<u64, u64>,
     #[serde(default)]
-    count: u64,
+    pub(crate) count: u64,
     #[serde(default)]
-    sum_ms: u64,
+    pub(crate) sum_ms: u64,
+}
+
+impl Histogram {
+    pub(crate) fn observe_ms(&mut self, wait_ms: u64) -> Result<()> {
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorCode::State, "queue histogram count overflow"))?;
+        self.sum_ms = self
+            .sum_ms
+            .checked_add(wait_ms)
+            .ok_or_else(|| Error::new(ErrorCode::State, "queue histogram sum overflow"))?;
+        for bound in BUCKETS_SECONDS {
+            if wait_ms <= bound.saturating_mul(1_000) {
+                let count = self.buckets.entry(bound).or_default();
+                *count = count.checked_add(1).ok_or_else(|| {
+                    Error::new(ErrorCode::State, "queue histogram bucket overflow")
+                })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl MetricsState {
@@ -249,23 +272,7 @@ impl MetricsState {
             .queue_wait
             .entry(PriorityClass::from_priority(priority).label().to_owned())
             .or_default();
-        histogram.count = histogram
-            .count
-            .checked_add(1)
-            .ok_or_else(|| Error::new(ErrorCode::State, "queue histogram count overflow"))?;
-        histogram.sum_ms = histogram
-            .sum_ms
-            .checked_add(wait_ms)
-            .ok_or_else(|| Error::new(ErrorCode::State, "queue histogram sum overflow"))?;
-        for bound in BUCKETS_SECONDS {
-            if wait_ms <= bound.saturating_mul(1_000) {
-                let count = histogram.buckets.entry(bound).or_default();
-                *count = count.checked_add(1).ok_or_else(|| {
-                    Error::new(ErrorCode::State, "queue histogram bucket overflow")
-                })?;
-            }
-        }
-        Ok(())
+        histogram.observe_ms(wait_ms)
     }
 
     /// Checkpoint one host interval. The state-file lock serializes all waiters.
@@ -527,14 +534,14 @@ fn metric_header(output: &mut String, name: &str, kind: &str, help: &str) {
     output.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
 }
 
-fn escape_label(value: &str) -> String {
+pub(crate) fn escape_label(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('"', "\\\"")
 }
 
-fn seconds(milliseconds: u64) -> String {
+pub(crate) fn seconds(milliseconds: u64) -> String {
     format!("{}.{:03}", milliseconds / 1_000, milliseconds % 1_000)
 }
 

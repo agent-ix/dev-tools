@@ -21,7 +21,7 @@ thiserror = "2"
 tempfile = "3"
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 missing_docs = "deny"
 
 [lints.clippy]
