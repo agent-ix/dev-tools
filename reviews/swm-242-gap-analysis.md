@@ -59,3 +59,5 @@ Round 2, head f4c1fab8eac28c9a7c5c20702c20adef427e43e3. Supersedes the round 1 c
 | FND-005 | deferred | Owned by dev-team PR 40, which names ix_build_slots_configured at d102371 and is not yet merged. |
 | FND-006 | still-open | No test is tagged FR-015-AC-9 any more, and neither the old second half nor the PR 40 version (one check request ending failed) is asserted. |
 | FND-007 | fixed | A tagged test asserts ticket, request id, command, reason and working directory are absent. |
+| FND-002 | fixed | Round 3, head 838f5bc: the blocked-interval tests are retagged FR-015-AC-11. Tags are not further checked: dev-tools has no specs and no trace library. |
+| FND-006 | fixed | Round 3: a new test ends one check request failed from the zero start and asserts only that series changed. |

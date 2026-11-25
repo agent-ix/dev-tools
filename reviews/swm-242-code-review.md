@@ -78,6 +78,20 @@ Round 2, head f4c1fab8eac28c9a7c5c20702c20adef427e43e3. Supersedes the round 1 c
 | FND-019 | still-open | Found in round 2; no fix yet. |
 | FND-020 | still-open | Found in round 2; no fix yet. |
 | FND-021 | still-open | Found in round 2; no fix yet. |
+| FND-002 | fixed | Round 3, head 838f5bc: a dead supervisor and client no longer accrue (5.124 then 5.123 s over 15 s; the 1 ms drop is FND-024). |
+| FND-015 | fixed | Round 3: a live build survived an unknown reason key and a corrupt sidecar; a failed sidecar write after the state commit only logs. |
+| FND-016 | fixed | Round 3: the textfile is written under a separate export lock after the state lock is released. |
+| FND-017 | fixed | Round 3: admission_reason, clock_ms and validate_state_directory are reused (a smaller new copy is FND-025). |
+| FND-018 | fixed | Round 3: event wait_ms is monotonic again; the reboot addition is documented. |
+| FND-019 | fixed | Round 3: the sidecar is rebound to a recreated store (reproduced). |
+| FND-020 | fixed | Round 3: an open interval is no longer checkpointed on every transaction. |
+| FND-021 | fixed | Round 3: the other label is gone; priorities above 2 are counted as gate, documented in reference.md. |
+| FND-022 | still-open | Found in round 3; no fix yet. |
+| FND-023 | still-open | Found in round 3; no fix yet. |
+| FND-024 | still-open | Found in round 3; no fix yet. |
+| FND-025 | still-open | Found in round 3; no fix yet. |
+| FND-026 | still-open | Found in round 3 at head bf7b218; no fix yet. |
+| FND-027 | still-open | Found in round 3 at head bf7b218; no fix yet. |
 
 ## New findings (disposition pass 2)
 
@@ -92,3 +106,16 @@ Fix diff 97ba217..f4c1fab only. Gates at the new head: fmt check, clippy with wa
 | FND-019 | low | metrics.json is not tied to store_id. If state.json is recreated beside it, new events are ignored until their sequence passes the old one, so counters freeze silently. Reproduced. | tools/locked-build/src/metrics.rs:156-193 |
 | FND-020 | low | While a blocked interval is open every transaction changes metrics.json, so status, recover and wait polls now rewrite and fsync both files, defeating the unchanged-state skip. | tools/locked-build/src/store.rs:158-177 |
 | FND-021 | low | priority="other" is a label value that FR-015 and FR-011 do not define, and its zero series are exported on every host. | tools/locked-build/src/metrics.rs:25-47 |
+
+## New findings (disposition pass 3)
+
+Fix diffs f4c1fab..bf7b218 only (bf7b218 changes README.md and reference.md; code is identical to 838f5bc), rated by real impact. Gates at 838f5bc and bf7b218: fmt check, clippy with warnings denied, and locked tests exit 0 (54 passed, 2 ignored). Requirement tags were not checked: dev-tools has no specs and no trace library.
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-022 | high | Cancelling the selected blocked request while another is queued discards the whole open interval: expiry finds no queued heartbeat and clears it without committing. Reproduced: exported 8.608 s, then 0.000 right after the cancel. Interrupt, recover and hold expiry of that request take the same path by code reading. Prometheus reads a drop as a counter reset and adds the remaining total to the increase again. | tools/locked-build/src/metrics.rs:388-393; tools/locked-build/src/store.rs:145-153 |
+| FND-023 | medium | The interval expires when the selected waiter has not polled for two poll_ms, which live waiters exceed under lock contention, and the gap is dropped. Measured on draco with memory blocked: 1 and 3 waiters counted fully, 8 counted 17.0 of 20.3 s and 18.0 of 20.2 s, 16 counted 7.5 of 21.0 s and 10.0 of 20.7 s (second run summed over all reasons). | tools/locked-build/src/metrics.rs:394-404,552-557 |
+| FND-024 | medium | Expiry applied at load is not seen as a metrics change, so it is not persisted and each scrape recomputes it from the wall and monotonic clocks. With a dead selected waiter, 6 of 60 scrapes went down by 1 ms and blocked_millis stayed empty; Prometheus treats each drop as a counter reset. | tools/locked-build/src/store.rs:119-137,160; tools/locked-build/src/metrics.rs:394-401 |
+| FND-025 | low | BlockReason::from_label restates the label strings of label() in reverse, a second copy the compiler does not keep in step. | tools/locked-build/src/metrics.rs:120-147 |
+| FND-026 | low | The Terra WSL text gives only a directory and no file name: passing it as --output fails with Is a directory, and a file named other than ix_build_metrics.prom is not matched by the staleness alert of ix-local-observability PR 33. README also calls this a default output path, but --output has no default and metrics prints to stdout without it. | tools/locked-build/README.md:52-54; tools/locked-build/reference.md:101-103 |
+| FND-027 | low | The commit puts a personal Windows user path into README.md and reference.md of this public repository; a placeholder for the user directory would carry the same instruction. | tools/locked-build/README.md:53; tools/locked-build/reference.md:103 |

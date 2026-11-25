@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::State;
+use crate::process::{IdentityState, Processes};
 
 const STATE_LIMIT: u64 = 32 * 1024 * 1024;
 const METRICS_FILE: &str = "metrics.json";
@@ -115,26 +116,37 @@ impl Store {
         }
         let metrics_path = self.path.join(METRICS_FILE);
         state.metrics = load_metrics(&metrics_path);
+        let metrics_before = serde_json::to_vec(&state.metrics)?;
         let metrics_identity_changed = state.metrics.bind_store(&state.store_id);
         if state.boot_time != sysinfo::System::boot_time() {
-            state.metrics.finish_for_reboot(
-                &state.requests,
-                sysinfo::System::boot_time().saturating_mul(1_000),
-                config.poll_ms,
-            )?;
+            state
+                .metrics
+                .finish_for_reboot(sysinfo::System::boot_time().saturating_mul(1_000))?;
         }
+        let now = crate::runtime::now_ms()?;
+        let clock = crate::runtime::clock_ms()?;
+        let mut processes = None;
         state.metrics.expire_stale_block(
             &state.requests,
-            crate::runtime::now_ms()?,
-            crate::runtime::clock_ms()?,
+            now,
+            clock,
             config.poll_ms,
+            |request| {
+                let Some(worker) = request.worker.as_ref() else {
+                    return false;
+                };
+                let current_processes = processes.get_or_insert_with(Processes::read);
+                matches!(
+                    current_processes.identity(worker, &request.id),
+                    IdentityState::Matching | IdentityState::Unavailable
+                )
+            },
         )?;
         state
             .metrics
             .reconcile_events(&state.events, state.next_event)?;
         state.validate(&config)?;
         let before = serde_json::to_vec(&state)?;
-        let metrics_before = serde_json::to_vec(&state.metrics)?;
         let previous_pruned = state.pruned_events;
         let output = operation(&mut state, &config)?;
         state
@@ -142,16 +154,17 @@ impl Store {
             .reconcile_events(&state.events, state.next_event)?;
         let now = crate::runtime::now_ms()?;
         let clock = crate::runtime::clock_ms()?;
-        if state
+        if !state
             .requests
             .iter()
             .any(|request| request.phase == crate::model::Phase::Queued)
         {
-            state
-                .metrics
-                .expire_stale_block(&state.requests, now, clock, config.poll_ms)?;
-        } else {
             state.metrics.close_block(clock)?;
+        } else if state.metrics.has_active_block() {
+            let sample = config.sample(now).ok();
+            let reason =
+                crate::runtime::current_block_reason(&state, &config, sample.as_ref(), now, clock)?;
+            state.metrics.observe_block(reason, now, clock)?;
         }
         state.validate(&config)?;
         let bytes = serde_json::to_vec(&state)?;

@@ -391,18 +391,18 @@ pub(crate) fn metrics_to_file(store: &Store, path: &Path) -> Result<()> {
     crate::metrics::write_atomic(path, &text)
 }
 
-fn current_block_reason(
+pub(crate) fn current_block_reason(
     state: &crate::model::State,
     config: &crate::config::Config,
     sample: Option<&HostSample>,
     now: u64,
     clock: u64,
-) -> Result<Option<(RequestId, &'static str)>> {
+) -> Result<Option<&'static str>> {
     let Some(next) = state.next(config, clock) else {
         return Ok(None);
     };
     let reason = state.admission_reason(&next.id, config, sample, now, clock)?;
-    Ok(reason.map(|reason| (next.id.clone(), reason)))
+    Ok(reason)
 }
 
 pub(crate) fn cancel(store: &Store, id: &RequestId) -> Result<()> {
@@ -531,12 +531,7 @@ fn admit_worker(
             request.reason = reason.map(str::to_owned);
         }
         let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
-        state.metrics.observe_block(
-            blocked.as_ref().map(|(_, reason)| *reason),
-            blocked.as_ref().map(|(id, _)| id.0.as_str()),
-            now,
-            clock,
-        )?;
+        state.metrics.observe_block(blocked, now, clock)?;
         if reason.is_some() {
             return Ok(Admission::Waiting(config.poll_ms));
         }

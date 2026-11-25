@@ -41,6 +41,48 @@ fn queued(store: &Store) -> Result<RequestId> {
     )
 }
 
+fn live_worker_process(id: &RequestId) -> Result<(Child, ProcessIdentity)> {
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("trap '' TERM; sleep 60")
+        .arg("worker")
+        .arg(&id.0)
+        .process_group(0)
+        .spawn()?;
+    for _ in 0..50 {
+        let system = sysinfo::System::new_with_specifics(
+            sysinfo::RefreshKind::nothing()
+                .with_processes(sysinfo::ProcessRefreshKind::everything()),
+        );
+        if let Some(process) = system.process(sysinfo::Pid::from_u32(child.id())) {
+            let identity = ProcessIdentity {
+                pid: child.id(),
+                started_seconds: process.start_time(),
+            };
+            if Processes::read().identity(&identity, id) == IdentityState::Matching {
+                return Ok((child, identity));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop_child_group(&mut child)?;
+    Err(Error::new(
+        ErrorCode::State,
+        "test worker process identity was not visible",
+    ))
+}
+
+fn stop_child_group(child: &mut Child) -> Result<()> {
+    let group = i32::try_from(child.id())
+        .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let _ = nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(group),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    let _ = child.wait()?;
+    Ok(())
+}
+
 /// Trace: FR-015-AC-1
 #[test]
 fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
@@ -142,6 +184,15 @@ fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_las
     assert!(blocked_value > 0.0);
 
     cancel(&store, &first)?;
+    let one_waiter_left = metrics(&store)?;
+    let after_first_leave = metric_value(
+        &one_waiter_left,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert!(after_first_leave >= blocked_value);
     cancel(&store, &second)?;
     let closed = metrics(&store)?;
     let closed_value = metric_value(
@@ -166,51 +217,239 @@ fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_las
 
 /// Trace: FR-015-AC-11
 #[test]
-fn blocked_interval_stops_after_selected_request_stops_polling() -> Result<()> {
+fn host_blocked_accumulator_survives_late_polls_recovery_and_interrupts() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let config_path = root.path().join("policy.json");
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    policy.memory_reserve_bytes = 2_000_000;
+    policy.poll_ms = 5;
+    std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
+    let first = queued(&store)?;
+    let second = queued(&store)?;
+    let (mut first_child, first_identity) = live_worker_process(&first)?;
+    let (mut second_child, second_identity) = live_worker_process(&second)?;
+    let first_fence = claim_worker(&store, &first, &first_identity)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    let second_fence = claim_worker(&store, &second, &second_identity)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "second worker claim missing"))?;
+    assert!(matches!(
+        admit_worker(&store, &first, &first_fence, &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+    assert!(matches!(
+        admit_worker(&store, &second, &second_fence, &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+
+    store.transaction(|state, _| {
+        state.find_mut(&first)?.heartbeat_at_ms = Some(now_ms()?.saturating_sub(60_000));
+        state.find_mut(&second)?.heartbeat_at_ms = Some(now_ms()?.saturating_sub(60_000));
+        Ok(())
+    })?;
+    let before_lag = metrics(&store)?;
+    let value = metric_value(
+        &before_lag,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let blocker = File::options()
+        .read(true)
+        .write(true)
+        .open(store.path.join("lock"))?;
+    blocker.lock()?;
+    let blocked_store = Store {
+        path: store.path.clone(),
+        config_path: store.config_path.clone(),
+    };
+    let (sender, receiver) = mpsc::channel();
+    let exporter = std::thread::spawn(move || {
+        let _ = sender.send(metrics(&blocked_store));
+    });
+    std::thread::sleep(Duration::from_millis(30));
+    blocker.unlock()?;
+    let after_lag = receiver
+        .recv()
+        .map_err(|_| Error::new(ErrorCode::State, "blocked metrics export disappeared"))??;
+    exporter
+        .join()
+        .map_err(|_| Error::new(ErrorCode::State, "metrics exporter panicked"))?;
+    let lagged_value = metric_value(
+        &after_lag,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert!(
+        lagged_value >= value,
+        "counter regressed across stale heartbeat"
+    );
+
+    // Recovery of a queued worker and interrupted admission of the selected head
+    // must preserve host time while another waiter remains queued.
+    stop_child_group(&mut first_child)?;
+    recover(&store)?;
+    let after_recover = metrics(&store)?;
+    let recovered_value = metric_value(
+        &after_recover,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert!(recovered_value >= lagged_value);
+    let reopened = Store::open(&store.path, &store.config_path)?;
+    let after_reopen = metrics(&reopened)?;
+    let reopened_value = metric_value(
+        &after_reopen,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert!(reopened_value >= recovered_value);
+
+    let replacement = claim_worker(
+        &reopened,
+        &first,
+        &ProcessIdentity {
+            pid: u32::MAX - 3,
+            started_seconds: 1,
+        },
+    )?
+    .ok_or_else(|| Error::new(ErrorCode::State, "recovered first worker claim missing"))?;
+    assert!(matches!(
+        admit_worker(&reopened, &first, &replacement, &AtomicBool::new(true))?,
+        Admission::Stopped
+    ));
+    let after_interrupt = metrics(&reopened)?;
+    let interrupted_value = metric_value(
+        &after_interrupt,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert!(interrupted_value >= recovered_value);
+    cancel(&reopened, &second)?;
+    stop_child_group(&mut second_child)?;
+    Ok(())
+}
+
+/// Trace: FR-015-AC-11
+#[test]
+fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let config_path = root.path().join("policy.json");
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    policy.memory_reserve_bytes = 2_000_000;
+    policy.poll_ms = 5;
+    std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
+    let id = queued(&store)?;
+    let (mut child, identity) = live_worker_process(&id)?;
+    let fence = claim_worker(&store, &id, &identity)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    assert!(matches!(
+        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+    std::thread::sleep(Duration::from_millis(30));
+    stop_child_group(&mut child)?;
+
+    let expired = metrics(&store)?;
+    let value = metric_value(
+        &expired,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert!(
+        value > 0.0,
+        "expiry discarded the last valid blocked interval"
+    );
+    let sidecar: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path.join("metrics.json"))?)?;
+    assert!(sidecar["blocked_millis"]["memory"].as_u64().unwrap_or(0) > 0);
+    assert!(sidecar["active_block"].is_null());
+
+    let reopened = Store::open(&store.path, &store.config_path)?;
+    let after_reopen = metrics(&reopened)?;
+    let reopened_value = metric_value(
+        &after_reopen,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert!(reopened_value >= value);
+    cancel(&reopened, &id)?;
+    Ok(())
+}
+
+/// Trace: FR-015-AC-11
+#[test]
+fn hold_expiry_of_running_request_does_not_reset_queued_host_interval() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let config_path = root.path().join("policy.json");
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     policy.memory_reserve_bytes = 2_000_000;
     std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
-    let id = queued(&store)?;
-    let fence = claim_worker(
-        &store,
-        &id,
-        &ProcessIdentity {
-            pid: u32::MAX - 1,
+    let running = queued(&store)?;
+    let queued_id = queued(&store)?;
+    store.transaction(|state, config| {
+        let request = state.find_mut(&running)?;
+        request.phase = Phase::Running;
+        request.started_clock_ms = Some(clock_ms()?.saturating_sub(config.hold_ms));
+        request.started_at_ms = Some(now_ms()?);
+        request.worker = Some(ProcessIdentity {
+            pid: u32::MAX - 4,
             started_seconds: 1,
-        },
-    )?
-    .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
-    assert!(matches!(
-        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
-        Admission::Waiting(_)
-    ));
-
-    store.transaction(|state, _| {
-        state.find_mut(&id)?.heartbeat_at_ms = Some(now_ms()?.saturating_sub(60_000));
-        Ok(())
+        });
+        request.worker_generation = 1;
+        request.stop = Some(crate::model::StopReason::TimedOut);
+        state
+            .metrics
+            .observe_block(Some("memory_reserve"), now_ms()?, clock_ms()?)
     })?;
-    let stopped = metrics(&store)?;
-    let value = metric_value(
-        &stopped,
+    let before = metrics(&store)?;
+    let before_value = metric_value(
+        &before,
         "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
     )
     .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
     .parse::<f64>()
     .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
-    std::thread::sleep(Duration::from_millis(25));
-    let later = metrics(&store)?;
-    let later_value = metric_value(
-        &later,
+    store.transaction(|state, config| {
+        state.finish(
+            &running,
+            Completion::default(),
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+    let after = metrics(&store)?;
+    let after_value = metric_value(
+        &after,
         "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
     )
     .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
     .parse::<f64>()
     .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
-    assert_eq!(value, later_value);
+    assert!(after_value >= before_value);
+    assert_eq!(state_phase(&store, &queued_id)?, Phase::Queued);
+    cancel(&store, &queued_id)?;
     Ok(())
+}
+
+fn state_phase(store: &Store, id: &RequestId) -> Result<Phase> {
+    store.transaction(|state, _| Ok(state.find(id)?.phase))
 }
 
 fn metric_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {

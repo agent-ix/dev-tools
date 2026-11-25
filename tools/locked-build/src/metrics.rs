@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{Event, State};
+use crate::model::{Event, Request, State};
 
 const BUCKETS_SECONDS: [u64; 12] = [1, 5, 10, 30, 60, 120, 300, 600, 1_200, 1_800, 3_600, 7_200];
 
@@ -135,16 +135,6 @@ impl BlockReason {
             _ => None,
         }
     }
-
-    fn from_label(label: &str) -> Option<Self> {
-        match label {
-            "memory" => Some(Self::Memory),
-            "target_disk" => Some(Self::TargetDisk),
-            "host_load" => Some(Self::HostLoad),
-            "probe" => Some(Self::Probe),
-            _ => None,
-        }
-    }
 }
 
 /// Persisted scheduler counters. Maps make additions backward compatible.
@@ -159,24 +149,28 @@ pub(crate) struct MetricsState {
     /// Queue wait observations by priority, with named bucket bounds in seconds.
     #[serde(default)]
     queue_wait: BTreeMap<String, Histogram>,
-    /// Admission-blocked time by the resource checks currently implemented.
-    #[serde(default)]
-    blocked_millis: BTreeMap<String, u64>,
     /// Next transition sequence already folded into the counters.
     #[serde(default)]
     last_event_sequence: u64,
     /// Queue age accumulated before reboot, keyed until the request is admitted or ends.
     #[serde(default)]
     pre_reboot_wait_ms: BTreeMap<String, u64>,
-    /// Current resource denial being actively polled by its selected request.
+    /// One durable host-level accumulator for admission-blocked time.
+    #[serde(flatten)]
+    blocked: BlockedAccumulator,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+struct BlockedAccumulator {
+    /// Cumulative time by the resource checks currently implemented.
     #[serde(default)]
-    active_block: Option<(String, u64)>,
+    blocked_millis: BTreeMap<String, u64>,
+    /// Current host-wide denial interval, independent of waiter identity.
+    #[serde(default)]
+    active_block: Option<(BlockReason, u64)>,
     /// UTC start is retained only to checkpoint an active interval on reboot.
     #[serde(default)]
     active_started_at_ms: Option<u64>,
-    /// Request whose admission polls sustain the current host interval.
-    #[serde(default)]
-    active_request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -278,46 +272,37 @@ impl MetricsState {
     pub(crate) fn observe_block(
         &mut self,
         reason: Option<&str>,
-        request_id: Option<&str>,
         now_ms: u64,
         clock_ms: u64,
     ) -> Result<()> {
         let next = reason.and_then(BlockReason::from_admission_reason);
-        if let (Some((current, _)), Some(next), Some(active_id), Some(request_id)) = (
-            self.active_block.as_ref(),
-            next,
-            self.active_request_id.as_deref(),
-            request_id,
-        ) && current == next.label()
-            && active_id == request_id
+        if self
+            .blocked
+            .active_block
+            .as_ref()
+            .is_some_and(|(current, _)| Some(*current) == next)
         {
             return Ok(());
         }
         self.close_block(clock_ms)?;
-        self.active_block = next.map(|block_reason| (block_reason.label().to_owned(), clock_ms));
-        self.active_started_at_ms = next.map(|_| now_ms);
-        self.active_request_id = next.and_then(|_| request_id.map(str::to_owned));
+        self.blocked.active_block = next.map(|block_reason| (block_reason, clock_ms));
+        self.blocked.active_started_at_ms = next.map(|_| now_ms);
         Ok(())
     }
 
     /// Persist elapsed blocked time before reboot can reset the monotonic clock.
     pub(crate) fn checkpoint_active(&mut self, clock_ms: u64) -> Result<()> {
-        if let Some((reason, started)) = self.active_block.clone() {
-            let Some(reason) = BlockReason::from_label(&reason) else {
-                self.active_block = None;
-                self.active_started_at_ms = None;
-                self.active_request_id = None;
-                return Ok(());
-            };
+        if let Some((reason, started)) = self.blocked.active_block {
             let elapsed = clock_ms.saturating_sub(started);
             let total = self
+                .blocked
                 .blocked_millis
                 .entry(reason.label().to_owned())
                 .or_default();
             *total = total
                 .checked_add(elapsed)
                 .ok_or_else(|| Error::new(ErrorCode::State, "admission metric counter overflow"))?;
-            self.active_block = Some((reason.label().to_owned(), clock_ms));
+            self.blocked.active_block = Some((reason, clock_ms));
         }
         Ok(())
     }
@@ -325,91 +310,80 @@ impl MetricsState {
     /// Close the interval when no queued request remains.
     pub(crate) fn close_block(&mut self, clock_ms: u64) -> Result<()> {
         self.checkpoint_active(clock_ms)?;
-        self.active_block = None;
-        self.active_started_at_ms = None;
-        self.active_request_id = None;
+        self.blocked.active_block = None;
+        self.blocked.active_started_at_ms = None;
         Ok(())
     }
 
-    /// Checkpoint an open interval at the prior boot's last valid admission-poll lease.
-    pub(crate) fn finish_for_reboot(
-        &mut self,
-        requests: &[crate::model::Request],
-        new_boot_at_ms: u64,
-        poll_ms: u64,
-    ) -> Result<()> {
-        let Some(started) = self.active_started_at_ms else {
-            self.active_block = None;
-            self.active_request_id = None;
-            return Ok(());
-        };
-        let heartbeat = self.active_request_id.as_deref().and_then(|id| {
-            requests
-                .iter()
-                .find(|request| request.id.0 == id && request.phase == crate::model::Phase::Queued)
-                .and_then(|request| request.heartbeat_at_ms)
-        });
-        if let Some(heartbeat) = heartbeat {
-            let end = new_boot_at_ms.min(heartbeat.saturating_add(poll_ms.saturating_mul(2)));
-            let elapsed = end.saturating_sub(started);
-            if let Some((reason, _)) = self.active_block.as_ref()
-                && BlockReason::from_label(reason).is_some()
-            {
-                let total = self.blocked_millis.entry(reason.clone()).or_default();
-                *total = total.checked_add(elapsed).ok_or_else(|| {
-                    Error::new(ErrorCode::State, "admission metric counter overflow")
-                })?;
-            }
+    /// Checkpoint an open interval at the new boot boundary.
+    pub(crate) fn finish_for_reboot(&mut self, new_boot_at_ms: u64) -> Result<()> {
+        if let (Some((reason, _)), Some(started)) =
+            (self.blocked.active_block, self.blocked.active_started_at_ms)
+        {
+            let elapsed = new_boot_at_ms.saturating_sub(started);
+            let total = self
+                .blocked
+                .blocked_millis
+                .entry(reason.label().to_owned())
+                .or_default();
+            *total = total
+                .checked_add(elapsed)
+                .ok_or_else(|| Error::new(ErrorCode::State, "admission metric counter overflow"))?;
         }
-        self.active_block = None;
-        self.active_started_at_ms = None;
-        self.active_request_id = None;
+        self.blocked.active_block = None;
+        self.blocked.active_started_at_ms = None;
         Ok(())
     }
 
-    /// Stop counting when the selected request has missed its admission-poll lease.
     pub(crate) fn expire_stale_block(
         &mut self,
-        requests: &[crate::model::Request],
+        requests: &[Request],
         now_ms: u64,
         clock_ms: u64,
         poll_ms: u64,
-    ) -> Result<()> {
-        let Some((_, started)) = self.active_block.clone() else {
-            return Ok(());
+        mut has_live_waiter: impl FnMut(&Request) -> bool,
+    ) -> Result<bool> {
+        let Some((_, started_clock_ms)) = self.blocked.active_block else {
+            return Ok(false);
         };
-        let active_id = self.active_request_id.as_deref();
-        let heartbeat = active_id.and_then(|id| {
-            requests
-                .iter()
-                .find(|request| request.id.0 == id && request.phase == crate::model::Phase::Queued)
-                .and_then(|request| request.heartbeat_at_ms)
-        });
-        let Some(heartbeat) = heartbeat else {
-            self.active_block = None;
-            self.active_started_at_ms = None;
-            self.active_request_id = None;
-            return Ok(());
+        let Some(last_poll_ms) = requests
+            .iter()
+            .filter(|request| request.phase == crate::model::Phase::Queued)
+            .filter_map(|request| request.heartbeat_at_ms)
+            .max()
+            .or(self.blocked.active_started_at_ms)
+        else {
+            return Ok(false);
         };
-        let stale_after = poll_ms.saturating_mul(2);
-        let age = now_ms.saturating_sub(heartbeat);
-        if age <= stale_after {
-            return Ok(());
+        let grace_ms = poll_ms.saturating_mul(2);
+        if now_ms.saturating_sub(last_poll_ms) <= grace_ms {
+            return Ok(false);
         }
-        let elapsed_after_last_valid_poll = age.saturating_sub(stale_after);
-        let end = clock_ms.saturating_sub(elapsed_after_last_valid_poll);
-        self.checkpoint_active(end.max(started))?;
-        self.active_block = None;
-        self.active_started_at_ms = None;
-        self.active_request_id = None;
-        Ok(())
+        if requests
+            .iter()
+            .filter(|request| request.phase == crate::model::Phase::Queued)
+            .any(&mut has_live_waiter)
+        {
+            return Ok(false);
+        }
+        let expiry_ms = last_poll_ms.saturating_add(grace_ms);
+        let elapsed_after_expiry = now_ms.saturating_sub(expiry_ms);
+        let expiry_clock_ms = clock_ms.saturating_sub(elapsed_after_expiry);
+        self.checkpoint_active(expiry_clock_ms.max(started_clock_ms))?;
+        self.blocked.active_block = None;
+        self.blocked.active_started_at_ms = None;
+        Ok(true)
+    }
+
+    pub(crate) fn has_active_block(&self) -> bool {
+        self.blocked.active_block.is_some()
     }
 
     pub(crate) fn exposition(
         &self,
         state: &State,
         config: &Config,
-        now_ms: u64,
+        _now_ms: u64,
         clock_ms: u64,
     ) -> Result<String> {
         let mut output = String::new();
@@ -511,11 +485,12 @@ impl MetricsState {
         );
         for reason in BlockReason::ALL {
             let committed = self
+                .blocked
                 .blocked_millis
                 .get(reason.label())
                 .copied()
                 .unwrap_or(0);
-            let active = self.active_elapsed(state, now_ms, clock_ms, config.poll_ms, reason);
+            let active = self.active_elapsed(clock_ms, reason);
             output.push_str(&format!(
                 "ix_build_admission_blocked_seconds_total{{host=\"{host}\",reason=\"{}\"}} {}\n",
                 reason.label(),
@@ -525,36 +500,14 @@ impl MetricsState {
         Ok(output)
     }
 
-    fn active_elapsed(
-        &self,
-        state: &State,
-        now_ms: u64,
-        clock_ms: u64,
-        poll_ms: u64,
-        reason: BlockReason,
-    ) -> u64 {
-        let Some((active_reason, started)) = self.active_block.as_ref() else {
+    fn active_elapsed(&self, clock_ms: u64, reason: BlockReason) -> u64 {
+        let Some((active_reason, started)) = self.blocked.active_block else {
             return 0;
         };
-        if active_reason != reason.label() {
+        if active_reason != reason {
             return 0;
         }
-        let heartbeat = self.active_request_id.as_deref().and_then(|id| {
-            state
-                .requests
-                .iter()
-                .find(|request| request.id.0 == id && request.phase == crate::model::Phase::Queued)
-                .and_then(|request| request.heartbeat_at_ms)
-        });
-        let Some(heartbeat) = heartbeat else {
-            return 0;
-        };
-        let stale_after = poll_ms.saturating_mul(2);
-        let age = now_ms.saturating_sub(heartbeat);
-        let elapsed_after_last_valid_poll = age.saturating_sub(stale_after);
-        clock_ms
-            .saturating_sub(elapsed_after_last_valid_poll)
-            .saturating_sub(*started)
+        clock_ms.saturating_sub(started)
     }
 }
 
@@ -802,8 +755,8 @@ mod tests {
     #[test]
     fn blocked_intervals_checkpoint_and_close_when_the_queue_is_empty() -> Result<()> {
         let mut metrics = MetricsState::default();
-        metrics.observe_block(Some("memory_reserve"), Some("request-1"), 10, 100)?;
-        metrics.observe_block(Some("memory_reserve"), Some("request-1"), 20, 350)?;
+        metrics.observe_block(Some("memory_reserve"), 10, 100)?;
+        metrics.observe_block(Some("memory_reserve"), 20, 350)?;
         metrics.checkpoint_active(600)?;
         metrics.close_block(1_000)?;
         let empty = state(Vec::new());
@@ -825,34 +778,8 @@ mod tests {
     #[test]
     fn accumulated_block_time_survives_monotonic_clock_reset_after_reboot() -> Result<()> {
         let mut metrics = MetricsState::default();
-        metrics.observe_block(Some("memory_reserve"), Some("request-1"), 1_000, 10)?;
-        let request = crate::model::Request {
-            id: crate::model::RequestId("request-1".to_owned()),
-            sequence: 1,
-            owner: "owner".to_owned(),
-            ticket: "TEST-1".to_owned(),
-            units: 1,
-            priority: 0,
-            enqueued_at_ms: 500,
-            enqueued_clock_ms: 1,
-            started_at_ms: None,
-            started_clock_ms: None,
-            ended_at_ms: None,
-            ended_clock_ms: None,
-            heartbeat_at_ms: Some(1_900),
-            worker: None,
-            worker_generation: 0,
-            watchdog: None,
-            command_finished: None,
-            phase: crate::model::Phase::Queued,
-            stop: None,
-            exit_code: None,
-            signal: None,
-            reason: None,
-            command: vec!["/usr/bin/true".to_owned()],
-            cwd: "/".into(),
-        };
-        metrics.finish_for_reboot(&[request], 3_000, 100)?;
+        metrics.observe_block(Some("memory_reserve"), 1_000, 10)?;
+        metrics.finish_for_reboot(3_000)?;
         let empty = state(Vec::new());
         let text = metrics.exposition(&empty, &policy()?, 0, 0)?;
         assert_eq!(
@@ -860,7 +787,7 @@ mod tests {
                 &text,
                 "ix_build_admission_blocked_seconds_total{host=\"draco\",reason=\"memory\"} "
             ),
-            Some("1.100")
+            Some("2.000")
         );
         Ok(())
     }
@@ -887,6 +814,18 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    /// Trace: FR-015-AC-11
+    #[test]
+    fn persisted_host_interval_uses_the_closed_reason_enum() -> Result<()> {
+        let persisted = br#"{"active_block":["memory",10],"active_started_at_ms":100}"#;
+        let metrics: MetricsState = serde_json::from_slice(persisted)?;
+        assert_eq!(metrics.active_elapsed(35, BlockReason::Memory), 25);
+        let encoded = serde_json::to_vec(&metrics)?;
+        let restored: MetricsState = serde_json::from_slice(&encoded)?;
+        assert_eq!(restored.active_elapsed(45, BlockReason::Memory), 35);
+        Ok(())
     }
 
     /// Trace: FR-015-AC-10

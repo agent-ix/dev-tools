@@ -49,9 +49,9 @@ locked-build --state /tmp/build-queue --config /path/to/host-policy.json metrics
   --output "$HOME/.local/share/node_exporter/textfile/ix_build_metrics.prom"
 ```
 
-The default output path matches the per-user node_exporter textfile directory.
-Terra WSL uses the shared directory `/mnt/c/Users/Peter/.ix/metrics`; set the
-`--output` path there on that host.
+`--output` has no default; choose the collector path explicitly. The example uses
+the per-user node_exporter directory. Terra WSL uses the shared file path
+`/mnt/c/Users/<user>/.ix/metrics/ix_build_metrics.prom` instead.
 
 `status` emits JSON with host capacity, occupied/free units, overcommit, host samples,
 request wait/hold ages, uncertainty, outcomes, and stable transition events.
