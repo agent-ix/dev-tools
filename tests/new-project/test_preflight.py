@@ -129,6 +129,42 @@ def test_accepts_cargo_lockfile_and_svg_figure(tmp_path: Path) -> None:
     assert PREFLIGHT.check(project) == []
 
 
+def test_accepts_typespec_as_scanned_text_source(tmp_path: Path) -> None:
+    """TypeSpec source is accepted as UTF-8 and remains in the text scan."""
+    project = _project(tmp_path)
+    source = project / "typespec" / "main.tsp"
+    source.parent.mkdir()
+    source.write_text("namespace Example;\nmodel Item { name: string; }\n")
+
+    assert PREFLIGHT.check(project) == []
+
+
+def test_scans_typespec_source_for_forbidden_markers(tmp_path: Path) -> None:
+    """TypeSpec text receives the same rights and path checks as other text."""
+    project = _project(tmp_path)
+    source = project / "typespec" / "main.tsp"
+    source.parent.mkdir()
+    workstation_path = "/" + "home/example/project/fixture.json"
+    source.write_text(f"{PREFLIGHT.RIGHTS_MARKER}\n{workstation_path}\n")
+
+    assert PREFLIGHT.check(project) == [
+        "typespec/main.tsp: absolute workstation path",
+        "typespec/main.tsp: unresolved rights marker",
+    ]
+
+
+def test_rejects_non_utf8_typespec_source(tmp_path: Path) -> None:
+    """TypeSpec files that cannot be inspected as UTF-8 still fail closed."""
+    project = _project(tmp_path)
+    source = project / "typespec" / "main.tsp"
+    source.parent.mkdir()
+    source.write_bytes(b"\xff\xfe")
+
+    assert PREFLIGHT.check(project) == [
+        "typespec/main.tsp: declared text file is not UTF-8"
+    ]
+
+
 @pytest.mark.parametrize(
     "name", ["figure.svg", "Cargo.lock", "rule.native", "rule.qsl", "data.json.license"]
 )
