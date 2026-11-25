@@ -378,6 +378,9 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
 }
 
 pub(crate) fn metrics(store: &Store) -> Result<String> {
+    if let Some(observed) = crate::observe::exposition(&store.path, &store.config_path)? {
+        return Ok(observed);
+    }
     store.transaction(|state, config| {
         let now = now_ms()?;
         let clock = clock_ms()?;
