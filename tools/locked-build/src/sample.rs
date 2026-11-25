@@ -7,15 +7,17 @@ use std::fs;
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+use std::process::{Command, Stdio};
 
 use crate::error::{Error, ErrorCode, Result};
+use serde::Deserialize;
 
 const CONFIG_LIMIT: u64 = 1_048_576;
 const SOURCE_FILE_LIMIT: u64 = 1_048_576;
 const PROCESS_LIMIT: usize = 16_384;
+const PROCESS_LIST_BYTES_LIMIT: usize = PROCESS_LIMIT * 64;
+const LOCKF_PROCESS_LIMIT: usize = 128;
+const LOCKF_COMMAND_BYTES_LIMIT: usize = LOCKF_PROCESS_LIMIT * 262_144;
 const PROCESS_SOURCE_BYTES_LIMIT: usize = 64 * 1024 * 1024;
 const FD_LIMIT_PER_PROCESS: usize = 4096;
 const FDINFO_ENTRY_LIMIT: usize = 131_072;
@@ -76,6 +78,13 @@ struct ProcessRecord {
     state: char,
     uid: Option<u32>,
     arguments: Vec<OsString>,
+}
+
+struct ProcessSummary {
+    pid: u32,
+    parent_pid: u32,
+    state: char,
+    command: String,
 }
 
 #[derive(Deserialize)]
@@ -321,8 +330,8 @@ fn sample(config: &SamplerConfig) -> SampleResult {
     for target in &config.target_dirs {
         match directory_bytes(&target.path) {
             Ok(bytes) => {
-                let host = escape_label(&config.host);
-                let repo = escape_label(&target.repo);
+                let host = crate::metrics::escape_label(&config.host);
+                let repo = crate::metrics::escape_label(&target.repo);
                 target_values.push(format!(
                     "ix_build_target_dir_bytes{{host=\"{host}\",repo=\"{repo}\"}} {bytes}\n"
                 ));
@@ -343,8 +352,8 @@ fn sample(config: &SamplerConfig) -> SampleResult {
         }
     }
     for source in failures.keys() {
-        let host = escape_label(&config.host);
-        let probe = escape_label(source);
+        let host = crate::metrics::escape_label(&config.host);
+        let probe = crate::metrics::escape_label(source);
         if !output.contains("# TYPE ix_build_probe_unavailable gauge\n") {
             output.push_str(
                 "# HELP ix_build_probe_unavailable A configured sample source could not be read.\n# TYPE ix_build_probe_unavailable gauge\n",
@@ -368,7 +377,7 @@ fn metric<T: std::fmt::Display>(
     host: &str,
     value: T,
 ) {
-    let host = escape_label(host);
+    let host = crate::metrics::escape_label(host);
     output.push_str(&format!(
         "# HELP {name} {help}\n# TYPE {name} {kind}\n{name}{{host=\"{host}\"}} {value}\n"
     ));
@@ -393,13 +402,6 @@ fn bounded_reason(reason: String) -> String {
         bounded.push_str("source read failed");
     }
     bounded
-}
-
-fn escape_label(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('"', "\\\"")
 }
 
 fn directory_bytes(path: &Path) -> std::result::Result<u64, String> {
@@ -474,33 +476,157 @@ fn busy_count(source: &BusySource) -> std::result::Result<u64, String> {
 }
 
 fn macos_lockf_busy(lock_paths: &[PathBuf]) -> std::result::Result<u64, String> {
-    let mut system = System::new_with_specifics(RefreshKind::nothing());
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing()
-            .with_cmd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always),
-    );
-    let records = system
-        .processes()
+    let arguments = vec![
+        OsString::from("-axo"),
+        OsString::from("pid=,ppid=,stat=,comm="),
+    ];
+    let output = bounded_command_output("/bin/ps", &arguments, PROCESS_LIST_BYTES_LIMIT)?;
+    let summaries = parse_process_summaries(&output)?;
+    let lockf_pids = summaries
         .iter()
-        .map(|(pid, process)| ProcessRecord {
-            pid: pid.as_u32(),
-            parent_pid: process.parent().map_or(0, sysinfo::Pid::as_u32),
+        .filter(|summary| Path::new(&summary.command).file_name() == Some(OsStr::new("lockf")))
+        .map(|summary| summary.pid)
+        .collect::<Vec<_>>();
+    let lockf_arguments = if lockf_pids.is_empty() {
+        HashMap::new()
+    } else {
+        let pid_list = lockf_pids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let arguments = vec![
+            OsString::from("-ww"),
+            OsString::from("-p"),
+            OsString::from(pid_list),
+            OsString::from("-o"),
+            OsString::from("pid=,command="),
+        ];
+        let output = bounded_command_output("/bin/ps", &arguments, LOCKF_COMMAND_BYTES_LIMIT)?;
+        parse_lockf_command_rows(&output, &lockf_pids)?
+    };
+    let records = summaries
+        .into_iter()
+        .map(|summary| ProcessRecord {
+            pid: summary.pid,
+            parent_pid: summary.parent_pid,
             process_group_id: 0,
-            start_time: process.start_time().to_string(),
-            state: if process.status() == sysinfo::ProcessStatus::Zombie {
-                'Z'
-            } else {
-                'R'
-            },
+            start_time: String::new(),
+            state: summary.state,
             uid: None,
-            arguments: process.cmd().to_vec(),
+            arguments: lockf_arguments
+                .get(&summary.pid)
+                .cloned()
+                .unwrap_or_default(),
         })
         .collect::<Vec<_>>();
     let held = lockf_slot_paths(&records, lock_paths);
     u64::try_from(held.len()).map_err(|_| "held slot count overflow".to_owned())
+}
+
+fn bounded_command_output(
+    program: &str,
+    arguments: &[OsString],
+    maximum_bytes: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut child = Command::new(program)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("process list command failed: {}", error.kind()))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "process list output pipe is unavailable".to_owned())?;
+    let maximum =
+        u64::try_from(maximum_bytes).map_err(|_| "process list byte bound overflow".to_owned())?;
+    let mut output = Vec::new();
+    let read_result = (&mut stdout)
+        .take(maximum.saturating_add(1))
+        .read_to_end(&mut output);
+    // Close the pipe before waiting so an over-limit writer cannot block on a full pipe.
+    drop(stdout);
+    let status_result = child.wait();
+    read_result.map_err(|error| format!("process list output read failed: {}", error.kind()))?;
+    if output.len() > maximum_bytes {
+        return Err("process list output byte limit exceeded".into());
+    }
+    let status = status_result
+        .map_err(|error| format!("process list command wait failed: {}", error.kind()))?;
+    if !status.success() {
+        return Err("process list command returned failure".into());
+    }
+    Ok(output)
+}
+
+fn parse_process_summaries(output: &[u8]) -> std::result::Result<Vec<ProcessSummary>, String> {
+    let output =
+        std::str::from_utf8(output).map_err(|_| "process list output is not UTF-8".to_owned())?;
+    let mut summaries = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut lockf_count = 0_usize;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        if summaries.len() >= PROCESS_LIMIT {
+            return Err("process table entry limit exceeded".into());
+        }
+        let mut fields = line.split_ascii_whitespace();
+        let pid = fields
+            .next()
+            .ok_or_else(|| "process list PID is missing".to_owned())?
+            .parse::<u32>()
+            .map_err(|_| "process list PID is malformed".to_owned())?;
+        let parent_pid = fields
+            .next()
+            .ok_or_else(|| "process list parent PID is missing".to_owned())?
+            .parse::<u32>()
+            .map_err(|_| "process list parent PID is malformed".to_owned())?;
+        let state = fields
+            .next()
+            .and_then(|field| field.chars().next())
+            .ok_or_else(|| "process list state is missing".to_owned())?;
+        let command = fields.collect::<Vec<_>>().join(" ");
+        if command.is_empty() || pid == 0 || !seen.insert(pid) {
+            return Err("process list row is invalid".into());
+        }
+        if Path::new(&command).file_name() == Some(OsStr::new("lockf")) {
+            lockf_count += 1;
+            if lockf_count > LOCKF_PROCESS_LIMIT {
+                return Err("lockf process candidate limit exceeded".into());
+            }
+        }
+        summaries.push(ProcessSummary {
+            pid,
+            parent_pid,
+            state,
+            command,
+        });
+    }
+    Ok(summaries)
+}
+
+fn parse_lockf_command_rows(
+    output: &[u8],
+    candidate_pids: &[u32],
+) -> std::result::Result<HashMap<u32, Vec<OsString>>, String> {
+    let output =
+        std::str::from_utf8(output).map_err(|_| "lockf command output is not UTF-8".to_owned())?;
+    let candidates = candidate_pids.iter().copied().collect::<BTreeSet<_>>();
+    let mut commands = HashMap::new();
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_ascii_whitespace();
+        let pid = fields
+            .next()
+            .ok_or_else(|| "lockf command PID is missing".to_owned())?
+            .parse::<u32>()
+            .map_err(|_| "lockf command PID is malformed".to_owned())?;
+        let arguments = fields.map(OsString::from).collect::<Vec<_>>();
+        if arguments.is_empty() || !candidates.contains(&pid) || commands.contains_key(&pid) {
+            return Err("lockf command row is invalid".into());
+        }
+        commands.insert(pid, arguments);
+    }
+    Ok(commands)
 }
 
 fn lockf_slot_paths(processes: &[ProcessRecord], lock_paths: &[PathBuf]) -> BTreeSet<PathBuf> {
@@ -596,14 +722,16 @@ fn cargo_tree_busy(
         .collect::<HashMap<_, _>>();
     let mut cargo_builds = BTreeSet::new();
     for process in &processes {
-        if process.state == 'Z' || !argv0_matches(process.arguments.first(), cargo_command_name) {
+        if process.state == 'Z' {
             continue;
         }
-        if process.arguments.iter().skip(1).any(|argument| {
-            argument
-                .to_str()
-                .is_some_and(|argument| build_test_commands.iter().any(|cmd| cmd == argument))
-        }) {
+        let Some(subcommand) = cargo_subcommand(&process.arguments, cargo_command_name) else {
+            continue;
+        };
+        if build_test_commands
+            .iter()
+            .any(|command| command == subcommand)
+        {
             cargo_builds.insert(process.pid);
         }
     }
@@ -634,6 +762,52 @@ fn argv0_matches(argument: Option<&OsString>, command_name: &str) -> bool {
     argument
         .and_then(|argument| Path::new(argument).file_name())
         .is_some_and(|name| name == OsStr::new(command_name))
+}
+
+fn cargo_subcommand<'a>(arguments: &'a [OsString], command_name: &str) -> Option<&'a str> {
+    if !argv0_matches(arguments.first(), command_name) {
+        return None;
+    }
+    let mut index = 1;
+    while let Some(argument) = arguments.get(index).and_then(|argument| argument.to_str()) {
+        if index == 1 && argument.starts_with('+') && argument.len() > 1 {
+            index += 1;
+            continue;
+        }
+        if matches!(
+            argument,
+            "-h" | "--help" | "-V" | "--version" | "--list" | "--explain"
+        ) || argument.starts_with("--explain=")
+        {
+            return None;
+        }
+        if matches!(
+            argument,
+            "--color" | "--config" | "-Z" | "-C" | "--directory" | "--jobs" | "-j"
+        ) {
+            index += 2;
+            continue;
+        }
+        if matches!(
+            argument,
+            "--locked" | "--offline" | "--frozen" | "--verbose" | "-v" | "--quiet" | "-q"
+        ) || argument.starts_with("--color=")
+            || argument.starts_with("--config=")
+            || argument.starts_with("-Z")
+            || argument.starts_with("-C")
+            || argument.starts_with("--directory=")
+            || argument.starts_with("--jobs=")
+            || argument.starts_with("-j")
+        {
+            index += 1;
+            continue;
+        }
+        if argument.starts_with('-') {
+            return None;
+        }
+        return Some(argument);
+    }
+    None
 }
 
 fn fdinfo_lock_holders(
@@ -956,6 +1130,31 @@ mod tests {
         assert!(add_process_bytes(&mut process_bytes, 1).is_err());
     }
 
+    /// Trace: FR-015-AC-15
+    #[test]
+    fn macos_process_summary_parser_enforces_process_limit() {
+        let mut rows = String::new();
+        for pid in 1..=PROCESS_LIMIT + 1 {
+            rows.push_str(&format!("{pid} 1 S cargo\n"));
+        }
+        assert!(parse_process_summaries(rows.as_bytes()).is_err());
+        assert_eq!(
+            parse_process_summaries(b"1 0 S launchd\n2 1 S lockf\n3 1 S Google Chrome\n")
+                .map(|rows| rows.len()),
+            Ok(3)
+        );
+        let mut lockf_rows = String::new();
+        for pid in 1..=LOCKF_PROCESS_LIMIT + 1 {
+            lockf_rows.push_str(&format!("{pid} 1 S lockf\n"));
+        }
+        assert!(parse_process_summaries(lockf_rows.as_bytes()).is_err());
+        assert_eq!(
+            parse_lockf_command_rows(b"2 /usr/bin/lockf -t 0 /tmp/qsl-slot.lock /bin/sh\n", &[2],)
+                .map(|commands| commands.len()),
+            Ok(1)
+        );
+    }
+
     /// Trace: FR-015-AC-13
     #[test]
     fn sample_writes_only_the_requested_output_without_scheduler_state() -> TestResult {
@@ -1199,6 +1398,16 @@ mod tests {
             'S',
             &["cargo", "build", "-p", "other"],
         )?;
+        proc_entry(
+            root.path(),
+            501,
+            1,
+            501,
+            4,
+            'S',
+            &["cargo", "help", "build"],
+        )?;
+        proc_entry(root.path(), 601, 1, 601, 5, 'S', &["cargo", "new", "build"])?;
         assert_eq!(
             cargo_tree_busy(
                 root.path(),
@@ -1207,6 +1416,66 @@ mod tests {
                 &["build".into(), "test".into(), "check".into()],
             )?,
             2
+        );
+        Ok(())
+    }
+
+    /// Trace: FR-015-AC-15
+    #[test]
+    fn cargo_subcommand_parser_uses_command_position_and_global_options() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            cargo_subcommand(&args(&["cargo", "help", "build"]), "cargo"),
+            Some("help")
+        );
+        assert_eq!(
+            cargo_subcommand(&args(&["cargo", "new", "build"]), "cargo"),
+            Some("new")
+        );
+        assert_eq!(
+            cargo_subcommand(
+                &args(&[
+                    "cargo",
+                    "+stable",
+                    "--config",
+                    "net.offline=true",
+                    "--color",
+                    "always",
+                    "build",
+                ]),
+                "cargo"
+            ),
+            Some("build")
+        );
+        assert_eq!(cargo_subcommand(&args(&["cargo", "--help"]), "cargo"), None);
+        assert_eq!(
+            cargo_subcommand(&args(&["cargo", "--explain", "E0001", "build"]), "cargo"),
+            None
+        );
+    }
+
+    /// Trace: FR-015-AC-15
+    #[test]
+    fn cargo_help_and_new_commands_do_not_count_as_build_roots() -> TestResult {
+        let root = tempfile::tempdir()?;
+        proc_entry(
+            root.path(),
+            701,
+            1,
+            701,
+            7,
+            'S',
+            &["cargo", "help", "build"],
+        )?;
+        proc_entry(root.path(), 702, 1, 702, 8, 'S', &["cargo", "new", "build"])?;
+        assert_eq!(
+            cargo_tree_busy(
+                root.path(),
+                1000,
+                "cargo",
+                &["build".into(), "test".into(), "check".into()],
+            )?,
+            0
         );
         Ok(())
     }

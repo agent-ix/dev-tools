@@ -527,7 +527,8 @@ fn metric_header(output: &mut String, name: &str, kind: &str, help: &str) {
     output.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
 }
 
-fn escape_label(value: &str) -> String {
+/// Escape a label value for Prometheus text exposition.
+pub(crate) fn escape_label(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
