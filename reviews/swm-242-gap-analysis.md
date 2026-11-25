@@ -45,3 +45,17 @@ Plan completion: not assessed.
 | FR-015-AC-10 | partial (FND-003) |
 
 Semantic review beyond the FR-015 tags added by this diff was not run. The mutation used for FND-004 was reverted; the worktree is clean at the reviewed head. No stubs were found in the changed code.
+
+## Dispositions
+
+Round 2, head f4c1fab8eac28c9a7c5c20702c20adef427e43e3. Supersedes the round 1 comment another reviewer posted at a32a08f.
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | fixed | The test asserts exactly four outcome series changed, each to 1. |
+| FND-002 | still-open | The blocked-interval tests in metrics.rs and runtime/tests.rs are still tagged FR-015-AC-1, which they do not verify; dev-team PR 40 gives them FR-015-AC-11 and no test is tagged AC-11. |
+| FND-003 | fixed | Outcome lines are compared across first recovery, reopen with second recovery, and prune. |
+| FND-004 | fixed | Removing observe_block fails one test and removing queue-wait recording fails two. |
+| FND-005 | deferred | Owned by dev-team PR 40, which names ix_build_slots_configured at d102371 and is not yet merged. |
+| FND-006 | still-open | No test is tagged FR-015-AC-9 any more, and neither the old second half nor the PR 40 version (one check request ending failed) is asserted. |
+| FND-007 | fixed | A tagged test asserts ticket, request id, command, reason and working directory are absent. |

@@ -50,3 +50,45 @@ Not findings by dispatch decision: no governor, pause or abort; pause series abs
 - Capitalized TYPE breaking node_exporter: rejected, node_exporter 1.13.1 accepts it (the direct-parser defect remains as FND-005).
 - Blocked seconds counted per waiter: rejected by trace and reproduction.
 - A counter incremented twice by recover or a second finish: rejected, finish returns early for terminal requests and counter and phase persist together.
+
+## Dispositions
+
+Round 2, head f4c1fab8eac28c9a7c5c20702c20adef427e43e3. Supersedes the round 1 comment another reviewer posted at a32a08f.
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | fixed | Reproduced: an old-binary build ran to success beside new-binary use of the same state, and the old binary still reads the state. |
+| FND-002 | still-open | Cancel and empty-queue paths are fixed. A queued request whose supervisor and client are dead still accrues: 6.433 to 21.496 s over 15 s with no worker process and a policy that no longer blocks. |
+| FND-003 | fixed | Priority 3 admitted and finished, priority 4 cancelled, lower priority work ran. |
+| FND-004 | fixed | Boot mismatch resets the open interval; a simulated reboot left the exported value unchanged. |
+| FND-005 | fixed | TYPE tokens are lowercase; node_exporter 1.13.1 accepts all 114 series. |
+| FND-006 | fixed | Under umask 077 the textfile is 0644. |
+| FND-007 | fixed | The operator series is no longer exported. |
+| FND-008 | fixed | A missing state path exits 2 and is not created. |
+| FND-009 | fixed | The temporary file is removed on failure; test present. |
+| FND-010 | fixed | Snapshot and replacement run under the state lock (consequence recorded as FND-016). |
+| FND-011 | fixed | Named defaulted maps load older data (the reverse direction is FND-015). |
+| FND-012 | fixed | Only State::next is evaluated (the way it is evaluated is FND-017). |
+| FND-013 | fixed | Queue wait uses persisted UTC timestamps (consequence recorded as FND-018). |
+| FND-014 | fixed | Outcome derives from the typed event phase. |
+| FND-015 | still-open | Found in round 2; no fix yet. |
+| FND-016 | still-open | Found in round 2; no fix yet. |
+| FND-017 | still-open | Found in round 2; no fix yet. |
+| FND-018 | still-open | Found in round 2; no fix yet. |
+| FND-019 | still-open | Found in round 2; no fix yet. |
+| FND-020 | still-open | Found in round 2; no fix yet. |
+| FND-021 | still-open | Found in round 2; no fix yet. |
+
+## New findings (disposition pass 2)
+
+Fix diff 97ba217..f4c1fab only. Gates at the new head: fmt check, clippy with warnings denied, and locked tests exit 0 (44 passed, 2 ignored).
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-015 | medium | Every transaction now fails if metrics.json cannot be read. A reason key unknown to the running binary made a live build be killed (reproduced); a failed sidecar write after state.json is committed also returns an error for a transition that already happened. | tools/locked-build/src/store.rs:122-136,182-188; tools/locked-build/src/metrics.rs:145,165 |
+| FND-016 | medium | The textfile write, with file and directory fsync, now runs while holding the scheduler lock, so a slow collector disk stalls admission and supervision. FR-015 says reading metrics never blocks admission longer than the state-read time. | tools/locked-build/src/runtime.rs:374-380 |
+| FND-017 | high | The fix adds second copies of existing rules: current_block_reason restates admission_reason's capacity and sample checks and repeats the reason list of from_admission_reason, store.rs re-implements runtime::clock_ms with silent fallbacks, and open_existing copies the state-directory check. High under the code-review duplication rule. | tools/locked-build/src/runtime.rs:395-423; tools/locked-build/src/store.rs:45-58,153-157 |
+| FND-018 | low | Event wait_ms is now wall-clock difference while reference.md still says durations use a monotonic clock and status wait_ms remains monotonic; a clock step distorts the histogram and events. | tools/locked-build/src/model.rs:246-249; tools/locked-build/reference.md:57 |
+| FND-019 | low | metrics.json is not tied to store_id. If state.json is recreated beside it, new events are ignored until their sequence passes the old one, so counters freeze silently. Reproduced. | tools/locked-build/src/metrics.rs:156-193 |
+| FND-020 | low | While a blocked interval is open every transaction changes metrics.json, so status, recover and wait polls now rewrite and fsync both files, defeating the unchanged-state skip. | tools/locked-build/src/store.rs:158-177 |
+| FND-021 | low | priority="other" is a label value that FR-015 and FR-011 do not define, and its zero series are exported on every host. | tools/locked-build/src/metrics.rs:25-47 |

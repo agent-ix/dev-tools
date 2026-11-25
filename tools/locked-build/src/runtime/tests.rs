@@ -90,7 +90,7 @@ fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
     Ok(())
 }
 
-/// Trace: FR-015-AC-1
+/// Trace: FR-015-AC-11
 #[test]
 fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_last_leave()
 -> Result<()> {
@@ -164,10 +164,60 @@ fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_las
     Ok(())
 }
 
+/// Trace: FR-015-AC-11
+#[test]
+fn blocked_interval_stops_after_selected_request_stops_polling() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let config_path = root.path().join("policy.json");
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    policy.memory_reserve_bytes = 2_000_000;
+    std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
+    let id = queued(&store)?;
+    let fence = claim_worker(
+        &store,
+        &id,
+        &ProcessIdentity {
+            pid: u32::MAX - 1,
+            started_seconds: 1,
+        },
+    )?
+    .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    assert!(matches!(
+        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+
+    store.transaction(|state, _| {
+        state.find_mut(&id)?.heartbeat_at_ms = Some(now_ms()?.saturating_sub(60_000));
+        Ok(())
+    })?;
+    let stopped = metrics(&store)?;
+    let value = metric_value(
+        &stopped,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    std::thread::sleep(Duration::from_millis(25));
+    let later = metrics(&store)?;
+    let later_value = metric_value(
+        &later,
+        "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
+    )
+    .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
+    .parse::<f64>()
+    .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    assert_eq!(value, later_value);
+    Ok(())
+}
+
 fn metric_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     text.lines().find_map(|line| line.strip_prefix(prefix))
 }
 
+/// Trace: FR-015-AC-1
 #[test]
 fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()> {
     let root = tempfile::tempdir()?;
@@ -200,6 +250,7 @@ fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()>
     Ok(())
 }
 
+/// Trace: FR-015-AC-10
 #[test]
 fn legacy_embedded_metrics_field_is_ignored_without_breaking_state_decode() -> Result<()> {
     let root = tempfile::tempdir()?;
@@ -230,8 +281,97 @@ fn legacy_embedded_metrics_field_is_ignored_without_breaking_state_decode() -> R
     Ok(())
 }
 
+/// Trace: FR-015-AC-10
 #[test]
-fn priorities_above_two_are_admitted_and_counted_under_other() -> Result<()> {
+fn missing_metrics_sidecar_does_not_abort_build_state_transaction() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    std::fs::write(store.path.join("metrics.json"), "{broken")?;
+    let id = queued(&store)?;
+    assert_eq!(
+        store.transaction(|state, _| Ok(state.find(&id)?.phase))?,
+        Phase::Queued
+    );
+    Ok(())
+}
+
+/// Trace: FR-015-AC-10
+#[test]
+fn metrics_write_failure_after_state_commit_does_not_fail_enqueue() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    std::fs::create_dir(store.path.join("metrics.json.next"))?;
+    let id = queued(&store)?;
+    assert_eq!(
+        store.transaction(|state, _| Ok(state.find(&id)?.phase))?,
+        Phase::Queued
+    );
+    Ok(())
+}
+
+/// Trace: FR-015-AC-10
+#[test]
+fn metrics_sidecar_is_rebound_when_state_file_is_recreated() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let _id = queued(&store)?;
+    let old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path.join("state.json"))?)?;
+    let old_id = old["store_id"]
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::State, "store id missing"))?;
+    std::fs::remove_file(store.path.join("state.json"))?;
+    let _ = metrics(&store)?;
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path.join("state.json"))?)?;
+    let metrics_sidecar: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.path.join("metrics.json"))?)?;
+    let new_id = state["store_id"]
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::State, "store id missing"))?;
+    assert_ne!(old_id, new_id);
+    assert_eq!(metrics_sidecar["store_id"].as_str(), Some(new_id));
+    assert!(state["requests"].as_array().is_none_or(Vec::is_empty));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-11
+#[test]
+fn status_and_repeat_wait_polls_do_not_rewrite_unchanged_metrics_sidecar() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let config_path = root.path().join("policy.json");
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    policy.memory_reserve_bytes = 2_000_000;
+    std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
+    let id = queued(&store)?;
+    let identity = ProcessIdentity {
+        pid: u32::MAX - 1,
+        started_seconds: 1,
+    };
+    let fence = claim_worker(&store, &id, &identity)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    assert!(matches!(
+        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+    let sidecar = store.path.join("metrics.json");
+    let first_inode = std::fs::metadata(&sidecar)?.ino();
+    let _ = status(&store)?;
+    assert_eq!(std::fs::metadata(&sidecar)?.ino(), first_inode);
+    assert!(matches!(
+        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+    assert_eq!(std::fs::metadata(&sidecar)?.ino(), first_inode);
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
+fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let config_path = root.path().join("policy.json");
@@ -272,11 +412,12 @@ fn priorities_above_two_are_admitted_and_counted_under_other() -> Result<()> {
         )
     })?;
     assert!(metrics(&store)?.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"other\",outcome=\"ok\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",priority=\"gate\",outcome=\"ok\"} 1"
     ));
     Ok(())
 }
 
+/// Trace: FR-015-AC-3
 #[test]
 fn concurrent_textfile_exports_are_serialized_and_leave_a_complete_document() -> Result<()> {
     let root = tempfile::tempdir()?;
@@ -300,6 +441,60 @@ fn concurrent_textfile_exports_are_serialized_and_leave_a_complete_document() ->
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
         .count();
     assert_eq!(leftovers, 0);
+    Ok(())
+}
+
+/// Trace: FR-015-AC-1
+#[test]
+fn slow_textfile_export_lock_does_not_hold_the_scheduler_state_lock() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let output = root.path().join("collector.prom");
+    let export_lock = store.lock_metrics_export()?;
+    let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(0);
+    let (done_sender, done_receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| -> Result<()> {
+        let exporter_store = &store;
+        let exporter_output = &output;
+        let exporter = scope.spawn(move || {
+            started_sender
+                .send(())
+                .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+            metrics_to_file(exporter_store, exporter_output)
+        });
+        started_receiver
+            .recv()
+            .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+        std::thread::sleep(Duration::from_millis(20));
+        let writer_store = &store;
+        let writer = scope.spawn(move || {
+            let result = enqueue(
+                writer_store,
+                "test:team:lead",
+                "TEST-DURING-EXPORT",
+                1,
+                0,
+                &["/usr/bin/true".into()],
+            );
+            let _ = done_sender.send(result);
+        });
+        let enqueue_result = done_receiver.recv_timeout(Duration::from_secs(1));
+        drop(export_lock);
+        assert!(
+            enqueue_result
+                .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?
+                .is_ok(),
+            "admission transaction should complete while export I/O is blocked"
+        );
+        writer
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "enqueue thread panicked"))?;
+        exporter
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "export thread panicked"))??;
+        Ok(())
+    })?;
+    assert!(output.exists());
     Ok(())
 }
 

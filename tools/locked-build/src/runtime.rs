@@ -220,6 +220,19 @@ fn recover_with_processes(
         let clock = clock_ms()?;
         let processes = read_processes();
         let rebooted = state.boot_time != sysinfo::System::boot_time();
+        if rebooted {
+            let new_boot_ms = sysinfo::System::boot_time().saturating_mul(1_000);
+            for request in state
+                .requests
+                .iter()
+                .filter(|request| request.phase == Phase::Queued)
+            {
+                state.metrics.record_pre_reboot_wait(
+                    &request.id.0,
+                    new_boot_ms.saturating_sub(request.enqueued_at_ms),
+                );
+            }
+        }
         let mut respawn = Vec::new();
         let mut finish = Vec::new();
         for request in &mut state.requests {
@@ -366,30 +379,16 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
 
 pub(crate) fn metrics(store: &Store) -> Result<String> {
     store.transaction(|state, config| {
-        refresh_metric_interval(state)?;
-        state.metrics.exposition(state, config)
+        state
+            .metrics
+            .exposition(state, config, now_ms()?, clock_ms()?)
     })
 }
 
 pub(crate) fn metrics_to_file(store: &Store, path: &Path) -> Result<()> {
-    store.transaction(|state, config| {
-        refresh_metric_interval(state)?;
-        let text = state.metrics.exposition(state, config)?;
-        crate::metrics::write_atomic(path, &text)
-    })
-}
-
-fn refresh_metric_interval(state: &mut crate::model::State) -> Result<()> {
-    let clock = clock_ms()?;
-    if state
-        .requests
-        .iter()
-        .any(|request| request.phase == Phase::Queued)
-    {
-        state.metrics.checkpoint_active(clock)
-    } else {
-        state.metrics.close_block(clock)
-    }
+    let _export_lock = store.lock_metrics_export()?;
+    let text = metrics(store)?;
+    crate::metrics::write_atomic(path, &text)
 }
 
 fn current_block_reason(
@@ -398,27 +397,12 @@ fn current_block_reason(
     sample: Option<&HostSample>,
     now: u64,
     clock: u64,
-) -> Result<Option<&'static str>> {
+) -> Result<Option<(RequestId, &'static str)>> {
     let Some(next) = state.next(config, clock) else {
         return Ok(None);
     };
-    if u64::from(state.used()) + u64::from(next.units) > u64::from(config.capacity_units) {
-        return Ok(None);
-    }
-    let reason = match sample {
-        Some(sample) => sample.block_reason(config, now, state.used(), next.units),
-        None => Some("host_sample_unavailable"),
-    };
-    Ok(reason.filter(|reason| {
-        matches!(
-            *reason,
-            "memory_reserve"
-                | "disk_reserve"
-                | "host_load"
-                | "host_sample_unavailable"
-                | "host_sample_invalid_or_stale"
-        )
-    }))
+    let reason = state.admission_reason(&next.id, config, sample, now, clock)?;
+    Ok(reason.map(|reason| (next.id.clone(), reason)))
 }
 
 pub(crate) fn cancel(store: &Store, id: &RequestId) -> Result<()> {
@@ -546,8 +530,13 @@ fn admit_worker(
             request.heartbeat_at_ms = Some(now);
             request.reason = reason.map(str::to_owned);
         }
-        let blocked_reason = current_block_reason(state, config, sample.as_ref(), now, clock)?;
-        state.metrics.observe_block(blocked_reason, clock)?;
+        let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
+        state.metrics.observe_block(
+            blocked.as_ref().map(|(_, reason)| *reason),
+            blocked.as_ref().map(|(id, _)| id.0.as_str()),
+            now,
+            clock,
+        )?;
         if reason.is_some() {
             return Ok(Admission::Waiting(config.poll_ms));
         }

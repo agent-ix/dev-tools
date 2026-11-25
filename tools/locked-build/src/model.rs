@@ -230,6 +230,10 @@ impl State {
         clock: u64,
     ) -> Result<()> {
         let request = self.find(id)?;
+        let monotonic_wait = request
+            .started_clock_ms
+            .unwrap_or(clock)
+            .saturating_sub(request.enqueued_clock_ms);
         let event = Event {
             schema_version: 1,
             event_id: format!("{}:e{}", self.store_id, self.next_event),
@@ -243,10 +247,7 @@ impl State {
             priority: request.priority,
             capacity_units: config.capacity_units,
             free_units: config.capacity_units.saturating_sub(self.used()),
-            wait_ms: request
-                .started_at_ms
-                .unwrap_or(now)
-                .saturating_sub(request.enqueued_at_ms),
+            wait_ms: monotonic_wait,
             hold_ms: request
                 .started_clock_ms
                 .map(|started| clock.saturating_sub(started)),

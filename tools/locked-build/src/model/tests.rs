@@ -98,16 +98,33 @@ fn equal_priority_is_fifo_and_priority_wins_before_reservation() {
 
 /// Trace: FR-015-AC-3
 #[test]
-fn queue_wait_event_uses_utc_age_when_monotonic_clock_resets_after_reboot() -> Result<()> {
+fn queue_wait_event_uses_monotonic_age_after_reboot_recovery() -> Result<()> {
     let config = policy();
     let mut queued = request(1, 0, 1, 1_000);
-    queued.enqueued_clock_ms = 80_000;
+    queued.enqueued_clock_ms = 20;
     queued.phase = Phase::Running;
-    queued.started_at_ms = Some(5_000);
+    queued.started_at_ms = Some(6_080);
     queued.started_clock_ms = Some(100);
     let mut state = state(vec![queued]);
-    state.event(&RequestId("r1".into()), &config, 5_000, 100)?;
-    assert_eq!(state.events[0].wait_ms, 4_000);
+    state.boot_time = 5;
+    state.event(&RequestId("r1".into()), &config, 6_080, 100)?;
+    assert_eq!(state.events[0].wait_ms, 80);
+    Ok(())
+}
+
+/// Trace: FR-015-AC-3
+#[test]
+fn queue_wait_event_uses_monotonic_age_despite_wall_clock_step() -> Result<()> {
+    let config = policy();
+    let mut queued = request(1, 0, 1, 6_000);
+    queued.enqueued_clock_ms = 100;
+    queued.phase = Phase::Running;
+    queued.started_at_ms = Some(999_999_999);
+    queued.started_clock_ms = Some(250);
+    let mut state = state(vec![queued]);
+    state.boot_time = 5;
+    state.event(&RequestId("r1".into()), &config, 999_999_999, 250)?;
+    assert_eq!(state.events[0].wait_ms, 150);
     Ok(())
 }
 
