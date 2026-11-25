@@ -39,6 +39,31 @@ choose a representation whose coverage can be audited directly.
    finding using the contract and consequence below, then write the review
    artifact and dispositions as required by `code-review`.
 
+## Change impact and requirement trace
+
+Applies in repositories that have requirement specs and a trace library
+(`ix-trace-rs` or the Python/TypeScript equivalent).
+
+- Every new test carries a trace tag, such as `#[trace("FR-106-AC-80")]`, for the criteria it asserts.
+- A new or changed function that implements an acceptance criterion carries `#[implements("FR-106-AC-80")]` or the language's equivalent. In Rust write `use ix_trace_rs::implements;` and use the bare attribute: a path-qualified one compiles but the tools do not read it.
+- Name the criterion, not just the requirement. Tag only what the code really implements; if unsure, do not tag and say so. `implements` is never test evidence. Tag as you touch code; mass backfill only when ticketed.
+
+When you change code that has no requirement tags:
+
+1. Find each changed function's criteria from nearby comments, `quire trace --file <path>` and the tests that call it.
+2. Find related code that may need the same change: callers, the other route, producer or checker, sibling functions, other code implementing the same criterion.
+3. Run added and edited tests, the named filters from the repository's test-selection recipe where it has one, and tests for the criteria of the functions you changed. Focused tests only.
+4. Tag what you changed, and related code you confirmed shares a criterion.
+5. In the PR, list the criteria, the related code you checked and the tests run. The reviewer checks that list and the tags.
+
+Applies when a change moves the revision or version of something from another agent-ix repository: a library, a shared spec or schema, grammar or test data (a pin, `rev`, tag or lockfile entry).
+
+1. Record the old and new revision.
+2. Fetch the dependency and list what changed between them (`git diff --name-status <old> <new>`). For code, name the public items that changed.
+3. Search this repository for references to each changed file or item.
+4. Run the tests that refer to them, selected by name or module filter. Focused tests only.
+5. In the PR, give both revisions, the changed files and items referenced here, and the tests run. If nothing refers to any of them, say so. The reviewer checks this comparison.
+
 ## Core review checks
 
 - **API and docs:** For changed public items, check intended consumers,
