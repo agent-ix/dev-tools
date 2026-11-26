@@ -26,6 +26,6 @@ locked-build cancel REQUEST-ID
 
 `queued` means the request is accepted and waiting for admission. Its command has not started. `running` means it owns a lease and its command has started. Use the request id from status to cancel queued or running work.
 
-`rss_cap` means memory enforcement killed the command for exceeding its cap. `memory_cap_unavailable` means policy required a systemd scope, the scope could not start, and the command was not launched.
+`rss_cap` means memory enforcement killed the command for exceeding its cap. `memory_cap_unavailable` means policy required memory enforcement that the launcher could not establish, so the command was not launched.
 
 Use `locked-build policy show` to inspect the effective policy. `locked-build policy init --force` regenerates it.

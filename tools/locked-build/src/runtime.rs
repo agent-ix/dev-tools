@@ -878,16 +878,7 @@ fn supervise(
         CommandStart::Started(child) => child,
         CommandStart::Refused => {
             store.transaction(|state, config| {
-                state.finish(
-                    &request.id,
-                    Completion {
-                        reason: Some("memory_cap_unavailable"),
-                        ..Completion::default()
-                    },
-                    config,
-                    now_ms()?,
-                    clock_ms()?,
-                )
+                finish_refused_command(state, config, &request.id, fence)
             })?;
             return Ok(());
         }
@@ -901,6 +892,25 @@ fn supervise(
         interrupted,
         child,
         |evidence, processes, group| evidence.observe_group(processes, group),
+    )
+}
+
+fn finish_refused_command(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    fence: &WorkerFence,
+) -> Result<()> {
+    fence.require_running(state.find(id)?)?;
+    state.finish(
+        id,
+        Completion {
+            reason: Some("memory_cap_unavailable"),
+            ..Completion::default()
+        },
+        config,
+        now_ms()?,
+        clock_ms()?,
     )
 }
 

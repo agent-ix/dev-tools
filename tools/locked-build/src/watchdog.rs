@@ -158,7 +158,7 @@ fn observe(
                 .lease_record
                 .as_ref()
                 .and_then(|record| {
-                    rss_fallback_cap(record.memory_enforcement, request.memory_cap_bytes, None)
+                    rss_fallback_cap(record.memory_enforcement, request.memory_cap_bytes)
                 })
                 .is_some_and(|cap| {
                     processes
@@ -205,14 +205,12 @@ fn observe(
     })
 }
 
-fn rss_fallback_cap(
-    enforcement: MemoryEnforcement,
-    request_cap: Option<u64>,
-    policy_cap: Option<u64>,
-) -> Option<u64> {
-    (enforcement == MemoryEnforcement::RssWatchdog)
-        .then(|| request_cap.or(policy_cap))
-        .flatten()
+fn rss_fallback_cap(enforcement: MemoryEnforcement, request_cap: Option<u64>) -> Option<u64> {
+    if enforcement == MemoryEnforcement::RssWatchdog {
+        request_cap
+    } else {
+        None
+    }
 }
 
 fn enforce(

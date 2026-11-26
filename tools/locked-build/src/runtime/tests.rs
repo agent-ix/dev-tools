@@ -62,6 +62,36 @@ fn queued(store: &Store) -> Result<RequestId> {
     )
 }
 
+/// Trace: FR-005-AC-4
+#[test]
+fn refused_command_cannot_finish_after_worker_fence_changes() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    store.transaction(|state, config| {
+        let identity = ProcessIdentity {
+            pid: 41,
+            started_seconds: 7,
+        };
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.worker = Some(identity.clone());
+        request.worker_generation = 2;
+        request.started_at_ms = Some(1);
+        request.started_clock_ms = Some(1);
+        let stale_fence = WorkerFence {
+            identity,
+            generation: 1,
+        };
+
+        assert!(finish_refused_command(state, config, &id, &stale_fence).is_err());
+        let request = state.find(&id)?;
+        assert_eq!(request.phase, Phase::Running);
+        assert_eq!(request.reason, None);
+        Ok(())
+    })
+}
+
 /// Trace: FR-011-AC-7
 #[test]
 fn direct_run_default_class_is_persisted_on_the_request() -> Result<()> {
