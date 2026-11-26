@@ -30,6 +30,10 @@ pub(crate) fn policy() -> Config {
         max_bytes: None,
         priority_classes: std::collections::BTreeMap::new(),
         real_cargo: None,
+        memory_admission: crate::config::MemoryAdmissionMode::LiveAvailable,
+        memory_budget_bytes: None,
+        memory_cap_bytes: None,
+        memory_cap_by_class: std::collections::BTreeMap::new(),
     }
 }
 
@@ -51,6 +55,7 @@ fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
         ticket: "TEST-1".into(),
         units,
         priority,
+        memory_cap_bytes: None,
         enqueued_at_ms: time,
         enqueued_clock_ms: time,
         started_at_ms: None,
@@ -253,6 +258,34 @@ fn missing_stale_wrong_host_and_resource_pressure_refuse_admission() -> Result<(
     input = sample();
     input.load_one = config.maximum_load;
     assert_eq!(input.block_reason(&config, 500, 0, 1), Some("host_load"));
+    Ok(())
+}
+
+#[test]
+fn lease_accounted_admission_uses_caps_without_reading_available_memory() -> Result<()> {
+    let mut config = policy();
+    config.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+    config.memory_budget_bytes = Some(1_000);
+    config.memory_cap_bytes = Some(400);
+
+    let mut running = request(1, 0, 1, 0);
+    running.phase = Phase::Running;
+    running.memory_cap_bytes = Some(650);
+    let mut queued = request(2, 0, 1, 0);
+    queued.memory_cap_bytes = Some(350);
+    let mut state = state(vec![running, queued]);
+    let mut sample = sample();
+    sample.memory_available_bytes = 0;
+
+    assert_eq!(
+        state.admission_reason(&RequestId("r2".into()), &config, Some(&sample), 500, 500,)?,
+        None
+    );
+    state.find_mut(&RequestId("r2".into()))?.memory_cap_bytes = Some(351);
+    assert_eq!(
+        state.admission_reason(&RequestId("r2".into()), &config, Some(&sample), 500, 500,)?,
+        Some("memory_budget")
+    );
     Ok(())
 }
 

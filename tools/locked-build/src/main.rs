@@ -133,11 +133,14 @@ fn execute(cli: Cli) -> Result<i32> {
             class,
             command,
         } => {
-            let priority = match class {
-                Some(class) => runtime::priority_for_class(&store, &class)?,
+            let class_name = class.as_deref();
+            let priority = match class_name {
+                Some(class) => runtime::priority_for_class(&store, class)?,
                 None => priority.unwrap_or(0),
             };
-            let id = runtime::enqueue(&store, &owner, &ticket, units, priority, &command)?;
+            let id = runtime::enqueue(
+                &store, &owner, &ticket, units, priority, class_name, &command,
+            )?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let worker = runtime::spawn_worker(&store, &id)?;
             runtime::wait(&store, &id, vec![worker])

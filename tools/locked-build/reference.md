@@ -9,7 +9,8 @@ A host policy is a JSON document defining build admission and supervision limits
 
 All fields are required except `sample_file`, `cargo_build_jobs`,
 `rust_test_threads`, `cargo_incremental`, `target_root`, `trim_after_ms`, and
-`max_bytes`, `priority_classes`, and `real_cargo`; unknown fields are rejected.
+`max_bytes`, `priority_classes`, `real_cargo`, `memory_budget_bytes`,
+`memory_cap_bytes`, and `memory_cap_by_class`; unknown fields are rejected.
 Relative filesystem paths resolve from the policy file's directory.
 The polling interval cannot exceed the hold deadline or termination grace.
 
@@ -20,6 +21,10 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `maximum_units` | Largest feasible request; temporary shrink preserves queue age. |
 | `memory_per_unit_bytes` | RAM budget charged per requested unit. |
 | `memory_reserve_bytes` | RAM retained outside build leases. |
+| `memory_admission` | `live_available` (default) compares `MemAvailable` with lease-unit charges; `lease_accounted` charges fixed lease caps against `memory_budget_bytes` and does not read live available memory. |
+| `memory_budget_bytes` | Total concurrent lease-cap budget required by `lease_accounted` admission. |
+| `memory_cap_bytes` | Optional default cap for each lease. On Linux it is enforced with a systemd scope; on macOS the process-group RSS watchdog enforces it. |
+| `memory_cap_by_class` | Optional per-class cap overrides for `must-fix`, `point`, `block`, or `periodic`. |
 | `disk_reserve_bytes` | Minimum free bytes for admission. |
 | `disk_path` | Directory selecting the measured filesystem. |
 | `maximum_load` | New admission requires load strictly below this value. |
@@ -61,6 +66,14 @@ The PATH shim reads its policy from `LOCKED_BUILD_CONFIG`, defaulting to
 to `point`, `cargo-shim`, and `MANUAL`. A leased command receives
 `LOCKED_BUILD_LEASE=1`; when a shim invocation sees that marker, it execs
 `real_cargo` directly to avoid queue recursion.
+
+In `lease_accounted` mode, admission requires the sum of active lease caps plus
+the requested lease cap to be at most `memory_budget_bytes`; a zero live
+`memory_available_bytes` value does not block the request. Linux starts capped
+commands as `systemd-run --user --scope --quiet -p MemoryMax=<cap>
+-p MemorySwapMax=0 -- <command>`. On macOS, where systemd-run is unavailable,
+the watchdog samples process-group RSS and kills a group that exceeds its cap.
+Cap-triggered termination is counted as `rss_cap`.
 
 Resource observations use available RAM, available filesystem bytes, and one-minute load.
 An external sample includes exactly these fields:

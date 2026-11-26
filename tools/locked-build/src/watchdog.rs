@@ -121,6 +121,7 @@ enum Decision {
     Done,
     Observe {
         stop: bool,
+        memory_cap_exceeded: bool,
         grace_ms: u64,
         poll_ms: u64,
     },
@@ -152,6 +153,17 @@ fn observe(
         {
             request.stop = Some(StopReason::TimedOut);
         }
+        #[cfg(not(target_os = "linux"))]
+        if request.stop.is_none() {
+            let memory_cap = request.memory_cap_bytes.or(config.memory_cap_bytes);
+            if memory_cap.is_some_and(|cap| {
+                processes
+                    .group_memory_bytes(watchdog.pid, &[watchdog.pid])
+                    .is_some_and(|used| used > cap)
+            }) {
+                request.stop = Some(StopReason::MemoryCap);
+            }
+        }
         let worker_state = processes.identity(worker, id);
         let worker_lost = matches!(
             worker_state,
@@ -182,6 +194,7 @@ fn observe(
         }
         Ok(Decision::Observe {
             stop: request.stop.is_some() || request.command_finished.is_some(),
+            memory_cap_exceeded: request.stop == Some(StopReason::MemoryCap),
             grace_ms: config.termination_grace_ms,
             poll_ms: config.poll_ms,
         })
@@ -210,12 +223,22 @@ fn enforce(
             Decision::Done => return Ok(()),
             Decision::Observe {
                 stop,
+                memory_cap_exceeded,
                 grace_ms,
                 poll_ms,
             } => {
                 if stop {
                     let processes = Processes::read();
-                    if let Some(started) = stopping {
+                    if memory_cap_exceeded {
+                        processes.signal_member_owned(
+                            watchdog,
+                            id,
+                            "watchdog",
+                            watchdog.pid,
+                            Signal::SIGKILL,
+                        )?;
+                        stopping = Some(Instant::now());
+                    } else if let Some(started) = stopping {
                         if started.elapsed() >= Duration::from_millis(grace_ms) {
                             processes.signal_member_owned(
                                 watchdog,

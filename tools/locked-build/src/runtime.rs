@@ -46,6 +46,7 @@ pub(crate) fn enqueue(
     ticket: &str,
     units: u32,
     priority: u32,
+    class: Option<&str>,
     command: &[String],
 ) -> Result<RequestId> {
     if owner.is_empty()
@@ -89,6 +90,9 @@ pub(crate) fn enqueue(
             ticket: ticket.to_owned(),
             units,
             priority,
+            memory_cap_bytes: class
+                .and_then(|name| config.memory_cap_by_class.get(name).copied())
+                .or(config.memory_cap_bytes),
             enqueued_at_ms: now,
             enqueued_clock_ms: clock,
             started_at_ms: None,
@@ -665,7 +669,12 @@ fn supervise(
                     Completion {
                         code: outcome.code(),
                         signal: outcome.signal(),
-                        reason: None,
+                        reason: (outcome.signal() == Some(signal_hook::consts::SIGKILL)
+                            && request
+                                .memory_cap_bytes
+                                .or(config.memory_cap_bytes)
+                                .is_some())
+                        .then_some("rss_cap"),
                     },
                 )?;
                 return Ok(None);
@@ -710,15 +719,78 @@ fn start_command(
             .fold(0_u32, |total, candidate| {
                 total.saturating_add(candidate.units)
             });
-        let mut command = Command::new(program);
+        let launch_spec = lease_command_spec(
+            LauncherPlatform::current(),
+            program,
+            &request.command[1..],
+            request.memory_cap_bytes.or(config.memory_cap_bytes),
+        );
+        let mut command = Command::new(launch_spec.program);
         command
-            .args(request.command.iter().skip(1))
+            .args(launch_spec.arguments)
             .current_dir(&request.cwd)
             .process_group(group);
         apply_build_environment(&mut command, config, active_units);
         apply_target_environment(&mut command, config, request)?;
         command.spawn().map_err(Into::into)
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LauncherPlatform {
+    Linux,
+    Other,
+}
+
+impl LauncherPlatform {
+    fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self::Linux
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::Other
+        }
+    }
+}
+
+struct LaunchSpec {
+    program: std::ffi::OsString,
+    arguments: Vec<std::ffi::OsString>,
+}
+
+fn lease_command_spec(
+    platform: LauncherPlatform,
+    program: &str,
+    arguments: &[String],
+    memory_cap_bytes: Option<u64>,
+) -> LaunchSpec {
+    if platform == LauncherPlatform::Linux
+        && let Some(memory_cap_bytes) = memory_cap_bytes
+    {
+        let mut command_arguments = vec![
+            "--user".into(),
+            "--scope".into(),
+            "--quiet".into(),
+            "-p".into(),
+            format!("MemoryMax={memory_cap_bytes}").into(),
+            "-p".into(),
+            "MemorySwapMax=0".into(),
+            "--".into(),
+            program.into(),
+        ];
+        command_arguments.extend(arguments.iter().map(Into::into));
+        LaunchSpec {
+            program: "systemd-run".into(),
+            arguments: command_arguments,
+        }
+    } else {
+        LaunchSpec {
+            program: program.into(),
+            arguments: arguments.iter().map(Into::into).collect(),
+        }
+    }
 }
 
 fn apply_build_environment(

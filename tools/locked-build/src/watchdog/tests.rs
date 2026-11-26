@@ -49,7 +49,15 @@ fn watchdog_snapshot_scenario(root: &Path, mode: &str) -> Result<()> {
     let config = root.join("policy.json");
     fs::write(&config, include_bytes!("../../policy.example.json"))?;
     let store = Store::open(&root.join("state"), &config)?;
-    let id = crate::runtime::enqueue(&store, "test:team:lead", "TEST-1", 1, 0, &["unused".into()])?;
+    let id = crate::runtime::enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-1",
+        1,
+        0,
+        None,
+        &["unused".into()],
+    )?;
     let watchdog = Processes::read().current()?;
     let worker = ProcessIdentity {
         pid: u32::MAX - 1,

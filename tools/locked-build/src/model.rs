@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, HostSample};
+use crate::config::{Config, HostSample, MemoryAdmissionMode};
 use crate::error::{Error, ErrorCode, Result};
 use crate::metrics::MetricsState;
 
@@ -50,6 +50,7 @@ impl Phase {
 pub(crate) enum StopReason {
     Cancelled,
     TimedOut,
+    MemoryCap,
 }
 
 #[derive(Default)]
@@ -75,6 +76,9 @@ pub(crate) struct Request {
     pub ticket: String,
     pub units: u32,
     pub priority: u32,
+    /// Memory limit reserved for this lease when policy configures one.
+    #[serde(default)]
+    pub memory_cap_bytes: Option<u64>,
     pub enqueued_at_ms: u64,
     pub enqueued_clock_ms: u64,
     pub started_at_ms: Option<u64>,
@@ -175,6 +179,7 @@ impl State {
                 || !sequences.insert(request.sequence)
                 || request.id.0 != format!("{}:r{}", self.store_id, request.sequence)
                 || request.units == 0
+                || request.memory_cap_bytes.is_some_and(|cap| cap == 0)
                 || request.command.is_empty()
                 || request.command.len() > 256
                 || request
@@ -220,6 +225,20 @@ impl State {
             .iter()
             .filter(|request| request.phase == Phase::Running)
             .fold(0_u32, |sum, request| sum.saturating_add(request.units))
+    }
+
+    fn memory_used(&self, config: &Config) -> u64 {
+        self.requests
+            .iter()
+            .filter(|request| request.phase == Phase::Running)
+            .fold(0_u64, |sum, request| {
+                sum.saturating_add(
+                    request
+                        .memory_cap_bytes
+                        .or(config.memory_cap_bytes)
+                        .unwrap_or(0),
+                )
+            })
     }
 
     pub(crate) fn event(
@@ -314,7 +333,20 @@ impl State {
         let Some(sample) = sample else {
             return Ok(Some("host_sample_unavailable"));
         };
-        Ok(sample.block_reason(config, now, used, request.units))
+        if let Some(reason) = sample.block_reason(config, now, used, request.units) {
+            return Ok(Some(reason));
+        }
+        if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
+            let budget = config.memory_budget_bytes.unwrap_or(0);
+            let cap = request
+                .memory_cap_bytes
+                .or(config.memory_cap_bytes)
+                .unwrap_or(0);
+            if self.memory_used(config).saturating_add(cap) > budget {
+                return Ok(Some("memory_budget"));
+            }
+        }
+        Ok(None)
     }
 
     pub(crate) fn finish(
@@ -337,6 +369,7 @@ impl State {
         request.phase = match request.stop {
             Some(StopReason::Cancelled) => Phase::Cancelled,
             Some(StopReason::TimedOut) => Phase::TimedOut,
+            Some(StopReason::MemoryCap) => Phase::Failed,
             None if code == Some(0) && signal.is_none() && reason.is_none() => Phase::Succeeded,
             None => Phase::Failed,
         };
@@ -347,6 +380,7 @@ impl State {
             .map(|stop| match stop {
                 StopReason::Cancelled => "cancelled".to_owned(),
                 StopReason::TimedOut => "hold_timeout".to_owned(),
+                StopReason::MemoryCap => "rss_cap".to_owned(),
             })
             .or_else(|| reason.map(str::to_owned))
             .or_else(|| {

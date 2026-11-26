@@ -94,6 +94,9 @@ impl Outcome {
     }
 
     fn from_event(event: &Event) -> Option<Self> {
+        if event.reason.as_deref() == Some("rss_cap") {
+            return Some(Self::RssCap);
+        }
         match event.state {
             crate::model::Phase::Succeeded => Some(Self::Ok),
             crate::model::Phase::Failed => Some(Self::Failed),
@@ -663,6 +666,7 @@ mod tests {
             ticket: "SWM-242".to_owned(),
             units: 1,
             priority: 0,
+            memory_cap_bytes: None,
             enqueued_at_ms: 0,
             enqueued_clock_ms: 0,
             started_at_ms: None,
@@ -1100,6 +1104,7 @@ mod tests {
             ticket: "PRIVATE-TICKET".to_owned(),
             units: 1,
             priority: 0,
+            memory_cap_bytes: None,
             enqueued_at_ms: 100,
             enqueued_clock_ms: 100,
             started_at_ms: None,
@@ -1198,5 +1203,13 @@ mod tests {
             hold_ms: None,
             reason: None,
         }
+    }
+
+    #[test]
+    fn cap_kill_reason_is_exported_as_rss_cap_outcome() {
+        let mut event = event(1, "failed", 0, 0);
+        event.reason = Some("rss_cap".to_owned());
+
+        assert_eq!(Outcome::from_event(&event), Some(Outcome::RssCap));
     }
 }

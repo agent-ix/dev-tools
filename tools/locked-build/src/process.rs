@@ -26,6 +26,8 @@ pub(crate) struct Processes {
 struct Row {
     start: u64,
     group: Option<u32>,
+    #[cfg(not(target_os = "linux"))]
+    memory_bytes: u64,
     arguments: Vec<String>,
     zombie: bool,
 }
@@ -60,6 +62,8 @@ impl Processes {
                     Row {
                         start: process.start_time(),
                         group,
+                        #[cfg(not(target_os = "linux"))]
+                        memory_bytes: process.memory(),
                         arguments: process
                             .cmd()
                             .iter()
@@ -145,6 +149,19 @@ impl Processes {
         })
     }
 
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn group_memory_bytes(&self, group: u32, excluding: &[u32]) -> Option<u64> {
+        self.complete.then(|| {
+            self.rows
+                .iter()
+                .filter(|(pid, row)| {
+                    row.group == Some(group) && !row.zombie && !excluding.contains(pid)
+                })
+                .map(|(_, row)| row)
+                .fold(0_u64, |sum, row| sum.saturating_add(row.memory_bytes))
+        })
+    }
+
     pub(crate) fn signal_member_owned(
         &self,
         identity: &ProcessIdentity,
@@ -202,6 +219,8 @@ mod tests {
                 Row {
                     start: 100,
                     group: Some(77),
+                    #[cfg(not(target_os = "linux"))]
+                    memory_bytes: 4_096,
                     arguments: vec!["unrelated".into()],
                     zombie: false,
                 },
@@ -220,5 +239,46 @@ mod tests {
                 .map_err(|error| error.code),
             Err(ErrorCode::State)
         );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn rss_fallback_sums_only_live_group_members_and_excludes_watchdog() {
+        let processes = Processes {
+            complete: true,
+            rows: BTreeMap::from([
+                (
+                    77,
+                    Row {
+                        start: 1,
+                        group: Some(77),
+                        memory_bytes: 100,
+                        arguments: vec!["watchdog".into()],
+                        zombie: false,
+                    },
+                ),
+                (
+                    78,
+                    Row {
+                        start: 1,
+                        group: Some(77),
+                        memory_bytes: 600,
+                        arguments: vec!["cargo".into()],
+                        zombie: false,
+                    },
+                ),
+                (
+                    79,
+                    Row {
+                        start: 1,
+                        group: Some(79),
+                        memory_bytes: 900,
+                        arguments: vec!["unrelated".into()],
+                        zombie: false,
+                    },
+                ),
+            ]),
+        };
+        assert_eq!(processes.group_memory_bytes(77, &[77]), Some(600));
     }
 }

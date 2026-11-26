@@ -111,10 +111,19 @@ root. On lease end, the tool deletes that owner's target when `trim_after_ms` or
 `max_bytes` is exceeded. It skips cleanup while another lease for the owner is
 active and refuses symlink entries in the target tree.
 
+The default `live_available` memory policy uses measured available memory and
+the existing per-unit reserve. `lease_accounted` instead admits a request only
+when its memory cap plus active lease caps fit `memory_budget_bytes`; it never
+reads live available memory. Per-class caps override the default cap. Linux
+applies caps through a transient systemd scope with swap disabled, while the
+macOS watchdog enforces the same cap from process-group RSS. A cap kill is
+reported under the existing `rss_cap` outcome.
+
 Capacity shrink preserves running commands and reports overcommit.
 New admission waits until current capacity and resource reserves permit it.
-Memory admission conservatively charges all declared running budgets against measured available RAM.
-This can leave additional headroom when running builds already consume their budgets.
+In `live_available` mode, memory admission conservatively charges all declared
+running budgets against measured available RAM. This can leave additional
+headroom when running builds already consume their budgets.
 
 ## Supervision and recovery
 

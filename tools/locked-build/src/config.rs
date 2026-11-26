@@ -9,6 +9,17 @@ use sysinfo::{Disks, System};
 
 use crate::error::{Error, ErrorCode, Result};
 
+/// Policy for admitting build leases against host memory.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryAdmissionMode {
+    /// Compare live available memory with per-unit leases and reserve.
+    #[default]
+    LiveAvailable,
+    /// Charge each active lease's fixed memory cap against a configured budget.
+    LeaseAccounted,
+}
+
 /// Admission policy. Every capacity and limit is explicitly configured.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +82,18 @@ pub struct Config {
     /// Real Cargo executable used by the optional PATH shim.
     #[serde(default)]
     pub real_cargo: Option<PathBuf>,
+    /// Selects live available-memory admission or fixed lease accounting.
+    #[serde(default)]
+    pub memory_admission: MemoryAdmissionMode,
+    /// Total build memory budget for `lease_accounted` admission.
+    #[serde(default)]
+    pub memory_budget_bytes: Option<u64>,
+    /// Default enforced memory cap for a lease, if configured.
+    #[serde(default)]
+    pub memory_cap_bytes: Option<u64>,
+    /// Per-class memory-cap overrides.
+    #[serde(default)]
+    pub memory_cap_by_class: BTreeMap<String, u64>,
 }
 
 impl Config {
@@ -131,6 +154,23 @@ impl Config {
                 matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic")
                     && *priority <= self.maximum_priority
             })
+            && self.memory_cap_bytes.is_none_or(|cap| cap > 0)
+            && self.memory_cap_by_class.iter().all(|(name, cap)| {
+                matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic") && *cap > 0
+            })
+            && (match self.memory_admission {
+                MemoryAdmissionMode::LiveAvailable => true,
+                MemoryAdmissionMode::LeaseAccounted => {
+                    self.memory_budget_bytes.is_some_and(|budget| budget > 0)
+                        && self.memory_cap_bytes.is_some_and(|cap| {
+                            cap > 0 && self.memory_budget_bytes.is_some_and(|budget| cap <= budget)
+                        })
+                        && self.memory_cap_by_class.values().all(|cap| {
+                            self.memory_budget_bytes
+                                .is_some_and(|budget| *cap <= budget)
+                        })
+                }
+            })
             && u64::from(self.maximum_units)
                 .checked_mul(self.memory_per_unit_bytes)
                 .is_some()
@@ -151,7 +191,6 @@ impl Config {
             let sample: HostSample = serde_json::from_reader(std::fs::File::open(path)?)?;
             return Ok(sample);
         }
-        let system = System::new_all();
         let path = self.disk_path.canonicalize()?;
         let disks = Disks::new_with_refreshed_list();
         let disk = disks
@@ -160,10 +199,14 @@ impl Config {
             .filter(|disk| path.starts_with(disk.mount_point()))
             .max_by_key(|disk| disk.mount_point().components().count())
             .ok_or_else(|| Error::new(ErrorCode::Configuration, "disk telemetry unavailable"))?;
+        let memory_available_bytes = match self.memory_admission {
+            MemoryAdmissionMode::LiveAvailable => System::new_all().available_memory(),
+            MemoryAdmissionMode::LeaseAccounted => u64::MAX,
+        };
         Ok(HostSample {
             host: self.host.clone(),
             observed_at_ms: now,
-            memory_available_bytes: system.available_memory(),
+            memory_available_bytes,
             disk_available_bytes: disk.available_space(),
             load_one: System::load_average().one,
         })
@@ -251,12 +294,14 @@ impl HostSample {
             if self.disk_available_bytes < config.disk_reserve_bytes {
                 reasons.push(BlockReason::TargetDisk);
             }
-            let needed = u64::from(leased)
-                .saturating_add(u64::from(requested))
-                .saturating_mul(config.memory_per_unit_bytes)
-                .saturating_add(config.memory_reserve_bytes);
-            if self.memory_available_bytes < needed {
-                reasons.push(BlockReason::Memory);
+            if config.memory_admission == MemoryAdmissionMode::LiveAvailable {
+                let needed = u64::from(leased)
+                    .saturating_add(u64::from(requested))
+                    .saturating_mul(config.memory_per_unit_bytes)
+                    .saturating_add(config.memory_reserve_bytes);
+                if self.memory_available_bytes < needed {
+                    reasons.push(BlockReason::Memory);
+                }
             }
         }
         BlockReason::select(&reasons).map(BlockReason::admission_reason)

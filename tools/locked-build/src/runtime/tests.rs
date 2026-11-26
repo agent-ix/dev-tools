@@ -37,6 +37,7 @@ fn queued(store: &Store) -> Result<RequestId> {
         "TEST-1",
         1,
         0,
+        None,
         &["/usr/bin/true".into()],
     )
 }
@@ -491,6 +492,7 @@ fn host_interval_reselects_the_next_queued_reason_after_head_cancellation() -> R
         "TEST-LARGE",
         2,
         0,
+        None,
         &["/usr/bin/true".into()],
     )?;
     let second = enqueue(
@@ -499,6 +501,7 @@ fn host_interval_reselects_the_next_queued_reason_after_head_cancellation() -> R
         "TEST-SMALL",
         1,
         0,
+        None,
         &["/usr/bin/true".into()],
     )?;
     for (id, pid) in [(&first, u32::MAX - 5), (&second, u32::MAX - 6)] {
@@ -665,6 +668,10 @@ fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()>
             max_bytes: None,
             priority_classes: std::collections::BTreeMap::new(),
             real_cargo: None,
+            memory_admission: crate::config::MemoryAdmissionMode::LiveAvailable,
+            memory_budget_bytes: None,
+            memory_cap_bytes: None,
+            memory_cap_by_class: std::collections::BTreeMap::new(),
         })?,
     )?;
     let missing = root.path().join("not-created");
@@ -723,6 +730,93 @@ fn named_priority_uses_policy_mapping_and_rejects_unconfigured_classes() -> Resu
     assert_eq!(priority_for_class(&store, "must-fix")?, 2);
     assert!(priority_for_class(&store, "missing").is_err());
     Ok(())
+}
+
+#[test]
+fn new_requests_use_per_class_memory_cap_overrides_and_default_cap() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.memory_cap_bytes = Some(512);
+    policy
+        .memory_cap_by_class
+        .insert("must-fix".to_owned(), 768);
+    policy.priority_classes.insert("must-fix".to_owned(), 2);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let class_id = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-CLASS",
+        1,
+        2,
+        Some("must-fix"),
+        &["/usr/bin/true".into()],
+    )?;
+    let default_id = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-DEFAULT",
+        1,
+        2,
+        None,
+        &["/usr/bin/true".into()],
+    )?;
+    store.transaction(|state, _| {
+        assert_eq!(state.find(&class_id)?.memory_cap_bytes, Some(768));
+        assert_eq!(state.find(&default_id)?.memory_cap_bytes, Some(512));
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn lease_launcher_builds_systemd_argv_without_spawning_a_cgroup() {
+    let spec = lease_command_spec(
+        LauncherPlatform::Linux,
+        "/usr/bin/cargo",
+        &[
+            "test".to_owned(),
+            "-p".to_owned(),
+            "locked-build".to_owned(),
+        ],
+        Some(4_294_967_296),
+    );
+    let actual: Vec<_> = spec
+        .arguments
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(spec.program, "systemd-run");
+    assert_eq!(
+        actual,
+        [
+            "--user",
+            "--scope",
+            "--quiet",
+            "-p",
+            "MemoryMax=4294967296",
+            "-p",
+            "MemorySwapMax=0",
+            "--",
+            "/usr/bin/cargo",
+            "test",
+            "-p",
+            "locked-build"
+        ]
+    );
+}
+
+#[test]
+fn non_linux_lease_launcher_uses_direct_command_for_watchdog_fallback() {
+    let spec = lease_command_spec(
+        LauncherPlatform::Other,
+        "/usr/bin/cargo",
+        &["check".to_owned()],
+        Some(1_024),
+    );
+    assert_eq!(spec.program, "/usr/bin/cargo");
+    assert_eq!(spec.arguments, ["check"]);
 }
 
 #[test]
@@ -973,6 +1067,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
         "TEST-PRIORITY",
         1,
         3,
+        None,
         &["/usr/bin/true".into()],
     )?;
     let fence = claim_worker(
@@ -1112,6 +1207,7 @@ fn slow_textfile_export_lock_does_not_hold_the_scheduler_state_lock() -> Result<
                 "TEST-DURING-EXPORT",
                 1,
                 0,
+                None,
                 &["/usr/bin/true".into()],
             );
             let _ = done_sender.send(result);
