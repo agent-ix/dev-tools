@@ -250,11 +250,28 @@ fn resolve_paths(
 }
 
 fn ensure_policy(path: &std::path::Path, force: bool) -> Result<()> {
+    let current_exe = std::env::current_exe()?;
+    ensure_policy_with_discovery(
+        path,
+        force,
+        std::env::var_os("PATH").as_deref(),
+        &current_exe,
+    )
+}
+
+fn ensure_policy_with_discovery(
+    path: &std::path::Path,
+    force: bool,
+    search_path: Option<&OsStr>,
+    current_exe: &std::path::Path,
+) -> Result<()> {
     if path.exists() && !force {
         crate::config::Config::read(path)?;
         return Ok(());
     }
-    let policy = crate::config::Config::measured_default()?;
+    let mut policy = crate::config::Config::measured_default()?;
+    policy.real_cargo =
+        search_path.and_then(|search_path| discover_real_cargo(search_path, current_exe));
     let parent = path.parent().ok_or_else(|| {
         crate::error::Error::new(
             crate::error::ErrorCode::Configuration,
@@ -300,6 +317,36 @@ fn ensure_policy(path: &std::path::Path, force: bool) -> Result<()> {
     Ok(())
 }
 
+fn discover_real_cargo(search_path: &OsStr, current_exe: &std::path::Path) -> Option<PathBuf> {
+    let current_exe = current_exe.canonicalize().ok()?;
+    std::env::split_paths(search_path).find_map(|directory| {
+        let candidate = directory.join("cargo").canonicalize().ok()?;
+        if candidate == current_exe {
+            return None;
+        }
+        let metadata = std::fs::metadata(&candidate).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        (metadata.permissions().mode() & 0o111 != 0).then_some(candidate)
+    })
+}
+
+fn read_shim_config(path: &std::path::Path) -> Result<config::Config> {
+    let current_exe = std::env::current_exe()?;
+    read_shim_config_with_discovery(path, std::env::var_os("PATH").as_deref(), &current_exe)
+}
+
+fn read_shim_config_with_discovery(
+    path: &std::path::Path,
+    search_path: Option<&OsStr>,
+    current_exe: &std::path::Path,
+) -> Result<config::Config> {
+    ensure_policy_with_discovery(path, false, search_path, current_exe)?;
+    config::Config::read(path)
+}
+
 fn default_owner() -> String {
     if let Some(owner) = std::env::var_os("LOCKED_BUILD_OWNER") {
         return owner.to_string_lossy().into_owned();
@@ -312,7 +359,6 @@ fn default_owner() -> String {
 
 fn derive_owner(user: &str, host: &str, cwd: Option<&std::path::Path>) -> String {
     let directory = cwd
-        .as_deref()
         .and_then(std::path::Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "workspace".to_owned());
@@ -435,7 +481,7 @@ fn cargo_shim_command(invocation: CargoShimInvocation<'_>) -> Result<Command> {
 fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
     let (state_path, config_path) =
         resolve_paths(None, None, |name| std::env::var_os(name).map(PathBuf::from))?;
-    let config = config::Config::read(&config_path)?;
+    let config = read_shim_config(&config_path)?;
     let real_cargo = config.real_cargo.as_deref().ok_or_else(|| {
         error::Error::new(
             error::ErrorCode::Configuration,
@@ -548,6 +594,33 @@ mod tests {
             ),
             "override-owner"
         );
+    }
+
+    #[test]
+    fn fresh_shim_policy_discovers_cargo_after_skipping_the_shim_binary() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = tempfile::tempdir()?;
+        let shim_dir = root.path().join("shim");
+        let cargo_dir = root.path().join("real");
+        std::fs::create_dir(&shim_dir)?;
+        std::fs::create_dir(&cargo_dir)?;
+        let current_exe = std::env::current_exe()?;
+        symlink(&current_exe, shim_dir.join("cargo"))?;
+        let real_cargo = cargo_dir.join("cargo");
+        std::fs::write(&real_cargo, "#!/bin/sh\nexit 0\n")?;
+        std::fs::set_permissions(&real_cargo, std::fs::Permissions::from_mode(0o755))?;
+        let search_path = std::env::join_paths([&shim_dir, &cargo_dir]).map_err(|error| {
+            error::Error::new(error::ErrorCode::Configuration, error.to_string())
+        })?;
+        let config_path = root.path().join("config/locked-build/policy.json");
+
+        let config =
+            read_shim_config_with_discovery(&config_path, Some(&search_path), &current_exe)?;
+
+        assert_eq!(config.real_cargo, Some(real_cargo.canonicalize()?));
+        assert!(config_path.exists());
+        Ok(())
     }
 
     #[test]
