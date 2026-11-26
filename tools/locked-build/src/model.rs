@@ -125,6 +125,9 @@ pub(crate) struct Request {
     /// Memory limit reserved for this lease when policy configures one.
     #[serde(default)]
     pub memory_cap_bytes: Option<u64>,
+    /// Cargo job count paired with the reserved memory lease.
+    #[serde(default)]
+    pub memory_cargo_jobs: Option<u32>,
     /// Caller-supplied build env values captured when the lease was queued.
     #[serde(default)]
     pub caller_cargo_build_jobs: Option<String>,

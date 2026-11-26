@@ -952,6 +952,97 @@ fn lease_accounting_charges_effective_jobs_and_rejects_a_lease_larger_than_budge
 
 /// Trace: FR-015-AC-8
 #[test]
+fn start_environment_uses_the_exact_job_count_reserved_by_its_memory_cap() -> Result<()> {
+    const GIB: u64 = 1_000_000_000;
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 16, 54 * GIB, 8 * GIB)?;
+    let high_parallelism = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-JOBS-HIGH",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into()],
+    )?;
+    store.transaction(|state, _| {
+        assert_eq!(state.find(&high_parallelism)?.memory_cargo_jobs, Some(16));
+        assert_eq!(
+            state.find(&high_parallelism)?.memory_cap_bytes,
+            Some(40 * GIB)
+        );
+        Ok(())
+    })?;
+
+    for index in 0..7_u32 {
+        let id = enqueue(
+            &store,
+            "test:team:lead",
+            &format!("TEST-MEMORY-PRESSURE-{index}"),
+            1,
+            0,
+            None,
+            &["/usr/bin/true".into()],
+        )?;
+        let _fence = claim_worker(
+            &store,
+            &id,
+            &ProcessIdentity {
+                pid: u32::MAX - index,
+                started_seconds: 1,
+            },
+        )?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+        store.transaction(|state, _| {
+            let request = state.find_mut(&id)?;
+            request.phase = Phase::Running;
+            request.started_at_ms = Some(now_ms()?);
+            request.started_clock_ms = Some(clock_ms()?);
+            Ok(())
+        })?;
+    }
+    let low_parallelism = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-JOBS-LOW",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into()],
+    )?;
+    let low_request = store.transaction(|state, _| {
+        let request = state.find(&low_parallelism)?.clone();
+        assert_eq!(request.memory_cargo_jobs, Some(2));
+        assert_eq!(request.memory_cap_bytes, Some(5 * GIB));
+        Ok(request)
+    })?;
+    let mut start_policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    start_policy.cargo_build_jobs = Some(16);
+    let mut high_arguments = vec!["build".to_owned()];
+    let high_environment = prepare_request_environment(
+        &start_policy,
+        &store.transaction(|state, _| Ok(state.find(&high_parallelism)?.clone()))?,
+        &mut high_arguments,
+        16,
+    );
+    let mut low_arguments = vec!["build".to_owned()];
+    let low_environment =
+        prepare_request_environment(&start_policy, &low_request, &mut low_arguments, 1);
+    assert_eq!(high_environment.record.cargo_build_jobs, Some(16));
+    assert_eq!(low_environment.record.cargo_build_jobs, Some(2));
+    assert_eq!(
+        u64::from(high_environment.record.cargo_build_jobs.unwrap_or_default()) * 2_500_000_000,
+        40 * GIB
+    );
+    assert_eq!(
+        u64::from(low_environment.record.cargo_build_jobs.unwrap_or_default()) * 2_500_000_000,
+        5 * GIB
+    );
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
 fn memory_budget_admits_exactly_twenty_one_one_job_leases_concurrently() -> Result<()> {
     use std::sync::{Arc, Barrier};
 

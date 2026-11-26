@@ -91,15 +91,19 @@ pub(crate) fn enqueue(
             .ok_or_else(|| Error::new(ErrorCode::State, "request sequence exhausted"))?;
         let id = RequestId(format!("{}:r{sequence}", state.store_id));
         let class_name = class.unwrap_or("periodic");
+        let memory_cargo_jobs = resolve_cargo_jobs(
+            config,
+            command,
+            caller_cargo_build_jobs.as_deref(),
+            state.used().saturating_add(units),
+        );
         let memory_cap_bytes =
             if config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted {
                 Some(estimate_memory_lease(
                     config,
                     class_name,
                     units,
-                    command,
-                    caller_cargo_build_jobs.as_deref(),
-                    state.used().saturating_add(units),
+                    memory_cargo_jobs,
                 )?)
             } else {
                 None
@@ -113,6 +117,7 @@ pub(crate) fn enqueue(
             priority,
             class: class_name.to_owned(),
             memory_cap_bytes,
+            memory_cargo_jobs,
             caller_cargo_build_jobs,
             caller_rust_test_threads,
             caller_cargo_incremental,
@@ -146,29 +151,9 @@ fn estimate_memory_lease(
     config: &crate::config::Config,
     class: &str,
     units: u32,
-    command: &[String],
-    caller_cargo_build_jobs: Option<&str>,
-    active_units: u32,
+    cargo_jobs: Option<u32>,
 ) -> Result<u64> {
-    let is_cargo = command
-        .first()
-        .and_then(|program| std::path::Path::new(program).file_name())
-        .is_some_and(|name| name == "cargo");
-    let jobs = if is_cargo {
-        let mut arguments = command.get(1..).unwrap_or_default().to_vec();
-        prepare_build_environment(
-            config,
-            &mut arguments,
-            caller_cargo_build_jobs,
-            None,
-            active_units,
-        )
-        .record
-        .cargo_build_jobs
-        .unwrap_or(units)
-    } else {
-        units
-    };
+    let jobs = cargo_jobs.unwrap_or(units);
     let per_job = config
         .memory_per_job_by_class
         .get(class)
@@ -198,6 +183,58 @@ fn estimate_memory_lease(
         ));
     }
     Ok(lease_bytes)
+}
+
+fn resolve_cargo_jobs(
+    config: &crate::config::Config,
+    command: &[String],
+    caller_cargo_build_jobs: Option<&str>,
+    active_units: u32,
+) -> Option<u32> {
+    let is_cargo = command
+        .first()
+        .and_then(|program| std::path::Path::new(program).file_name())
+        .is_some_and(|name| name == "cargo");
+    if !is_cargo {
+        return None;
+    }
+    let mut arguments = command.get(1..).unwrap_or_default().to_vec();
+    prepare_build_environment(
+        config,
+        &mut arguments,
+        caller_cargo_build_jobs,
+        None,
+        active_units,
+    )
+    .record
+    .cargo_build_jobs
+}
+
+fn prepare_request_environment(
+    config: &crate::config::Config,
+    request: &Request,
+    arguments: &mut [String],
+    active_units: u32,
+) -> PreparedBuildEnvironment {
+    if let Some(jobs) = request.memory_cargo_jobs {
+        let mut reserved_config = config.clone();
+        reserved_config.cargo_build_jobs = Some(jobs);
+        prepare_build_environment(
+            &reserved_config,
+            arguments,
+            request.caller_cargo_build_jobs.as_deref(),
+            request.caller_rust_test_threads.as_deref(),
+            1,
+        )
+    } else {
+        prepare_build_environment(
+            config,
+            arguments,
+            request.caller_cargo_build_jobs.as_deref(),
+            request.caller_rust_test_threads.as_deref(),
+            active_units,
+        )
+    }
 }
 
 pub(crate) fn priority_for_class(store: &Store, class: &str) -> Result<u32> {
@@ -906,13 +943,8 @@ fn start_command(
                 total.saturating_add(candidate.units)
             });
         let mut arguments = request.command[1..].to_vec();
-        let environment = prepare_build_environment(
-            config,
-            &mut arguments,
-            request.caller_cargo_build_jobs.as_deref(),
-            request.caller_rust_test_threads.as_deref(),
-            active_units,
-        );
+        let environment =
+            prepare_request_environment(config, request, &mut arguments, active_units);
         let memory_cap = request.memory_cap_bytes;
         let mut lease_record = environment.record;
         lease_record.memory_enforcement = enforcement;
