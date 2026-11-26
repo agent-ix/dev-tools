@@ -94,6 +94,11 @@ When configured, lease policy sets `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`, and
 units include the command being started. See [the policy reference](reference.md)
 for optional fields and examples.
 
+With `target_root`, each owner gets a private `CARGO_TARGET_DIR` beneath that
+root. On lease end, the tool deletes that owner's target when `trim_after_ms` or
+`max_bytes` is exceeded. It skips cleanup while another lease for the owner is
+active and refuses symlink entries in the target tree.
+
 Capacity shrink preserves running commands and reports overcommit.
 New admission waits until current capacity and resource reserves permit it.
 Memory admission conservatively charges all declared running budgets against measured available RAM.

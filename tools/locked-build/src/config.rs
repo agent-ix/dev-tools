@@ -55,6 +55,15 @@ pub struct Config {
     /// Incremental compilation setting inherited by each leased command when configured.
     #[serde(default)]
     pub cargo_incremental: Option<bool>,
+    /// Root under which owner-specific Cargo target directories are created.
+    #[serde(default)]
+    pub target_root: Option<PathBuf>,
+    /// Delete an idle target directory after this many milliseconds.
+    #[serde(default)]
+    pub trim_after_ms: Option<u64>,
+    /// Delete a target directory when its measured size exceeds this limit.
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
 }
 
 impl Config {
@@ -71,6 +80,11 @@ impl Config {
             && sample.is_relative()
         {
             *sample = directory.join(&*sample);
+        }
+        if let Some(target_root) = &mut config.target_root
+            && target_root.is_relative()
+        {
+            *target_root = directory.join(&*target_root);
         }
         config.validate()?;
         Ok(config)
@@ -99,6 +113,8 @@ impl Config {
             && self.maximum_requests <= 100_000
             && self.cargo_build_jobs.is_none_or(|jobs| jobs > 0)
             && self.rust_test_threads.is_none_or(|threads| threads > 0)
+            && (self.trim_after_ms.is_none() && self.max_bytes.is_none()
+                || self.target_root.is_some())
             && u64::from(self.maximum_units)
                 .checked_mul(self.memory_per_unit_bytes)
                 .is_some()

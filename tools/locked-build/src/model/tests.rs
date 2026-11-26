@@ -22,6 +22,12 @@ pub(crate) fn policy() -> Config {
         poll_ms: 10,
         maximum_requests: 100,
         sample_file: None,
+        cargo_build_jobs: None,
+        rust_test_threads: None,
+        cargo_incremental: None,
+        target_root: None,
+        trim_after_ms: None,
+        max_bytes: None,
     }
 }
 

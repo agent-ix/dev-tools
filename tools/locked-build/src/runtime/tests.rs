@@ -660,6 +660,9 @@ fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()>
             cargo_build_jobs: None,
             rust_test_threads: None,
             cargo_incremental: None,
+            target_root: None,
+            trim_after_ms: None,
+            max_bytes: None,
         })?,
     )?;
     let missing = root.path().join("not-created");
@@ -701,6 +704,120 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
             "RUST_TEST_THREADS=3"
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    let target_root = root.path().join("targets");
+    policy.target_root = Some(target_root.clone());
+    policy.max_bytes = Some(3);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let target = target_directory(&policy, &request, true)?
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
+    let canonical_root = target_root.canonicalize()?;
+    assert_eq!(target.parent(), Some(canonical_root.as_path()));
+    let mut command = Command::new("/usr/bin/env");
+    command.env_remove("CARGO_TARGET_DIR");
+    apply_target_environment(&mut command, &policy, &request)?;
+    let output = command.output()?;
+    assert!(output.status.success());
+    let expected_target = format!("CARGO_TARGET_DIR={}", target.display());
+    assert!(
+        String::from_utf8(output.stdout)?
+            .lines()
+            .any(|line| line == expected_target)
+    );
+    std::fs::write(target.join("artifact"), b"four")?;
+    store.transaction(|state, config| {
+        state.finish(
+            &id,
+            Completion {
+                code: Some(0),
+                ..Completion::default()
+            },
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+
+    cleanup_target(&store, &id)?;
+    assert!(!target.exists());
+    Ok(())
+}
+
+#[test]
+fn target_lifecycle_deletes_targets_past_the_idle_age_limit() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.target_root = Some(root.path().join("targets"));
+    policy.trim_after_ms = Some(0);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let target = target_directory(&policy, &request, true)?
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
+    std::fs::write(target.join("artifact"), b"old")?;
+    store.transaction(|state, config| {
+        state.finish(
+            &id,
+            Completion {
+                code: Some(0),
+                ..Completion::default()
+            },
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+
+    cleanup_target(&store, &id)?;
+    assert!(!target.exists());
+    Ok(())
+}
+
+#[test]
+fn target_lifecycle_refuses_nested_symlink_without_deleting_its_destination() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.target_root = Some(root.path().join("targets"));
+    policy.max_bytes = Some(0);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let target = target_directory(&policy, &request, true)?
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside)?;
+    std::fs::write(outside.join("keep"), b"safe")?;
+    std::os::unix::fs::symlink(&outside, target.join("escape"))?;
+    store.transaction(|state, config| {
+        state.finish(
+            &id,
+            Completion {
+                code: Some(0),
+                ..Completion::default()
+            },
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+
+    assert!(cleanup_target(&store, &id).is_err());
+    assert_eq!(std::fs::read(outside.join("keep"))?, b"safe");
+    assert!(target.exists());
     Ok(())
 }
 

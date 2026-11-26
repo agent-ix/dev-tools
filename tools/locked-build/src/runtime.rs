@@ -590,7 +590,8 @@ pub(crate) fn worker(store: &Store, id: &RequestId) -> Result<()> {
         &watchdog,
         &mut watchdog_child,
         &interrupted,
-    )
+    )?;
+    cleanup_target(store, id)
 }
 
 fn supervise(
@@ -705,6 +706,7 @@ fn start_command(
             .current_dir(&request.cwd)
             .process_group(group);
         apply_build_environment(&mut command, config, active_units);
+        apply_target_environment(&mut command, config, request)?;
         command.spawn().map_err(Into::into)
     })
 }
@@ -727,6 +729,161 @@ fn apply_build_environment(
     if let Some(incremental) = config.cargo_incremental {
         command.env("CARGO_INCREMENTAL", if incremental { "1" } else { "0" });
     }
+}
+
+fn target_directory(
+    config: &crate::config::Config,
+    request: &Request,
+    create: bool,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(configured_root) = &config.target_root else {
+        return Ok(None);
+    };
+    if create {
+        std::fs::create_dir_all(configured_root)?;
+    } else if !configured_root.exists() {
+        return Ok(None);
+    }
+    let root = configured_root.canonicalize()?;
+    let target = root.join(owner_target_key(&request.owner));
+    if create {
+        match std::fs::create_dir(&target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let metadata = match std::fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "target directory is not a regular directory",
+        ));
+    }
+    let canonical_target = target.canonicalize()?;
+    if !canonical_target.starts_with(&root) {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "target directory escapes target_root",
+        ));
+    }
+    Ok(Some(canonical_target))
+}
+
+fn apply_target_environment(
+    command: &mut Command,
+    config: &crate::config::Config,
+    request: &Request,
+) -> Result<()> {
+    if let Some(target) = target_directory(config, request, true)? {
+        command.env("CARGO_TARGET_DIR", target);
+    }
+    Ok(())
+}
+
+fn owner_target_key(owner: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in owner.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let prefix: String = owner
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || "-_.".contains(*character))
+        .take(48)
+        .collect();
+    format!(
+        "{}-{hash:016x}",
+        if prefix.is_empty() { "owner" } else { &prefix }
+    )
+}
+
+fn cleanup_target(store: &Store, id: &RequestId) -> Result<()> {
+    store.transaction(|state, config| {
+        let request = state.find(id)?;
+        let still_active = state.requests.iter().any(|candidate| {
+            candidate.id != request.id
+                && candidate.owner == request.owner
+                && candidate.phase == Phase::Running
+        });
+        if still_active {
+            return Ok(());
+        }
+        let Some(target) = target_directory(config, request, false)? else {
+            return Ok(());
+        };
+        let Some((bytes, newest_modified)) = inspect_target_tree(&target)? else {
+            return Ok(());
+        };
+        let too_large = config.max_bytes.is_some_and(|limit| bytes > limit);
+        let too_old = config.trim_after_ms.is_some_and(|limit| {
+            std::time::SystemTime::now()
+                .duration_since(newest_modified)
+                .is_ok_and(|age| age.as_millis() >= u128::from(limit))
+        });
+        if too_large || too_old {
+            let confirmed = target_directory(config, request, false)?;
+            if confirmed.as_deref() != Some(target.as_path()) {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "target directory changed before cleanup",
+                ));
+            }
+            std::fs::remove_dir_all(target)?;
+        }
+        Ok(())
+    })
+}
+
+fn inspect_target_tree(target: &Path) -> Result<Option<(u64, std::time::SystemTime)>> {
+    let root_metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "target directory is not a regular directory",
+        ));
+    }
+    let mut pending = vec![target.to_owned()];
+    let mut bytes = 0_u64;
+    let mut newest_modified = root_metadata.modified()?;
+    let mut visited = 0_usize;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            visited = visited.saturating_add(1);
+            if visited > 100_000 {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "target directory contains too many entries to inspect",
+                ));
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "target directory contains a symlink",
+                ));
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file() {
+                bytes = bytes.saturating_add(metadata.len());
+            }
+            newest_modified = newest_modified.max(metadata.modified()?);
+        }
+    }
+    Ok(Some((bytes, newest_modified)))
 }
 
 pub(crate) fn prune(store: &Store) -> Result<usize> {

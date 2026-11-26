@@ -18,5 +18,8 @@
   "sample_file": null,
   "cargo_build_jobs": 4,
   "rust_test_threads": 4,
-  "cargo_incremental": false
+  "cargo_incremental": false,
+  "target_root": null,
+  "trim_after_ms": null,
+  "max_bytes": null
 }

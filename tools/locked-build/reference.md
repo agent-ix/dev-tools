@@ -8,7 +8,8 @@ A host policy is a JSON document defining build admission and supervision limits
 ## Fields
 
 All fields are required except `sample_file`, `cargo_build_jobs`,
-`rust_test_threads`, and `cargo_incremental`; unknown fields are rejected.
+`rust_test_threads`, `cargo_incremental`, `target_root`, `trim_after_ms`, and
+`max_bytes`; unknown fields are rejected.
 Relative filesystem paths resolve from the policy file's directory.
 The polling interval cannot exceed the hold deadline or termination grace.
 
@@ -34,11 +35,18 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `cargo_build_jobs` | Optional maximum Cargo jobs at one active leased unit. At spawn, divide by the total active leased units and clamp to at least one. |
 | `rust_test_threads` | Optional `RUST_TEST_THREADS` value set for each leased command. |
 | `cargo_incremental` | Optional incremental compilation setting; true sets `CARGO_INCREMENTAL=1`, false sets it to `0`. |
+| `target_root` | Optional root for owner-specific `CARGO_TARGET_DIR` directories. Relative paths resolve from the policy file. |
+| `trim_after_ms` | Optional idle age after which an owner's target directory is deleted when its lease ends. |
+| `max_bytes` | Optional target size limit; the target directory is deleted when it exceeds this many bytes at lease end. |
 
 Unset environment policy values leave their inherited variables unchanged. For
 `cargo_build_jobs`, active leased units include the command being started. The
 formula is `max(1, floor(configured_cargo_build_jobs / active_leased_units))`;
 for example, a policy value of 8 with 3 active units sets `CARGO_BUILD_JOBS=2`.
+When target lifecycle is enabled, each owner receives one directory under
+`target_root`. Cleanup runs after the owner's last active lease, and is skipped
+unless the age or size limit is exceeded. Symlinks in the target tree are
+rejected, and cleanup never follows them.
 
 Resource observations use available RAM, available filesystem bytes, and one-minute load.
 An external sample includes exactly these fields:
