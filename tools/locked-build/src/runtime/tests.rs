@@ -864,6 +864,16 @@ fn concurrent_textfile_exports_are_serialized_and_leave_a_complete_document() ->
 fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
+    let id = queued(&store)?;
+    let fence = claim_worker(
+        &store,
+        &id,
+        &ProcessIdentity {
+            pid: u32::MAX - 1,
+            started_seconds: 1,
+        },
+    )?
+    .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
     let barrier = std::sync::Barrier::new(2);
     let (scrape_sender, scrape_receiver) = std::sync::mpsc::channel();
     let (admit_sender, admit_receiver) = std::sync::mpsc::channel();
@@ -875,14 +885,7 @@ fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
         });
         let admitting = scope.spawn(|| {
             barrier.wait();
-            let result = enqueue(
-                &store,
-                "draco:ix-relay:metrics-scrape-test",
-                "SWM-242",
-                1,
-                0,
-                &["/usr/bin/true".into()],
-            );
+            let result = admit_worker(&store, &id, &fence, &AtomicBool::new(false));
             let _ = admit_sender.send(result);
         });
         let scrape = scrape_receiver
@@ -899,7 +902,7 @@ fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
             .map_err(|_| Error::new(ErrorCode::State, "admission thread panicked"))?;
         assert!(scrape.contains("# TYPE ix_build_queue_depth gauge"));
         assert!(scrape.contains("ix_build_slots_busy{host=\"your-build-host\"}"));
-        assert!(!admitted.0.is_empty());
+        assert!(matches!(admitted, Admission::Granted(_)));
         Ok(())
     })?;
     Ok(())
