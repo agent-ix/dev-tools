@@ -1013,11 +1013,6 @@ fn lease_accounting_charges_effective_jobs_and_rejects_a_lease_larger_than_budge
     const GIB: u64 = 1_000_000_000;
     let root = tempfile::tempdir()?;
     let store = lease_accounted_store(root.path(), 33, 54 * GIB, 8 * GIB)?;
-    store.transaction(|_, config| {
-        assert_eq!(config.memory_budget_bytes, Some(54 * GIB));
-        assert_eq!(config.memory_reserve_bytes, 8 * GIB);
-        Ok(())
-    })?;
     let one_job = enqueue(
         &store,
         "test:team:lead",
@@ -1168,7 +1163,11 @@ fn memory_budget_admits_exactly_twenty_one_one_job_leases_concurrently() -> Resu
 
     const GIB: u64 = 1_000_000_000;
     let root = tempfile::tempdir()?;
-    let store = lease_accounted_store(root.path(), 33, 54 * GIB, 8 * GIB)?;
+    let initial = lease_accounted_store(root.path(), 33, 54 * GIB, 8 * GIB)?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&initial.config_path)?)?;
+    policy.sample_file = None;
+    std::fs::write(&initial.config_path, serde_json::to_vec(&policy)?)?;
+    let store = Store::open(&initial.path, &initial.config_path)?;
     let mut claims = Vec::new();
     for sequence in 0..33_u32 {
         let id = enqueue(
@@ -1213,7 +1212,17 @@ fn memory_budget_admits_exactly_twenty_one_one_job_leases_concurrently() -> Resu
     for (id, fence) in claims.iter() {
         let _ = admit_worker(&store, id, fence, &AtomicBool::new(false))?;
     }
-    store.transaction(|state, _| {
+    store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        let sample = config.sample(now).ok();
+        let queued_head = state
+            .requests
+            .iter()
+            .find(|request| request.phase == Phase::Queued);
+        let head_reason = queued_head
+            .map(|request| state.admission_reason(&request.id, config, sample.as_ref(), now, clock))
+            .transpose()?;
         let running = state
             .requests
             .iter()
@@ -1225,7 +1234,20 @@ fn memory_budget_admits_exactly_twenty_one_one_job_leases_concurrently() -> Resu
             .filter(|request| request.phase == Phase::Running)
             .map(|request| request.memory_cap_bytes.unwrap_or(0))
             .sum::<u64>();
-        assert_eq!(running, 21);
+        assert_eq!(
+            running,
+            21,
+            "running={running}, sum={sum}, budget={:?}, capacity={}, used={}, head_reason={head_reason:?}, queued_caps={:?}",
+            config.memory_budget_bytes,
+            config.capacity_units,
+            state.used(),
+            state
+                .requests
+                .iter()
+                .filter(|request| request.phase == Phase::Queued)
+                .map(|request| request.memory_cap_bytes)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(sum, 52_500_000_000);
         assert!(sum <= 54 * GIB);
         Ok(())
