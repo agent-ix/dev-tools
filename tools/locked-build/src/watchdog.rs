@@ -136,73 +136,101 @@ fn observe(
     read_processes: impl FnOnce() -> Processes,
     probe_exit: impl FnOnce(u32) -> Result<bool>,
 ) -> Result<Decision> {
-    store.transaction(|state, config| {
-        let processes = read_processes();
-        let request = state.find_mut(id)?;
-        if request.phase.terminal()
-            || request.worker.as_ref() != Some(worker)
-            || request.worker_generation != generation
-            || request.watchdog.as_ref() != Some(watchdog)
-        {
-            return Ok(Decision::Done);
-        }
-        if request.stop.is_none()
-            && request.started_clock_ms.is_some_and(|started| {
-                clock_ms().is_ok_and(|now| now.saturating_sub(started) >= config.hold_ms)
+    observe_at(
+        store,
+        id,
+        generation,
+        worker,
+        watchdog,
+        now_ms()?,
+        clock_ms()?,
+        read_processes,
+        probe_exit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_at(
+    store: &Store,
+    id: &RequestId,
+    generation: u64,
+    worker: &ProcessIdentity,
+    watchdog: &ProcessIdentity,
+    now: u64,
+    clock: u64,
+    read_processes: impl FnOnce() -> Processes,
+    probe_exit: impl FnOnce(u32) -> Result<bool>,
+) -> Result<Decision> {
+    store.transaction_with_clock(
+        || Ok((now, clock)),
+        |state, config| {
+            let processes = read_processes();
+            let request = state.find_mut(id)?;
+            if request.phase.terminal()
+                || request.worker.as_ref() != Some(worker)
+                || request.worker_generation != generation
+                || request.watchdog.as_ref() != Some(watchdog)
+            {
+                return Ok(Decision::Done);
+            }
+            if request.stop.is_none()
+                && request
+                    .started_clock_ms
+                    .is_some_and(|started| clock.saturating_sub(started) >= config.hold_ms)
+            {
+                request.stop = Some(StopReason::TimedOut);
+            }
+            if request.stop.is_none()
+                && request
+                    .lease_record
+                    .as_ref()
+                    .and_then(|record| {
+                        rss_fallback_cap(record.memory_enforcement, request.memory_cap_bytes)
+                    })
+                    .is_some_and(|cap| {
+                        processes
+                            .group_memory_bytes(watchdog.pid, &[watchdog.pid])
+                            .is_some_and(|used| used > cap)
+                    })
+            {
+                request.stop = Some(StopReason::MemoryCap);
+            }
+            let worker_state = processes.identity(worker, id);
+            let worker_lost = matches!(
+                worker_state,
+                IdentityState::Absent | IdentityState::Different
+            );
+            let no_command_members =
+                !processes.group_has_live_members(watchdog.pid, Some(watchdog.pid));
+            if (worker_lost || request.command_finished.is_some())
+                && no_command_members
+                && probe_exit(watchdog.pid)?
+            {
+                let completion = match &request.command_finished {
+                    Some(outcome) => Completion {
+                        code: outcome.code,
+                        signal: outcome.signal,
+                        reason: None,
+                    },
+                    None => Completion {
+                        reason: Some("supervisor_lost"),
+                        ..Completion::default()
+                    },
+                };
+                state.finish(id, completion, config, now, clock)?;
+                return Ok(Decision::Done);
+            }
+            if worker_state != IdentityState::Matching {
+                request.reason = Some("supervisor_lost_watchdog_active".to_owned());
+            }
+            Ok(Decision::Observe {
+                stop: request.stop.is_some() || request.command_finished.is_some(),
+                memory_cap_exceeded: request.stop == Some(StopReason::MemoryCap),
+                grace_ms: config.termination_grace_ms,
+                poll_ms: crate::config::POLL_INTERVAL_MS,
             })
-        {
-            request.stop = Some(StopReason::TimedOut);
-        }
-        if request.stop.is_none()
-            && request
-                .lease_record
-                .as_ref()
-                .and_then(|record| {
-                    rss_fallback_cap(record.memory_enforcement, request.memory_cap_bytes)
-                })
-                .is_some_and(|cap| {
-                    processes
-                        .group_memory_bytes(watchdog.pid, &[watchdog.pid])
-                        .is_some_and(|used| used > cap)
-                })
-        {
-            request.stop = Some(StopReason::MemoryCap);
-        }
-        let worker_state = processes.identity(worker, id);
-        let worker_lost = matches!(
-            worker_state,
-            IdentityState::Absent | IdentityState::Different
-        );
-        let no_command_members =
-            !processes.group_has_live_members(watchdog.pid, Some(watchdog.pid));
-        if (worker_lost || request.command_finished.is_some())
-            && no_command_members
-            && probe_exit(watchdog.pid)?
-        {
-            let completion = match &request.command_finished {
-                Some(outcome) => Completion {
-                    code: outcome.code,
-                    signal: outcome.signal,
-                    reason: None,
-                },
-                None => Completion {
-                    reason: Some("supervisor_lost"),
-                    ..Completion::default()
-                },
-            };
-            state.finish(id, completion, config, now_ms()?, clock_ms()?)?;
-            return Ok(Decision::Done);
-        }
-        if worker_state != IdentityState::Matching {
-            request.reason = Some("supervisor_lost_watchdog_active".to_owned());
-        }
-        Ok(Decision::Observe {
-            stop: request.stop.is_some() || request.command_finished.is_some(),
-            memory_cap_exceeded: request.stop == Some(StopReason::MemoryCap),
-            grace_ms: config.termination_grace_ms,
-            poll_ms: crate::config::POLL_INTERVAL_MS,
-        })
-    })
+        },
+    )
 }
 
 fn rss_fallback_cap(enforcement: MemoryEnforcement, request_cap: Option<u64>) -> Option<u64> {

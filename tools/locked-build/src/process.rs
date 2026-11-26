@@ -41,6 +41,30 @@ pub(crate) enum IdentityState {
 }
 
 impl Processes {
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(
+        rows: impl IntoIterator<Item = (ProcessIdentity, u32, Vec<String>)>,
+    ) -> Self {
+        Self {
+            rows: rows
+                .into_iter()
+                .map(|(identity, group, arguments)| {
+                    (
+                        identity.pid,
+                        Row {
+                            start: identity.started_seconds,
+                            group: Some(group),
+                            memory_bytes: 0,
+                            arguments,
+                            zombie: false,
+                        },
+                    )
+                })
+                .collect(),
+            complete: true,
+        }
+    }
+
     pub(crate) fn read() -> Self {
         let system = System::new_with_specifics(
             RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),

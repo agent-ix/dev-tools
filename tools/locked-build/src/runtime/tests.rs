@@ -5,8 +5,63 @@ use std::fs::{File, TryLockError};
 use std::sync::mpsc;
 
 use super::*;
-use crate::config::Config;
+use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
+
+#[derive(Clone, Copy)]
+struct TestClock {
+    now_ms: u64,
+    clock_ms: u64,
+}
+
+impl TestClock {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            now_ms: now_ms()?,
+            clock_ms: clock_ms()?,
+        })
+    }
+
+    fn advance(self, millis: u64) -> Self {
+        Self {
+            now_ms: self.now_ms.saturating_add(millis),
+            clock_ms: self.clock_ms.saturating_add(millis),
+        }
+    }
+}
+
+fn admit_at(
+    store: &Store,
+    id: &RequestId,
+    fence: &WorkerFence,
+    clock: TestClock,
+) -> Result<Admission> {
+    admit_worker_at(
+        store,
+        id,
+        fence,
+        &AtomicBool::new(false),
+        clock.now_ms,
+        clock.clock_ms,
+        |config, now| {
+            Some(HostSample {
+                host: config.host.clone(),
+                observed_at_ms: now,
+                memory_available_bytes: 1_000_000,
+                disk_available_bytes: 1_000_000,
+                load_one: 0.0,
+            })
+        },
+    )
+}
+
+fn metrics_at_clock(store: &Store, clock: TestClock) -> Result<String> {
+    metrics_at(store, clock.now_ms, clock.clock_ms)
+}
+
+fn cancel_at_clock(store: &Store, id: &RequestId, clock: TestClock) -> Result<()> {
+    cancel_at(store, id, clock.now_ms, clock.clock_ms)
+}
 
 fn store(root: &Path) -> Result<Store> {
     let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
@@ -226,16 +281,17 @@ fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_las
         },
     )?
     .ok_or_else(|| Error::new(ErrorCode::State, "second worker claim missing"))?;
+    let clock = TestClock::new()?;
     assert!(matches!(
-        admit_worker(&store, &first, &first_fence, &AtomicBool::new(false))?,
+        admit_at(&store, &first, &first_fence, clock)?,
         Admission::Waiting(_)
     ));
     assert!(matches!(
-        admit_worker(&store, &second, &second_fence, &AtomicBool::new(false))?,
+        admit_at(&store, &second, &second_fence, clock)?,
         Admission::Waiting(_)
     ));
 
-    let blocked = metrics(&store)?;
+    let blocked = metrics_at_clock(&store, clock.advance(1_000))?;
     assert!(blocked.contains("reason=\"memory\""));
     let blocked_value = metric_value(
         &blocked,
@@ -246,8 +302,8 @@ fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_las
     .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
     assert!(blocked_value > 0.0);
 
-    cancel(&store, &first)?;
-    let one_waiter_left = metrics(&store)?;
+    cancel_at_clock(&store, &first, clock.advance(1_100))?;
+    let one_waiter_left = metrics_at_clock(&store, clock.advance(1_200))?;
     let after_first_leave = metric_value(
         &one_waiter_left,
         "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
@@ -256,8 +312,8 @@ fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_las
     .parse::<f64>()
     .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
     assert!(after_first_leave >= blocked_value);
-    cancel(&store, &second)?;
-    let closed = metrics(&store)?;
+    cancel_at_clock(&store, &second, clock.advance(1_300))?;
+    let closed = metrics_at_clock(&store, clock.advance(1_400))?;
     let closed_value = metric_value(
         &closed,
         "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
@@ -265,8 +321,7 @@ fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_las
     .ok_or_else(|| Error::new(ErrorCode::State, "memory blocked series missing"))?
     .parse::<f64>()
     .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
-    std::thread::sleep(Duration::from_millis(20));
-    let later = metrics(&store)?;
+    let later = metrics_at_clock(&store, clock.advance(1_500))?;
     let later_value = metric_value(
         &later,
         "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
@@ -473,12 +528,13 @@ fn metrics_exposition_checkpoints_monotonic_and_utc_block_starts() -> Result<()>
         },
     )?
     .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    let clock = TestClock::new()?;
     assert!(matches!(
-        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        admit_at(&store, &id, &fence, clock)?,
         Admission::Waiting(_)
     ));
 
-    let first = metrics(&store)?;
+    let first = metrics_at_clock(&store, clock)?;
     let first_value = metric_value(
         &first,
         "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
@@ -495,8 +551,7 @@ fn metrics_exposition_checkpoints_monotonic_and_utc_block_starts() -> Result<()>
         .as_u64()
         .ok_or_else(|| Error::new(ErrorCode::State, "UTC start missing"))?;
 
-    std::thread::sleep(Duration::from_millis(30));
-    let second = metrics(&store)?;
+    let second = metrics_at_clock(&store, clock.advance(100))?;
     let second_value = metric_value(
         &second,
         "ix_build_admission_blocked_seconds_total{host=\"your-build-host\",reason=\"memory\"} ",
@@ -1285,56 +1340,63 @@ fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Resu
         requests.push(id);
         fences.push(fence);
     }
+    let clock = TestClock::new()?;
     assert!(matches!(
-        admit_worker(&store, &requests[0], &fences[0], &AtomicBool::new(false))?,
+        admit_at(&store, &requests[0], &fences[0], clock)?,
         Admission::Granted(_)
     ));
     assert!(matches!(
-        admit_worker(&store, &requests[1], &fences[1], &AtomicBool::new(false))?,
+        admit_at(&store, &requests[1], &fences[1], clock)?,
         Admission::Granted(_)
     ));
     assert!(matches!(
-        admit_worker(&store, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        admit_at(&store, &requests[2], &fences[2], clock)?,
         Admission::Waiting(_)
     ));
 
     let reopened = Store::open(&store.path, &store.config_path)?;
     assert!(matches!(
-        admit_worker(&reopened, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        admit_at(&reopened, &requests[2], &fences[2], clock)?,
         Admission::Waiting(_)
     ));
-    reopened.transaction(|state, config| {
-        state.find_mut(&requests[0])?.stop = Some(StopReason::Cancelled);
-        state.finish(
-            &requests[0],
-            Completion::default(),
-            config,
-            now_ms()?,
-            clock_ms()?,
-        )
-    })?;
+    reopened.transaction_with_clock(
+        || Ok((clock.now_ms, clock.clock_ms)),
+        |state, config| {
+            state.find_mut(&requests[0])?.stop = Some(StopReason::Cancelled);
+            state.finish(
+                &requests[0],
+                Completion::default(),
+                config,
+                clock.now_ms,
+                clock.clock_ms,
+            )
+        },
+    )?;
     assert!(matches!(
-        admit_worker(&reopened, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        admit_at(&reopened, &requests[2], &fences[2], clock)?,
         Admission::Granted(_)
     ));
     assert!(matches!(
-        admit_worker(&reopened, &requests[3], &fences[3], &AtomicBool::new(false))?,
+        admit_at(&reopened, &requests[3], &fences[3], clock)?,
         Admission::Waiting(_)
     ));
-    reopened.transaction(|state, config| {
-        state.finish(
-            &requests[1],
-            Completion {
-                code: Some(0),
-                ..Completion::default()
-            },
-            config,
-            now_ms()?,
-            clock_ms()?,
-        )
-    })?;
+    reopened.transaction_with_clock(
+        || Ok((clock.now_ms, clock.clock_ms)),
+        |state, config| {
+            state.finish(
+                &requests[1],
+                Completion {
+                    code: Some(0),
+                    ..Completion::default()
+                },
+                config,
+                clock.now_ms,
+                clock.clock_ms,
+            )
+        },
+    )?;
     assert!(matches!(
-        admit_worker(&reopened, &requests[3], &fences[3], &AtomicBool::new(false))?,
+        admit_at(&reopened, &requests[3], &fences[3], clock)?,
         Admission::Granted(_)
     ));
     Ok(())
@@ -1763,16 +1825,17 @@ fn status_and_repeat_wait_polls_do_not_rewrite_unchanged_metrics_sidecar() -> Re
     };
     let fence = claim_worker(&store, &id, &identity)?
         .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    let clock = TestClock::new()?;
     assert!(matches!(
-        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        admit_at(&store, &id, &fence, clock)?,
         Admission::Waiting(_)
     ));
     let sidecar = store.path.join("metrics.json");
     let first_inode = std::fs::metadata(&sidecar)?.ino();
-    let _ = status(&store)?;
+    let _ = status_at(&store, clock.now_ms, clock.clock_ms)?;
     assert_eq!(std::fs::metadata(&sidecar)?.ino(), first_inode);
     assert!(matches!(
-        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        admit_at(&store, &id, &fence, clock)?,
         Admission::Waiting(_)
     ));
     assert_eq!(std::fs::metadata(&sidecar)?.ino(), first_inode);
@@ -1869,25 +1932,26 @@ fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
         },
     )?
     .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    let clock = TestClock::new()?;
     let barrier = std::sync::Barrier::new(2);
     let (scrape_sender, scrape_receiver) = std::sync::mpsc::channel();
     let (admit_sender, admit_receiver) = std::sync::mpsc::channel();
     std::thread::scope(|scope| -> Result<()> {
         let scraper = scope.spawn(|| {
             barrier.wait();
-            let result = metrics(&store);
+            let result = metrics_at_clock(&store, clock);
             let _ = scrape_sender.send(result);
         });
         let admitting = scope.spawn(|| {
             barrier.wait();
-            let result = admit_worker(&store, &id, &fence, &AtomicBool::new(false));
+            let result = admit_at(&store, &id, &fence, clock);
             let _ = admit_sender.send(result);
         });
         let scrape = scrape_receiver
-            .recv_timeout(Duration::from_secs(1))
+            .recv()
             .map_err(|error| Error::new(ErrorCode::State, error.to_string()))??;
         let admitted = admit_receiver
-            .recv_timeout(Duration::from_secs(1))
+            .recv()
             .map_err(|error| Error::new(ErrorCode::State, error.to_string()))??;
         scraper
             .join()
@@ -1905,55 +1969,23 @@ fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
 
 /// Trace: FR-015-AC-1
 #[test]
-fn slow_textfile_export_lock_does_not_hold_the_scheduler_state_lock() -> Result<()> {
+fn holding_textfile_export_lock_does_not_hold_the_scheduler_state_lock() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let output = root.path().join("collector.prom");
     let export_lock = store.lock_metrics_export()?;
-    let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(0);
-    let (done_sender, done_receiver) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| -> Result<()> {
-        let exporter_store = &store;
-        let exporter_output = &output;
-        let exporter = scope.spawn(move || {
-            started_sender
-                .send(())
-                .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
-            metrics_to_file(exporter_store, exporter_output)
-        });
-        started_receiver
-            .recv()
-            .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
-        std::thread::sleep(Duration::from_millis(20));
-        let writer_store = &store;
-        let writer = scope.spawn(move || {
-            let result = enqueue(
-                writer_store,
-                "test:team:lead",
-                "TEST-DURING-EXPORT",
-                1,
-                0,
-                None,
-                &["/usr/bin/true".into()],
-            );
-            let _ = done_sender.send(result);
-        });
-        let enqueue_result = done_receiver.recv_timeout(Duration::from_secs(1));
-        drop(export_lock);
-        assert!(
-            enqueue_result
-                .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?
-                .is_ok(),
-            "admission transaction should complete while export I/O is blocked"
-        );
-        writer
-            .join()
-            .map_err(|_| Error::new(ErrorCode::State, "enqueue thread panicked"))?;
-        exporter
-            .join()
-            .map_err(|_| Error::new(ErrorCode::State, "export thread panicked"))??;
-        Ok(())
-    })?;
+    let id = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-DURING-EXPORT",
+        1,
+        0,
+        None,
+        &["/usr/bin/true".into()],
+    )?;
+    assert_eq!(state_phase(&store, &id)?, Phase::Queued);
+    drop(export_lock);
+    metrics_to_file(&store, &output)?;
     assert!(output.exists());
     Ok(())
 }

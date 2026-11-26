@@ -580,81 +580,92 @@ fn recover_with_processes(
 }
 
 pub(crate) fn status(store: &Store) -> Result<Report> {
-    store.transaction(|state, config| {
-        let now = now_ms()?;
-        let clock = clock_ms()?;
-        let processes = Processes::read();
-        let sample = config.sample(now);
-        let (sample, source_error) = match sample {
-            Ok(sample) => (Some(sample), None),
-            Err(error) => (None, Some(error.to_string())),
-        };
-        let requests = state
-            .requests
-            .iter()
-            .map(|request| {
-                let ended_clock = request.ended_clock_ms.unwrap_or(clock);
-                let identity = request
-                    .worker
-                    .as_ref()
-                    .map(|worker| processes.identity(worker, &request.id));
-                RequestReport {
-                    request_id: request.id.clone(),
-                    owner: request.owner.clone(),
-                    ticket: request.ticket.clone(),
-                    state: phase_name(request.phase).to_owned(),
-                    units: request.units,
-                    priority: request.priority,
-                    class: request.class.clone(),
-                    enqueued_at_ms: request.enqueued_at_ms,
-                    started_at_ms: request.started_at_ms,
-                    ended_at_ms: request.ended_at_ms,
-                    wait_ms: request
-                        .started_clock_ms
-                        .unwrap_or(ended_clock)
-                        .saturating_sub(request.enqueued_clock_ms),
-                    hold_ms: request
-                        .started_clock_ms
-                        .map(|start| ended_clock.saturating_sub(start)),
-                    suspect: request.phase == Phase::Running
-                        && (identity != Some(IdentityState::Matching)
-                            || request.heartbeat_at_ms.is_none_or(|heartbeat| {
-                                now.saturating_sub(heartbeat) > crate::config::HEARTBEAT_MAX_AGE_MS
-                            })),
-                    reason: request.reason.clone(),
-                    exit_code: request.exit_code,
-                    signal: request.signal,
-                    lease_record: request.lease_record.clone(),
-                }
+    status_at(store, now_ms()?, clock_ms()?)
+}
+
+fn status_at(store: &Store, now: u64, clock: u64) -> Result<Report> {
+    store.transaction_with_clock(
+        || Ok((now, clock)),
+        |state, config| {
+            let processes = Processes::read();
+            let sample = config.sample(now);
+            let (sample, source_error) = match sample {
+                Ok(sample) => (Some(sample), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let requests = state
+                .requests
+                .iter()
+                .map(|request| {
+                    let ended_clock = request.ended_clock_ms.unwrap_or(clock);
+                    let identity = request
+                        .worker
+                        .as_ref()
+                        .map(|worker| processes.identity(worker, &request.id));
+                    RequestReport {
+                        request_id: request.id.clone(),
+                        owner: request.owner.clone(),
+                        ticket: request.ticket.clone(),
+                        state: phase_name(request.phase).to_owned(),
+                        units: request.units,
+                        priority: request.priority,
+                        class: request.class.clone(),
+                        enqueued_at_ms: request.enqueued_at_ms,
+                        started_at_ms: request.started_at_ms,
+                        ended_at_ms: request.ended_at_ms,
+                        wait_ms: request
+                            .started_clock_ms
+                            .unwrap_or(ended_clock)
+                            .saturating_sub(request.enqueued_clock_ms),
+                        hold_ms: request
+                            .started_clock_ms
+                            .map(|start| ended_clock.saturating_sub(start)),
+                        suspect: request.phase == Phase::Running
+                            && (identity != Some(IdentityState::Matching)
+                                || request.heartbeat_at_ms.is_none_or(|heartbeat| {
+                                    now.saturating_sub(heartbeat)
+                                        > crate::config::HEARTBEAT_MAX_AGE_MS
+                                })),
+                        reason: request.reason.clone(),
+                        exit_code: request.exit_code,
+                        signal: request.signal,
+                        lease_record: request.lease_record.clone(),
+                    }
+                })
+                .collect();
+            let used = state.used();
+            Ok(Report {
+                schema_version: 1,
+                store_id: state.store_id.clone(),
+                host: state.host.clone(),
+                observed_at_ms: now,
+                capacity_units: config.capacity_units,
+                used_units: used,
+                free_units: config.capacity_units.saturating_sub(used),
+                overcommit_units: used.saturating_sub(config.capacity_units),
+                sample,
+                source_error,
+                requests,
+                events: state.events.clone(),
+                pruned_events: state.pruned_events,
+                next_event_sequence: state.next_event,
             })
-            .collect();
-        let used = state.used();
-        Ok(Report {
-            schema_version: 1,
-            store_id: state.store_id.clone(),
-            host: state.host.clone(),
-            observed_at_ms: now,
-            capacity_units: config.capacity_units,
-            used_units: used,
-            free_units: config.capacity_units.saturating_sub(used),
-            overcommit_units: used.saturating_sub(config.capacity_units),
-            sample,
-            source_error,
-            requests,
-            events: state.events.clone(),
-            pruned_events: state.pruned_events,
-            next_event_sequence: state.next_event,
-        })
-    })
+        },
+    )
 }
 
 pub(crate) fn metrics(store: &Store) -> Result<String> {
-    store.transaction(|state, config| {
-        let now = now_ms()?;
-        let clock = clock_ms()?;
-        state.metrics.checkpoint_active(clock, now)?;
-        state.metrics.exposition(state, config, now, clock)
-    })
+    metrics_at(store, now_ms()?, clock_ms()?)
+}
+
+fn metrics_at(store: &Store, now: u64, clock: u64) -> Result<String> {
+    store.transaction_with_clock(
+        || Ok((now, clock)),
+        |state, config| {
+            state.metrics.checkpoint_active(clock, now)?;
+            state.metrics.exposition(state, config, now, clock)
+        },
+    )
 }
 
 pub(crate) fn metrics_to_file(store: &Store, path: &Path) -> Result<()> {
@@ -678,17 +689,24 @@ pub(crate) fn current_block_reason(
 }
 
 pub(crate) fn cancel(store: &Store, id: &RequestId) -> Result<()> {
-    store.transaction(|state, config| {
-        let request = state.find_mut(id)?;
-        if request.phase.terminal() {
-            return Ok(());
-        }
-        request.stop = Some(StopReason::Cancelled);
-        if request.phase == Phase::Queued {
-            state.finish(id, Completion::default(), config, now_ms()?, clock_ms()?)?;
-        }
-        Ok(())
-    })
+    cancel_at(store, id, now_ms()?, clock_ms()?)
+}
+
+fn cancel_at(store: &Store, id: &RequestId, now: u64, clock: u64) -> Result<()> {
+    store.transaction_with_clock(
+        || Ok((now, clock)),
+        |state, config| {
+            let request = state.find_mut(id)?;
+            if request.phase.terminal() {
+                return Ok(());
+            }
+            request.stop = Some(StopReason::Cancelled);
+            if request.phase == Phase::Queued {
+                state.finish(id, Completion::default(), config, now, clock)?;
+            }
+            Ok(())
+        },
+    )
 }
 
 pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Result<i32> {
@@ -784,40 +802,61 @@ fn admit_worker(
     fence: &WorkerFence,
     interrupted: &AtomicBool,
 ) -> Result<Admission> {
-    store.transaction(|state, config| {
-        let now = now_ms()?;
-        let clock = clock_ms()?;
-        let request = state.find(id)?;
-        if request.phase != Phase::Queued || !fence.owns(request) {
-            return Ok(Admission::Stopped);
-        }
-        if interrupted.load(Ordering::Relaxed) {
-            state.find_mut(id)?.stop = Some(StopReason::Cancelled);
-            state.finish(id, Completion::default(), config, now, clock)?;
-            return Ok(Admission::Stopped);
-        }
-        let sample = config.sample(now).ok();
-        let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
-        {
-            let request = state.find_mut(id)?;
-            request.heartbeat_at_ms = Some(now);
-            request.reason = reason.map(str::to_owned);
-        }
-        let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
-        state.metrics.observe_block(blocked, now, clock)?;
-        if reason.is_some() {
-            return Ok(Admission::Waiting(crate::config::POLL_INTERVAL_MS));
-        }
-        let admitted = {
-            let request = state.find_mut(id)?;
-            request.phase = Phase::Running;
-            request.started_at_ms = Some(now);
-            request.started_clock_ms = Some(clock);
-            request.clone()
-        };
-        state.event(id, config, now, clock)?;
-        Ok(Admission::Granted(Box::new(admitted)))
-    })
+    admit_worker_at(
+        store,
+        id,
+        fence,
+        interrupted,
+        now_ms()?,
+        clock_ms()?,
+        |config, now| config.sample(now).ok(),
+    )
+}
+
+fn admit_worker_at(
+    store: &Store,
+    id: &RequestId,
+    fence: &WorkerFence,
+    interrupted: &AtomicBool,
+    now: u64,
+    clock: u64,
+    sample_for: impl FnOnce(&Config, u64) -> Option<HostSample>,
+) -> Result<Admission> {
+    store.transaction_with_clock(
+        || Ok((now, clock)),
+        |state, config| {
+            let request = state.find(id)?;
+            if request.phase != Phase::Queued || !fence.owns(request) {
+                return Ok(Admission::Stopped);
+            }
+            if interrupted.load(Ordering::Relaxed) {
+                state.find_mut(id)?.stop = Some(StopReason::Cancelled);
+                state.finish(id, Completion::default(), config, now, clock)?;
+                return Ok(Admission::Stopped);
+            }
+            let sample = sample_for(config, now);
+            let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
+            {
+                let request = state.find_mut(id)?;
+                request.heartbeat_at_ms = Some(now);
+                request.reason = reason.map(str::to_owned);
+            }
+            let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
+            state.metrics.observe_block(blocked, now, clock)?;
+            if reason.is_some() {
+                return Ok(Admission::Waiting(crate::config::POLL_INTERVAL_MS));
+            }
+            let admitted = {
+                let request = state.find_mut(id)?;
+                request.phase = Phase::Running;
+                request.started_at_ms = Some(now);
+                request.started_clock_ms = Some(clock);
+                request.clone()
+            };
+            state.event(id, config, now, clock)?;
+            Ok(Admission::Granted(Box::new(admitted)))
+        },
+    )
 }
 
 fn finish_owned(

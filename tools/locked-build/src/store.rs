@@ -72,6 +72,17 @@ impl Store {
         &self,
         operation: impl FnOnce(&mut State, &Config) -> Result<T>,
     ) -> Result<T> {
+        self.transaction_with_clock(
+            || Ok((crate::runtime::now_ms()?, crate::runtime::clock_ms()?)),
+            operation,
+        )
+    }
+
+    pub(crate) fn transaction_with_clock<T>(
+        &self,
+        mut read_clock: impl FnMut() -> Result<(u64, u64)>,
+        operation: impl FnOnce(&mut State, &Config) -> Result<T>,
+    ) -> Result<T> {
         self.reject_link("lock")?;
         let lock = OpenOptions::new()
             .create(true)
@@ -131,8 +142,7 @@ impl Store {
                 crate::config::POLL_INTERVAL_MS,
             )?;
         }
-        let now = crate::runtime::now_ms()?;
-        let clock = crate::runtime::clock_ms()?;
+        let (now, clock) = read_clock()?;
         let mut processes = None;
         state.metrics.expire_stale_block(
             &state.requests,
@@ -160,8 +170,7 @@ impl Store {
         state
             .metrics
             .reconcile_events(&state.events, state.next_event)?;
-        let now = crate::runtime::now_ms()?;
-        let clock = crate::runtime::clock_ms()?;
+        let (now, clock) = read_clock()?;
         if !state
             .requests
             .iter()
