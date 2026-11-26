@@ -9,7 +9,7 @@ A host policy is a JSON document defining build admission and supervision limits
 
 All fields are required except `sample_file`, `cargo_build_jobs`,
 `rust_test_threads`, `cargo_incremental`, `target_root`, `trim_after_ms`, and
-`max_bytes`; unknown fields are rejected.
+`max_bytes`, `priority_classes`, and `real_cargo`; unknown fields are rejected.
 Relative filesystem paths resolve from the policy file's directory.
 The polling interval cannot exceed the hold deadline or termination grace.
 
@@ -39,6 +39,7 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `trim_after_ms` | Optional idle age after which an owner's target directory is deleted when its lease ends. |
 | `max_bytes` | Optional target size limit; the target directory is deleted when it exceeds this many bytes at lease end. |
 | `priority_classes` | Optional mapping of `must-fix`, `point`, `block`, and `periodic` to numeric priorities no greater than `maximum_priority`. |
+| `real_cargo` | Optional Cargo executable path used when this binary is invoked with `argv[0]` basename `cargo`. Relative paths resolve from the policy file. |
 
 Unset environment policy values leave their inherited variables unchanged. For
 `cargo_build_jobs`, active leased units include the command being started. The
@@ -52,6 +53,14 @@ rejected, and cleanup never follows them.
 priority remains 0 when neither `--class` nor `--priority` is supplied. Class
 and numeric priority options cannot be used together. Metrics continue grouping
 numeric priorities 0, 1, and 2 or greater under `check`, `test`, and `gate`.
+
+The PATH shim reads its policy from `LOCKED_BUILD_CONFIG`, defaulting to
+`$HOME/.config/locked-build/policy.json`, and its state from
+`LOCKED_BUILD_STATE`, defaulting to `$HOME/.local/state/locked-build`. It reads
+`LOCKED_BUILD_CLASS`, `LOCKED_BUILD_OWNER`, and `LOCKED_BUILD_TICKET`, defaulting
+to `point`, `cargo-shim`, and `MANUAL`. A leased command receives
+`LOCKED_BUILD_LEASE=1`; when a shim invocation sees that marker, it execs
+`real_cargo` directly to avoid queue recursion.
 
 Resource observations use available RAM, available filesystem bytes, and one-minute load.
 An external sample includes exactly these fields:

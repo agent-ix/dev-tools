@@ -739,6 +739,7 @@ fn apply_build_environment(
     if let Some(incremental) = config.cargo_incremental {
         command.env("CARGO_INCREMENTAL", if incremental { "1" } else { "0" });
     }
+    command.env("LOCKED_BUILD_LEASE", "1");
 }
 
 fn target_directory(

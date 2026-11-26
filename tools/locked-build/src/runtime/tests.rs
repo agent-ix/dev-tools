@@ -664,6 +664,7 @@ fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()>
             trim_after_ms: None,
             max_bytes: None,
             priority_classes: std::collections::BTreeMap::new(),
+            real_cargo: None,
         })?,
     )?;
     let missing = root.path().join("not-created");
@@ -683,17 +684,19 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
     command
         .env_remove("CARGO_BUILD_JOBS")
         .env_remove("RUST_TEST_THREADS")
-        .env_remove("CARGO_INCREMENTAL");
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("LOCKED_BUILD_LEASE");
     apply_build_environment(&mut command, &policy, 2);
     let output = command.output()?;
     assert!(output.status.success());
-    let environment = String::from_utf8(output.stdout)?;
+    let environment = String::from_utf8_lossy(&output.stdout).into_owned();
     let mut actual: Vec<_> = environment
         .lines()
         .filter(|line| {
             line.starts_with("CARGO_BUILD_JOBS=")
                 || line.starts_with("RUST_TEST_THREADS=")
                 || line.starts_with("CARGO_INCREMENTAL=")
+                || line.starts_with("LOCKED_BUILD_LEASE=")
         })
         .collect();
     actual.sort_unstable();
@@ -702,6 +705,7 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
         [
             "CARGO_BUILD_JOBS=4",
             "CARGO_INCREMENTAL=0",
+            "LOCKED_BUILD_LEASE=1",
             "RUST_TEST_THREADS=3"
         ]
     );
@@ -744,7 +748,7 @@ fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Re
     assert!(output.status.success());
     let expected_target = format!("CARGO_TARGET_DIR={}", target.display());
     assert!(
-        String::from_utf8(output.stdout)?
+        String::from_utf8_lossy(&output.stdout)
             .lines()
             .any(|line| line == expected_target)
     );

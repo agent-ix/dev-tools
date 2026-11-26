@@ -68,6 +68,9 @@ pub struct Config {
     /// Named priority classes and their numeric scheduler priorities.
     #[serde(default)]
     pub priority_classes: BTreeMap<String, u32>,
+    /// Real Cargo executable used by the optional PATH shim.
+    #[serde(default)]
+    pub real_cargo: Option<PathBuf>,
 }
 
 impl Config {
@@ -89,6 +92,11 @@ impl Config {
             && target_root.is_relative()
         {
             *target_root = directory.join(&*target_root);
+        }
+        if let Some(real_cargo) = &mut config.real_cargo
+            && real_cargo.is_relative()
+        {
+            *real_cargo = directory.join(&*real_cargo);
         }
         config.validate()?;
         Ok(config)

@@ -27,5 +27,6 @@
     "point": 2,
     "block": 1,
     "periodic": 0
-  }
+  },
+  "real_cargo": null
 }

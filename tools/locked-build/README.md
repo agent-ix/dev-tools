@@ -98,6 +98,14 @@ Use `--class must-fix`, `--class point`, `--class block`, or `--class periodic`
 to use the configured named priorities. Numeric `--priority` remains available;
 the two options are mutually exclusive.
 
+When this executable is reached through a PATH entry named `cargo`, it acts as
+a shim and queues the configured `real_cargo` binary. Set
+`LOCKED_BUILD_CLASS`, `LOCKED_BUILD_OWNER`, and `LOCKED_BUILD_TICKET` to label a
+request. Defaults are `point`, `cargo-shim`, and `MANUAL`; config and state
+default to `$HOME/.config/locked-build/policy.json` and
+`$HOME/.local/state/locked-build`. Leased commands carry a recursion marker so
+nested Cargo calls execute the real binary directly.
+
 With `target_root`, each owner gets a private `CARGO_TARGET_DIR` beneath that
 root. On lease end, the tool deletes that owner's target when `trim_after_ms` or
 `max_bytes` is exceeded. It skips cleanup while another lease for the owner is

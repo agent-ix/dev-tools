@@ -12,12 +12,19 @@ mod sample;
 mod store;
 mod watchdog;
 
+use std::ffi::{OsStr, OsString};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::Command;
 
 use clap::{Parser, Subcommand};
 
 use crate::error::Result;
 use crate::model::RequestId;
+
+const DEFAULT_CARGO_CLASS: &str = "point";
+const DEFAULT_CARGO_OWNER: &str = "cargo-shim";
+const DEFAULT_CARGO_TICKET: &str = "MANUAL";
 
 #[derive(Parser)]
 #[command(
@@ -177,7 +184,114 @@ fn execute(cli: Cli) -> Result<i32> {
     }
 }
 
+fn is_cargo_invocation(arguments: &[OsString]) -> bool {
+    arguments
+        .first()
+        .and_then(|argument| PathBuf::from(argument).file_name().map(OsStr::to_owned))
+        .is_some_and(|name| name == "cargo")
+}
+
+struct CargoShimInvocation<'a> {
+    arguments: &'a [OsString],
+    real_cargo: &'a std::path::Path,
+    config_path: &'a std::path::Path,
+    state_path: &'a std::path::Path,
+    class: &'a str,
+    owner: &'a str,
+    ticket: &'a str,
+    in_lease: bool,
+}
+
+fn cargo_shim_command(invocation: CargoShimInvocation<'_>) -> Result<Command> {
+    let CargoShimInvocation {
+        arguments,
+        real_cargo,
+        config_path,
+        state_path,
+        class,
+        owner,
+        ticket,
+        in_lease,
+    } = invocation;
+    let real_cargo = real_cargo.canonicalize()?;
+    let executable = std::env::current_exe()?.canonicalize()?;
+    if real_cargo == executable {
+        return Err(error::Error::new(
+            error::ErrorCode::Configuration,
+            "real_cargo resolves to locked-build",
+        ));
+    }
+    if in_lease {
+        let mut command = Command::new(real_cargo);
+        command.args(arguments.iter().skip(1));
+        return Ok(command);
+    }
+    let mut command = Command::new(executable);
+    command
+        .arg("--state")
+        .arg(state_path)
+        .arg("--config")
+        .arg(config_path)
+        .arg("run")
+        .arg("--owner")
+        .arg(owner)
+        .arg("--ticket")
+        .arg(ticket)
+        .arg("--class")
+        .arg(class)
+        .arg("--")
+        .arg(real_cargo)
+        .args(arguments.iter().skip(1));
+    Ok(command)
+}
+
+fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "HOME is not set"))?;
+    let config_path = std::env::var_os("LOCKED_BUILD_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config/locked-build/policy.json"));
+    let state_path = std::env::var_os("LOCKED_BUILD_STATE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state/locked-build"));
+    let config = config::Config::read(&config_path)?;
+    let real_cargo = config.real_cargo.as_deref().ok_or_else(|| {
+        error::Error::new(
+            error::ErrorCode::Configuration,
+            "real_cargo is not configured",
+        )
+    })?;
+    let class = std::env::var("LOCKED_BUILD_CLASS").unwrap_or_else(|_| DEFAULT_CARGO_CLASS.into());
+    let owner = std::env::var("LOCKED_BUILD_OWNER").unwrap_or_else(|_| DEFAULT_CARGO_OWNER.into());
+    let ticket =
+        std::env::var("LOCKED_BUILD_TICKET").unwrap_or_else(|_| DEFAULT_CARGO_TICKET.into());
+    let mut command = cargo_shim_command(CargoShimInvocation {
+        arguments,
+        real_cargo,
+        config_path: &config_path,
+        state_path: &state_path,
+        class: &class,
+        owner: &owner,
+        ticket: &ticket,
+        in_lease: std::env::var_os("LOCKED_BUILD_LEASE").is_some(),
+    })?;
+    let error = command.exec();
+    Err(error.into())
+}
+
 fn main() {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    if is_cargo_invocation(&arguments) {
+        let code = match cargo_shim(&arguments) {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("{}: {}", error.code.as_str(), error.message);
+                2
+            }
+        };
+        std::process::exit(code);
+    }
     let code = match execute(Cli::parse()) {
         Ok(code) => code,
         Err(error) => {
@@ -227,5 +341,75 @@ mod tests {
             "test",
         ]);
         assert!(conflict.is_err());
+    }
+
+    #[test]
+    fn cargo_shim_executes_real_cargo_directly_inside_a_lease() -> Result<()> {
+        let arguments = ["cargo", "test", "-p", "locked-build"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(is_cargo_invocation(&arguments));
+        let real_cargo = std::path::Path::new("/bin/echo").canonicalize()?;
+        let command = cargo_shim_command(CargoShimInvocation {
+            arguments: &arguments,
+            real_cargo: &real_cargo,
+            config_path: std::path::Path::new("/policy.json"),
+            state_path: std::path::Path::new("/state"),
+            class: DEFAULT_CARGO_CLASS,
+            owner: DEFAULT_CARGO_OWNER,
+            ticket: DEFAULT_CARGO_TICKET,
+            in_lease: true,
+        })?;
+        assert_eq!(command.get_program(), real_cargo.as_os_str());
+        let actual: Vec<_> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(actual, ["test", "-p", "locked-build"]);
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_shim_queues_the_real_binary_with_documented_defaults() -> Result<()> {
+        let arguments = ["cargo", "check"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        let real_cargo = std::path::Path::new("/bin/echo").canonicalize()?;
+        let command = cargo_shim_command(CargoShimInvocation {
+            arguments: &arguments,
+            real_cargo: &real_cargo,
+            config_path: std::path::Path::new("/policy/policy.json"),
+            state_path: std::path::Path::new("/state"),
+            class: DEFAULT_CARGO_CLASS,
+            owner: DEFAULT_CARGO_OWNER,
+            ticket: DEFAULT_CARGO_TICKET,
+            in_lease: false,
+        })?;
+        let actual: Vec<_> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                "--state",
+                "/state",
+                "--config",
+                "/policy/policy.json",
+                "run",
+                "--owner",
+                "cargo-shim",
+                "--ticket",
+                "MANUAL",
+                "--class",
+                "point",
+                "--",
+                real_cargo.to_string_lossy().as_ref(),
+                "check"
+            ]
+        );
+        Ok(())
     }
 }
