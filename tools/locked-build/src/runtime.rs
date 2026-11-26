@@ -70,6 +70,7 @@ pub(crate) fn enqueue(
     let caller_rust_test_threads = std::env::var("RUST_TEST_THREADS").ok();
     let caller_cargo_incremental = std::env::var("CARGO_INCREMENTAL").ok();
     let caller_cargo_target_dir = std::env::var("CARGO_TARGET_DIR").ok();
+    validate_cargo_jobs_input(command, caller_cargo_build_jobs.as_deref())?;
     let now = now_ms()?;
     let clock = clock_ms()?;
     store.transaction(|state, config| {
@@ -208,6 +209,59 @@ fn resolve_cargo_jobs(
     )
     .record
     .cargo_build_jobs
+}
+
+fn validate_cargo_jobs_input(command: &[String], environment_value: Option<&str>) -> Result<()> {
+    let is_cargo = command
+        .first()
+        .and_then(|program| std::path::Path::new(program).file_name())
+        .is_some_and(|name| name == "cargo");
+    if !is_cargo {
+        return Ok(());
+    }
+    let invalid = || {
+        Error::new(
+            ErrorCode::Request,
+            "Cargo job limits must be positive integers",
+        )
+    };
+    if let Some(value) = environment_value
+        && !value.parse::<u32>().is_ok_and(|jobs| jobs > 0)
+    {
+        return Err(invalid());
+    }
+    let arguments = command.get(1..).unwrap_or_default();
+    let end = arguments
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(arguments.len());
+    let mut index = 0;
+    while index < end {
+        let argument = &arguments[index];
+        if argument == "-j" || argument == "--jobs" {
+            let value = arguments.get(index + 1).filter(|_| index + 1 < end);
+            if !value.is_some_and(|value| value.parse::<u32>().is_ok_and(|jobs| jobs > 0)) {
+                return Err(invalid());
+            }
+            index += 2;
+            continue;
+        }
+        let long_value = argument
+            .strip_prefix("--jobs=")
+            .or_else(|| argument.strip_prefix("-j="))
+            .or_else(|| {
+                argument
+                    .strip_prefix("-j")
+                    .filter(|value| !value.is_empty())
+            });
+        if let Some(value) = long_value
+            && !value.parse::<u32>().is_ok_and(|jobs| jobs > 0)
+        {
+            return Err(invalid());
+        }
+        index += 1;
+    }
+    Ok(())
 }
 
 fn prepare_request_environment(

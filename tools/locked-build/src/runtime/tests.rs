@@ -839,6 +839,35 @@ fn explicit_cargo_env_values_are_clamped_to_policy_maximum() -> Result<()> {
 }
 
 #[test]
+fn invalid_cargo_job_limits_are_rejected_in_arguments_and_environment() {
+    for arguments in [
+        vec![
+            "cargo".to_owned(),
+            "test".to_owned(),
+            "-j".to_owned(),
+            "-1".to_owned(),
+        ],
+        vec![
+            "cargo".to_owned(),
+            "test".to_owned(),
+            "--jobs=-1".to_owned(),
+        ],
+        vec![
+            "cargo".to_owned(),
+            "test".to_owned(),
+            "-j".to_owned(),
+            "default".to_owned(),
+        ],
+        vec!["cargo".to_owned(), "test".to_owned(), "-j".to_owned()],
+    ] {
+        assert!(validate_cargo_jobs_input(&arguments, None).is_err());
+    }
+    assert!(validate_cargo_jobs_input(&["cargo".into(), "test".into()], Some("-1")).is_err());
+    assert!(validate_cargo_jobs_input(&["cargo".into(), "test".into()], Some("default")).is_err());
+    assert!(validate_cargo_jobs_input(&["cargo".into(), "test".into()], Some("8")).is_ok());
+}
+
+#[test]
 fn named_priority_uses_policy_mapping_and_rejects_unconfigured_classes() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
