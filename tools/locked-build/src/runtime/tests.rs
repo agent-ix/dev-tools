@@ -33,13 +33,14 @@ fn store(root: &Path) -> Result<Store> {
     Store::open(&root.join("queue"), &path)
 }
 
-fn lease_accounted_store(root: &Path, capacity: u32, budget: u64) -> Result<Store> {
+fn lease_accounted_store(root: &Path, capacity: u32, budget: u64, reserve: u64) -> Result<Store> {
     let initial = store(root)?;
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&initial.config_path)?)?;
     policy.capacity_units = capacity;
     policy.maximum_units = capacity;
     policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
     policy.memory_budget_bytes = Some(budget);
+    policy.memory_reserve_bytes = reserve;
     policy.memory_per_job_bytes = 2_500_000_000;
     policy.memory_per_job_by_class.clear();
     policy.memory_cap_by_class.clear();
@@ -896,7 +897,7 @@ fn new_requests_use_per_class_memory_cap_overrides_and_default_cap() -> Result<(
 fn lease_accounting_charges_effective_jobs_and_rejects_a_lease_larger_than_budget() -> Result<()> {
     const GIB: u64 = 1_000_000_000;
     let root = tempfile::tempdir()?;
-    let store = lease_accounted_store(root.path(), 33, 54 * GIB)?;
+    let store = lease_accounted_store(root.path(), 33, 54 * GIB, 8 * GIB)?;
     let one_job = enqueue(
         &store,
         "test:team:lead",
@@ -956,7 +957,7 @@ fn memory_budget_admits_exactly_twenty_one_one_job_leases_concurrently() -> Resu
 
     const GIB: u64 = 1_000_000_000;
     let root = tempfile::tempdir()?;
-    let store = lease_accounted_store(root.path(), 33, 54 * GIB)?;
+    let store = lease_accounted_store(root.path(), 33, 54 * GIB, 8 * GIB)?;
     let mut claims = Vec::new();
     for sequence in 0..33_u32 {
         let id = enqueue(
@@ -1026,7 +1027,7 @@ fn memory_budget_admits_exactly_twenty_one_one_job_leases_concurrently() -> Resu
 fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Result<()> {
     const GIB: u64 = 1_000_000_000;
     let root = tempfile::tempdir()?;
-    let store = lease_accounted_store(root.path(), 3, 5 * GIB)?;
+    let store = lease_accounted_store(root.path(), 3, 5 * GIB, 0)?;
     let mut requests = Vec::new();
     let mut fences = Vec::new();
     for sequence in 0..4_u32 {
