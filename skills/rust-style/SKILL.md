@@ -37,6 +37,13 @@ report the conflict when those authorities disagree.
 - Default to `#![forbid(unsafe_code)]` and workspace safety lints. An allowed
   unsafe operation requires a `SAFETY:` comment, an explanation of why safe
   code is insufficient, and an audit of the surrounding abstraction.
+- Any new interface type must be a shared type. Interface types are written
+  by one piece of code and read by another, or used by two or more crates,
+  routes, producers, checkers, formats or repositories. Before adding one,
+  search for an existing type (names, members, the spec, shared model crates)
+  and reuse or extend it in its owner; a second struct with the same members
+  is a defect. A writer and its reader use the same declared type. See
+  [shared types](references/api-design.md#shared-interface-types).
 - Use typed wire payloads and reject unknown fields on every deserialized
   payload. Keep secrets out of input types. At wire and persistence
   boundaries, use checked integer conversions rather than a bare narrowing

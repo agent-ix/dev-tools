@@ -1,6 +1,6 @@
 # API design
 
-Read this when defining a public API, cross-crate interface, domain type,
+Read this when defining a public API, cross-crate interface, any new interface type, domain type,
 constructor, trait, or documented module surface. In application code, use the
 same principles without introducing abstraction solely for future callers.
 
@@ -92,3 +92,30 @@ same principles without introducing abstraction solely for future callers.
   capitalization, and punctuation in doc comments. Keep implementation
   TODOs in ordinary `//` comments. Cite governing requirement IDs in
   module headers where the repository tracks them.
+
+## Shared interface types
+
+Any new interface type must be a shared type. You may not introduce one
+without first checking whether an existing type covers it and whether the new
+one should be shared. An interface type is anything written by one piece of
+code and read by another, or used by two or more crates, routes, producers,
+checkers, writers, readers, repositories or formats: wire and file formats,
+certificates, records, results, packages, identities, keys, states, bounds,
+error and outcome kinds.
+
+- Before adding the type, search for it: grep the type name and its member
+  names, the specification, and the shared model and contract crates. Reuse it,
+  or extend it in the crate that owns it. A second struct with the same
+  members, or a mirror struct for the reader, is a defect.
+- The writer and the reader of a format use the same declared type. Do not
+  hand-write a mirror struct, build the document with `json!` or string keys,
+  or decode with a separate member walker.
+- A value used by two or more formats lives once, in the crate that owns it (a
+  shared model crate when it crosses repositories), and every user imports it.
+- A derived field (ordinal, digest, label, identity) is computed by one
+  function that every writer and reader calls.
+- Where the repository has requirement specs, link every requirement whose code
+  shares the type to the owner of the type in requirement frontmatter
+  relationships. Do not keep a side map or list of pairs.
+- The PR states which existing types were searched, why a new one was needed,
+  and where the other side of the format is.
