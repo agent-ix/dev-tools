@@ -15,6 +15,10 @@ fn store(root: &Path) -> Result<Store> {
     policy.memory_reserve_bytes = 0;
     policy.disk_reserve_bytes = 0;
     policy.maximum_load = 1_000_000.0;
+    policy.memory_admission = crate::config::MemoryAdmissionMode::LiveAvailable;
+    policy.memory_budget_bytes = None;
+    policy.memory_cap_bytes = None;
+    policy.memory_cap_by_class.clear();
     let sample_path = root.join("sample.json");
     let sample = crate::config::HostSample {
         host: policy.host.clone(),

@@ -113,13 +113,13 @@ root. On lease end, the tool deletes that owner's target when `trim_after_ms` or
 `max_bytes` is exceeded. It skips cleanup while another lease for the owner is
 active and refuses symlink entries in the target tree.
 
-The default `live_available` memory policy uses measured available memory and
-the existing per-unit reserve. `lease_accounted` instead admits a request only
-when its memory cap plus active lease caps fit `memory_budget_bytes`; it never
-reads live available memory. Per-class caps override the default cap. Linux
-applies caps through a transient systemd scope with swap disabled, while the
-macOS watchdog enforces the same cap from process-group RSS. A cap kill is
-reported under the existing `rss_cap` outcome.
+The default `lease_accounted` memory policy admits a request only when its
+memory cap plus active lease caps fit `memory_budget_bytes`; it never reads
+live available memory. `live_available` remains selectable for hosts that want
+measured available memory and the existing per-unit reserve. Per-class caps
+override the default cap. Linux applies caps through a transient systemd scope
+with swap disabled, while the RSS watchdog enforces the same cap when scopes
+are unavailable. A cap kill is reported under the existing `rss_cap` outcome.
 
 On Linux, the `on_missing_cgroup` policy controls what happens if a capped
 systemd scope cannot be started: `rss_watchdog` (the default) enforces the cap

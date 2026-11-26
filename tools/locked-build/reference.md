@@ -9,9 +9,11 @@ A host policy is a JSON document defining build admission and supervision limits
 
 All fields are required except `sample_file`, `cargo_build_jobs`,
 `rust_test_threads`, `cargo_incremental`, `target_root`, `trim_after_ms`, and
-`max_bytes`, `priority_classes`, `real_cargo`, `memory_budget_bytes`,
-`memory_cap_bytes`, `memory_cap_by_class`, and `on_missing_cgroup`; unknown
-fields are rejected.
+`max_bytes`, `priority_classes`, `real_cargo`, `memory_admission`,
+`memory_budget_bytes`, `memory_cap_bytes`, `memory_cap_by_class`, and
+`on_missing_cgroup`; unknown fields are rejected. `lease_accounted` requires a
+positive `memory_budget_bytes` and `memory_cap_bytes` no greater than that
+budget.
 Relative filesystem paths resolve from the policy file's directory.
 The polling interval cannot exceed the hold deadline or termination grace.
 
@@ -22,9 +24,9 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `maximum_units` | Largest feasible request; temporary shrink preserves queue age. |
 | `memory_per_unit_bytes` | RAM budget charged per requested unit. |
 | `memory_reserve_bytes` | RAM retained outside build leases. |
-| `memory_admission` | `live_available` (default) compares `MemAvailable` with lease-unit charges; `lease_accounted` charges fixed lease caps against `memory_budget_bytes` and does not read live available memory. |
+| `memory_admission` | `lease_accounted` (default) charges fixed lease caps against `memory_budget_bytes` and does not read live available memory; `live_available` compares `MemAvailable` with lease-unit charges. |
 | `memory_budget_bytes` | Total concurrent lease-cap budget required by `lease_accounted` admission. |
-| `memory_cap_bytes` | Optional default cap for each lease. On Linux it is enforced with a systemd scope; on macOS the process-group RSS watchdog enforces it. |
+| `memory_cap_bytes` | Default cap for each lease. It is required by `lease_accounted`; Linux uses a systemd scope when available and the RSS watchdog otherwise. |
 | `memory_cap_by_class` | Optional per-class cap overrides for `must-fix`, `point`, `block`, or `periodic`. |
 | `on_missing_cgroup` | `rss_watchdog` (default) enforces a configured cap with process-group RSS when a systemd scope is unavailable; `refuse` fails the lease without running the command. |
 | `disk_reserve_bytes` | Minimum free bytes for admission. |

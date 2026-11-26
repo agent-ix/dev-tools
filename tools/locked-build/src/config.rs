@@ -14,9 +14,9 @@ use crate::error::{Error, ErrorCode, Result};
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MemoryAdmissionMode {
     /// Compare live available memory with per-unit leases and reserve.
-    #[default]
     LiveAvailable,
     /// Charge each active lease's fixed memory cap against a configured budget.
+    #[default]
     LeaseAccounted,
 }
 
@@ -327,9 +327,33 @@ mod tests {
     use super::*;
 
     fn config() -> Result<Config> {
-        Ok(serde_json::from_str(include_str!(
-            "../policy.example.json"
-        ))?)
+        let mut config: Config = serde_json::from_str(include_str!("../policy.example.json"))?;
+        config.memory_admission = MemoryAdmissionMode::LiveAvailable;
+        Ok(config)
+    }
+
+    #[test]
+    fn missing_memory_admission_field_defaults_to_lease_accounted() -> Result<()> {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../policy.example.json"))?;
+        value
+            .as_object_mut()
+            .ok_or_else(|| Error::new(ErrorCode::Configuration, "policy fixture is not an object"))?
+            .remove("memory_admission");
+        let config: Config = serde_json::from_value(value)?;
+
+        assert_eq!(config.memory_admission, MemoryAdmissionMode::LeaseAccounted);
+        Ok(())
+    }
+
+    #[test]
+    fn example_policy_selects_lease_accounted_with_a_valid_cap_budget() -> Result<()> {
+        let config: Config = serde_json::from_str(include_str!("../policy.example.json"))?;
+
+        assert_eq!(config.memory_admission, MemoryAdmissionMode::LeaseAccounted);
+        assert_eq!(config.memory_budget_bytes, Some(17_179_869_184));
+        assert_eq!(config.memory_cap_bytes, Some(4_294_967_296));
+        config.validate()
     }
 
     /// Trace: FR-015-AC-11
