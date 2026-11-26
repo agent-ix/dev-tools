@@ -15,6 +15,10 @@ use crate::metrics::MetricsState;
 #[serde(transparent)]
 pub struct RequestId(pub String);
 
+fn default_request_class() -> String {
+    "periodic".to_owned()
+}
+
 /// A supervisor identity includes its unguessable request token, not only PID.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +83,14 @@ pub struct LeaseRecord {
     pub rust_test_threads: Option<u32>,
     /// True when an explicit Rust test thread value was clamped to policy maximum.
     pub rust_test_threads_clamped: bool,
+    /// Effective `CARGO_INCREMENTAL` value, if set.
+    pub cargo_incremental: Option<String>,
+    /// Whether policy replaced the caller's `CARGO_INCREMENTAL` value.
+    pub cargo_incremental_overwrote_caller: bool,
+    /// Effective `CARGO_TARGET_DIR`, if set.
+    pub cargo_target_dir: Option<PathBuf>,
+    /// Whether policy replaced the caller's `CARGO_TARGET_DIR` value.
+    pub cargo_target_dir_overwrote_caller: bool,
     /// Memory enforcement applied to the command.
     pub memory_enforcement: MemoryEnforcement,
 }
@@ -107,6 +119,9 @@ pub(crate) struct Request {
     pub ticket: String,
     pub units: u32,
     pub priority: u32,
+    /// Named priority class selected by the caller.
+    #[serde(default = "default_request_class")]
+    pub class: String,
     /// Memory limit reserved for this lease when policy configures one.
     #[serde(default)]
     pub memory_cap_bytes: Option<u64>,
@@ -116,6 +131,12 @@ pub(crate) struct Request {
     /// Caller-supplied test-thread env value captured when the lease was queued.
     #[serde(default)]
     pub caller_rust_test_threads: Option<String>,
+    /// Caller-supplied incremental setting captured when the lease was queued.
+    #[serde(default)]
+    pub caller_cargo_incremental: Option<String>,
+    /// Caller-supplied Cargo target directory captured when the lease was queued.
+    #[serde(default)]
+    pub caller_cargo_target_dir: Option<String>,
     /// Effective per-lease settings, populated when its command starts.
     #[serde(default)]
     pub lease_record: Option<LeaseRecord>,
@@ -188,6 +209,9 @@ pub struct Event {
     pub units: u32,
     /// Base priority.
     pub priority: u32,
+    /// Named priority class captured at this transition.
+    #[serde(default = "default_request_class")]
+    pub class: String,
     /// Configured capacity at transition time.
     pub capacity_units: u32,
     /// Free units after transition, saturating at zero during shrink.
@@ -219,6 +243,10 @@ impl State {
                 || !sequences.insert(request.sequence)
                 || request.id.0 != format!("{}:r{}", self.store_id, request.sequence)
                 || request.units == 0
+                || !matches!(
+                    request.class.as_str(),
+                    "must-fix" | "point" | "block" | "periodic"
+                )
                 || request.memory_cap_bytes.is_some_and(|cap| cap == 0)
                 || request
                     .caller_cargo_build_jobs
@@ -228,6 +256,14 @@ impl State {
                     .caller_rust_test_threads
                     .as_ref()
                     .is_some_and(|value| value.len() > 64)
+                || request
+                    .caller_cargo_incremental
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 64)
+                || request
+                    .caller_cargo_target_dir
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 32_768)
                 || request.command.is_empty()
                 || request.command.len() > 256
                 || request
@@ -312,6 +348,7 @@ impl State {
             state: request.phase,
             units: request.units,
             priority: request.priority,
+            class: request.class.clone(),
             capacity_units: config.capacity_units,
             free_units: config.capacity_units.saturating_sub(self.used()),
             wait_ms: monotonic_wait,

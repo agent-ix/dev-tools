@@ -110,17 +110,13 @@ fn execute(cli: Cli) -> Result<i32> {
         );
         return Ok(0);
     }
-    let state = cli
-        .state
-        .as_deref()
-        .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "--state is required"))?;
-    let config = cli.config.as_deref().ok_or_else(|| {
-        error::Error::new(error::ErrorCode::Configuration, "--config is required")
+    let (state, config) = resolve_paths(cli.state.as_deref(), cli.config.as_deref(), |name| {
+        std::env::var_os(name).map(PathBuf::from)
     })?;
     let store = if matches!(&cli.command, Action::Metrics { .. }) {
-        store::Store::open_existing(std::path::Path::new(state), std::path::Path::new(config))?
+        store::Store::open_existing(&state, &config)?
     } else {
-        runtime::open(state, config)?
+        runtime::open(&state, &config)?
     };
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
@@ -133,13 +129,22 @@ fn execute(cli: Cli) -> Result<i32> {
             class,
             command,
         } => {
-            let class_name = class.as_deref();
-            let priority = match class_name {
-                Some(class) => runtime::priority_for_class(&store, class)?,
-                None => priority.unwrap_or(0),
+            let class_name = class.as_deref().unwrap_or("periodic");
+            let priority = if class.is_some() {
+                runtime::priority_for_class(&store, class_name)?
+            } else if let Some(priority) = priority {
+                priority
+            } else {
+                runtime::priority_for_class(&store, class_name)?
             };
             let id = runtime::enqueue(
-                &store, &owner, &ticket, units, priority, class_name, &command,
+                &store,
+                &owner,
+                &ticket,
+                units,
+                priority,
+                Some(class_name),
+                &command,
             )?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let worker = runtime::spawn_worker(&store, &id)?;
@@ -187,6 +192,37 @@ fn execute(cli: Cli) -> Result<i32> {
     }
 }
 
+fn resolve_paths(
+    state_flag: Option<&std::path::Path>,
+    config_flag: Option<&std::path::Path>,
+    mut env: impl FnMut(&str) -> Option<PathBuf>,
+) -> Result<(PathBuf, PathBuf)> {
+    let state = state_flag
+        .map(PathBuf::from)
+        .or_else(|| env("LOCKED_BUILD_STATE"));
+    let config = config_flag
+        .map(PathBuf::from)
+        .or_else(|| env("LOCKED_BUILD_CONFIG"));
+    if let (Some(state), Some(config)) = (&state, &config) {
+        return Ok((state.clone(), config.clone()));
+    }
+    let home = env("HOME")
+        .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "HOME is not set"))?;
+    let state = state.unwrap_or_else(|| {
+        env("XDG_STATE_HOME")
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("locked-build")
+    });
+    let config = config.unwrap_or_else(|| {
+        env("XDG_CONFIG_HOME")
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| home.join(".config"))
+            .join("locked-build/policy.json")
+    });
+    Ok((state, config))
+}
+
 fn is_cargo_invocation(arguments: &[OsString]) -> bool {
     arguments
         .first()
@@ -216,16 +252,18 @@ fn cargo_shim_command(invocation: CargoShimInvocation<'_>) -> Result<Command> {
         ticket,
         in_lease,
     } = invocation;
-    let real_cargo = real_cargo.canonicalize()?;
+    let real_cargo_path = real_cargo;
+    let real_cargo_resolved = real_cargo_path.canonicalize()?;
     let executable = std::env::current_exe()?.canonicalize()?;
-    if real_cargo == executable {
+    if real_cargo_resolved == executable {
         return Err(error::Error::new(
             error::ErrorCode::Configuration,
             "real_cargo resolves to locked-build",
         ));
     }
     if in_lease {
-        let mut command = Command::new(real_cargo);
+        let mut command = Command::new(real_cargo_path);
+        command.arg0("cargo");
         command.args(arguments.iter().skip(1));
         return Ok(command);
     }
@@ -243,21 +281,14 @@ fn cargo_shim_command(invocation: CargoShimInvocation<'_>) -> Result<Command> {
         .arg("--class")
         .arg(class)
         .arg("--")
-        .arg(real_cargo)
+        .arg(real_cargo_path)
         .args(arguments.iter().skip(1));
     Ok(command)
 }
 
 fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "HOME is not set"))?;
-    let config_path = std::env::var_os("LOCKED_BUILD_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config/locked-build/policy.json"));
-    let state_path = std::env::var_os("LOCKED_BUILD_STATE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state/locked-build"));
+    let (state_path, config_path) =
+        resolve_paths(None, None, |name| std::env::var_os(name).map(PathBuf::from))?;
     let config = config::Config::read(&config_path)?;
     let real_cargo = config.real_cargo.as_deref().ok_or_else(|| {
         error::Error::new(
@@ -353,7 +384,9 @@ mod tests {
             .map(OsString::from)
             .collect::<Vec<_>>();
         assert!(is_cargo_invocation(&arguments));
-        let real_cargo = std::path::Path::new("/bin/echo").canonicalize()?;
+        let root = tempfile::tempdir()?;
+        let real_cargo = root.path().join("cargo");
+        std::os::unix::fs::symlink("/bin/echo", &real_cargo)?;
         let command = cargo_shim_command(CargoShimInvocation {
             arguments: &arguments,
             real_cargo: &real_cargo,
@@ -371,6 +404,93 @@ mod tests {
             .collect();
         assert_eq!(actual, ["test", "-p", "locked-build"]);
         Ok(())
+    }
+
+    #[test]
+    fn run_and_shim_paths_default_from_home_or_xdg_and_honor_precedence() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home)?;
+        let vars = [
+            ("HOME", home.clone()),
+            ("XDG_STATE_HOME", root.path().join("xdg-state")),
+            ("XDG_CONFIG_HOME", root.path().join("xdg-config")),
+        ];
+        let (state, config) = resolve_paths(None, None, |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        })?;
+        assert_eq!(state, root.path().join("xdg-state/locked-build"));
+        assert_eq!(
+            config,
+            root.path().join("xdg-config/locked-build/policy.json")
+        );
+        let (home_state, home_config) = resolve_paths(None, None, |name| match name {
+            "HOME" => Some(home.clone()),
+            "XDG_STATE_HOME" => Some("relative/state".into()),
+            "XDG_CONFIG_HOME" => Some("relative/config".into()),
+            _ => None,
+        })?;
+        assert_eq!(home_state, home.join(".local/state/locked-build"));
+        assert_eq!(home_config, home.join(".config/locked-build/policy.json"));
+
+        let policy = root.path().join("policy.json");
+        std::fs::write(&policy, include_str!("../policy.example.json"))?;
+        let store = runtime::open(&state, &policy)?;
+        assert_eq!(store.path, state.canonicalize()?);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&state)?.permissions().mode() & 0o777,
+            0o700
+        );
+
+        let state_flag = root.path().join("flag-state");
+        let config_flag = root.path().join("flag-policy");
+        let (resolved_state, resolved_config) =
+            resolve_paths(Some(&state_flag), Some(&config_flag), |name| match name {
+                "LOCKED_BUILD_STATE" => Some(root.path().join("env-state")),
+                "LOCKED_BUILD_CONFIG" => Some(root.path().join("env-policy")),
+                _ => None,
+            })?;
+        assert_eq!(resolved_state, state_flag);
+        assert_eq!(resolved_config, config_flag);
+
+        let (env_state, env_config) = resolve_paths(None, None, |name| match name {
+            "HOME" => Some(home.clone()),
+            "LOCKED_BUILD_STATE" => Some(root.path().join("env-state")),
+            "LOCKED_BUILD_CONFIG" => Some(root.path().join("env-policy")),
+            _ => None,
+        })?;
+        assert_eq!(env_state, root.path().join("env-state"));
+        assert_eq!(env_config, root.path().join("env-policy"));
+        Ok(())
+    }
+
+    /// Trace: FR-011-AC-7
+    #[test]
+    fn absent_run_class_defaults_to_periodic() {
+        let parsed = Cli::try_parse_from([
+            "locked-build",
+            "run",
+            "--owner",
+            "owner",
+            "--ticket",
+            "T-1",
+            "--",
+            "true",
+        ]);
+        assert!(matches!(
+            parsed,
+            Ok(Cli {
+                command: Action::Run {
+                    class: None,
+                    priority: None,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]

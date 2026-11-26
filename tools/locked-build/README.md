@@ -21,16 +21,25 @@ Set the host label, enabled capacity, maximum capacity, memory budget, load limi
 and disk reserve from that host's resource plan.
 The example starts with zero enabled capacity, so it queues work until configured.
 Every client on one host uses the same private state directory and policy path.
+When omitted, scheduler commands use `$XDG_STATE_HOME/locked-build` and
+`$XDG_CONFIG_HOME/locked-build/policy.json`; unset XDG values fall back to
+`$HOME/.local/state/locked-build` and `$HOME/.config/locked-build/policy.json`.
+The state directory is created with mode `0700`. Explicit `--state` and
+`--config` options take precedence over `LOCKED_BUILD_STATE` and
+`LOCKED_BUILD_CONFIG`, which take precedence over these defaults.
+The state file is `<state-directory>/state.json`.
 
 ## Usage
 
 This command runs a build under the host policy and returns its exit status:
 
 ```sh
-locked-build --state /tmp/build-queue --config /path/to/host-policy.json \
-  run --owner draco:team:code --ticket TEAM-12 --units 1 --class point \
+locked-build run --owner draco:team:code --ticket TEAM-12 --units 1 --class point \
   -- cargo test -p selected-package
 ```
+
+Add `--state` and `--config` before `run` to override the resolved paths.
+A direct `run` with no `--class` or `--priority` is recorded as class `periodic`.
 
 The command prints its request ID and output directory to stderr.
 Command output goes to private `<request-id>.stdout` and `<request-id>.stderr` files there.
@@ -104,8 +113,7 @@ When this executable is reached through a PATH entry named `cargo`, it acts as
 a shim and queues the configured `real_cargo` binary. Set
 `LOCKED_BUILD_CLASS`, `LOCKED_BUILD_OWNER`, and `LOCKED_BUILD_TICKET` to label a
 request. Defaults are `point`, `cargo-shim`, and `MANUAL`; config and state
-default to `$HOME/.config/locked-build/policy.json` and
-`$HOME/.local/state/locked-build`. Leased commands carry a recursion marker so
+default to the same XDG and HOME paths listed above. Leased commands carry a recursion marker so
 nested Cargo calls execute the real binary directly.
 
 With `target_root`, each owner gets a private `CARGO_TARGET_DIR` beneath that

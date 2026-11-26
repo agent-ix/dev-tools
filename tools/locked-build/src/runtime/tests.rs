@@ -46,6 +46,18 @@ fn queued(store: &Store) -> Result<RequestId> {
     )
 }
 
+/// Trace: FR-011-AC-7
+#[test]
+fn direct_run_default_class_is_persisted_on_the_request() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    store.transaction(|state, _| {
+        assert_eq!(state.find(&id)?.class, "periodic");
+        Ok(())
+    })
+}
+
 fn live_worker_process(id: &RequestId) -> Result<(Child, ProcessIdentity)> {
     let mut child = Command::new("/bin/sh")
         .arg("-c")
@@ -109,10 +121,10 @@ fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
     assert!(admitted.contains("ix_build_slots_busy{host=\"your-build-host\"} 1"));
     assert!(admitted.contains("ix_build_slots_configured{host=\"your-build-host\"} 1"));
     assert!(admitted.contains(
-        "ix_build_queue_wait_seconds_count{host=\"your-build-host\",priority=\"check\"} 1"
+        "ix_build_queue_wait_seconds_count{host=\"your-build-host\",class=\"periodic\"} 1"
     ));
     assert!(
-        admitted.contains("ix_build_queue_depth{host=\"your-build-host\",priority=\"check\"} 0")
+        admitted.contains("ix_build_queue_depth{host=\"your-build-host\",class=\"periodic\"} 0")
     );
 
     store.transaction(|state, config| {
@@ -129,7 +141,7 @@ fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
     })?;
     let completed = metrics(&store)?;
     assert!(completed.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"ok\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"ok\"} 1"
     ));
     assert!(completed.contains("ix_build_slots_busy{host=\"your-build-host\"} 0"));
     let state_bytes = std::fs::read_to_string(store.path.join("state.json"))?;
@@ -706,7 +718,7 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
     if let Some(value) = prepared.rust_test_threads_env {
         command.env("RUST_TEST_THREADS", value);
     }
-    apply_incremental_environment(&mut command, &policy);
+    apply_incremental_environment(&mut command, &policy, None);
     let output = command.output()?;
     assert!(output.status.success());
     let environment = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -731,6 +743,67 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
     );
     assert_eq!(prepared.record.cargo_build_jobs, Some(4));
     assert_eq!(prepared.record.rust_test_threads, Some(3));
+    Ok(())
+}
+
+#[test]
+fn direct_test_binary_thread_limit_is_clamped_without_separator() {
+    let mut arguments = vec!["--test-threads=20".to_owned()];
+    let limited = clamp_test_threads(&mut arguments, Some(4));
+    assert!(limited.is_some_and(|limit| limit.clamped));
+    assert_eq!(arguments, ["--test-threads=4"]);
+}
+
+#[test]
+fn caller_environment_overrides_are_recorded_and_preserved_without_policy_values() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.cargo_incremental = None;
+    policy.target_root = None;
+    let mut request = request;
+    request.caller_cargo_incremental = Some("1".to_owned());
+    request.caller_cargo_target_dir = Some("/caller/target".to_owned());
+    let mut command = Command::new("/usr/bin/env");
+    command
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("CARGO_TARGET_DIR");
+    let (incremental, incremental_overwrote) = apply_incremental_environment(
+        &mut command,
+        &policy,
+        request.caller_cargo_incremental.as_deref(),
+    );
+    let (target, target_overwrote) = apply_target_environment(&mut command, &policy, &request)?;
+    let output = command.output()?;
+    assert!(output.status.success());
+    let environment = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        environment
+            .lines()
+            .any(|line| line == "CARGO_INCREMENTAL=1")
+    );
+    assert!(
+        environment
+            .lines()
+            .any(|line| line == "CARGO_TARGET_DIR=/caller/target")
+    );
+    assert_eq!(incremental.as_deref(), Some("1"));
+    assert!(!incremental_overwrote);
+    assert_eq!(
+        target.as_deref(),
+        Some(std::path::Path::new("/caller/target"))
+    );
+    assert!(!target_overwrote);
+
+    let mut policy_override = policy;
+    policy_override.cargo_incremental = Some(false);
+    let mut command = Command::new("/usr/bin/true");
+    let (effective, overwritten) =
+        apply_incremental_environment(&mut command, &policy_override, Some("1"));
+    assert_eq!(effective.as_deref(), Some("0"));
+    assert!(overwritten);
     Ok(())
 }
 
@@ -823,6 +896,7 @@ fn new_requests_use_per_class_memory_cap_overrides_and_default_cap() -> Result<(
     store.transaction(|state, _| {
         assert_eq!(state.find(&class_id)?.memory_cap_bytes, Some(768));
         assert_eq!(state.find(&default_id)?.memory_cap_bytes, Some(512));
+        assert_eq!(state.find(&default_id)?.class, "periodic");
         Ok(())
     })?;
     Ok(())
@@ -887,13 +961,22 @@ fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> R
     );
     assert_eq!(refused, MemoryEnforcement::Refused);
 
-    let fallback = select_memory_enforcement(
+    let (fallback, fallback_spec) = select_lease_launch(
         LauncherPlatform::Linux,
+        "/usr/bin/true",
+        &[],
         Some(4_096),
         crate::config::OnMissingCgroup::RssWatchdog,
         |_| false,
     );
     assert_eq!(fallback, MemoryEnforcement::RssWatchdog);
+    assert_eq!(fallback_spec.program, "/usr/bin/true");
+    assert!(
+        Command::new(fallback_spec.program)
+            .args(fallback_spec.arguments)
+            .status()?
+            .success()
+    );
     let recorded = LeaseRecord {
         memory_enforcement: fallback,
         ..LeaseRecord::default()
@@ -901,6 +984,15 @@ fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> R
     assert_eq!(
         serde_json::to_value(recorded)?["memory_enforcement"],
         "rss_watchdog"
+    );
+    assert_eq!(cgroup_cap_kill_reason(Some(fallback), false), None);
+    assert_eq!(
+        cgroup_cap_kill_reason(Some(MemoryEnforcement::SystemdScope), true),
+        Some("rss_cap")
+    );
+    assert_eq!(
+        cgroup_cap_kill_reason(Some(MemoryEnforcement::SystemdScope), false),
+        None
     );
 
     let scoped = select_memory_enforcement(
@@ -911,6 +1003,17 @@ fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> R
     );
     assert_eq!(scoped, MemoryEnforcement::SystemdScope);
     Ok(())
+}
+
+#[test]
+fn hanging_systemd_probe_is_killed_at_its_timeout() {
+    let started = std::time::Instant::now();
+    let available = run_probe_with_timeout(std::time::Duration::from_millis(50), || {
+        Command::new("/bin/sleep").arg("10").spawn()
+    });
+
+    assert!(!available);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
 }
 
 #[test]
@@ -941,18 +1044,7 @@ fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Re
             .any(|line| line == expected_target)
     );
     std::fs::write(target.join("artifact"), b"four")?;
-    store.transaction(|state, config| {
-        state.finish(
-            &id,
-            Completion {
-                code: Some(0),
-                ..Completion::default()
-            },
-            config,
-            now_ms()?,
-            clock_ms()?,
-        )
-    })?;
+    finish_started_request(&store, &id)?;
 
     cleanup_target(&store, &id)?;
     assert!(!target.exists());
@@ -965,39 +1057,33 @@ fn target_lifecycle_deletes_targets_past_the_idle_age_limit() -> Result<()> {
     let store = store(root.path())?;
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
     policy.target_root = Some(root.path().join("targets"));
-    policy.trim_after_ms = Some(0);
+    policy.trim_after_ms = Some(60_000);
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
     let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     let target = target_directory(&policy, &request, true)?
         .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
-    std::fs::write(target.join("artifact"), b"old")?;
-    store.transaction(|state, config| {
-        state.finish(
-            &id,
-            Completion {
-                code: Some(0),
-                ..Completion::default()
-            },
-            config,
-            now_ms()?,
-            clock_ms()?,
-        )
-    })?;
+    let artifact = target.join("artifact");
+    let file = std::fs::File::create(&artifact)?;
+    file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))?;
+    finish_started_request(&store, &id)?;
 
     cleanup_target(&store, &id)?;
-    assert!(!target.exists());
+    assert!(
+        target.exists(),
+        "recent lease end must override old artifact mtime"
+    );
     Ok(())
 }
 
 #[test]
-fn target_lifecycle_refuses_nested_symlink_without_deleting_its_destination() -> Result<()> {
+fn target_lifecycle_skips_symlinks_and_age_cleans_oversized_trees() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
     policy.target_root = Some(root.path().join("targets"));
-    policy.max_bytes = Some(0);
+    policy.trim_after_ms = Some(0);
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
@@ -1008,22 +1094,62 @@ fn target_lifecycle_refuses_nested_symlink_without_deleting_its_destination() ->
     std::fs::create_dir(&outside)?;
     std::fs::write(outside.join("keep"), b"safe")?;
     std::os::unix::fs::symlink(&outside, target.join("escape"))?;
+    std::fs::write(target.join("small"), b"data")?;
+    finish_started_request(&store, &id)?;
+
+    cleanup_target(&store, &id)?;
+    assert_eq!(std::fs::read(outside.join("keep"))?, b"safe");
+    assert!(!target.exists());
+    Ok(())
+}
+
+fn finish_started_request(store: &Store, id: &RequestId) -> Result<()> {
     store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        let request = state.find_mut(id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now);
+        request.started_clock_ms = Some(clock);
         state.finish(
-            &id,
+            id,
             Completion {
                 code: Some(0),
                 ..Completion::default()
             },
             config,
-            now_ms()?,
-            clock_ms()?,
+            now,
+            clock,
         )
-    })?;
+    })
+}
 
-    assert!(cleanup_target(&store, &id).is_err());
+#[test]
+fn target_cleanup_bounds_large_walk_and_age_removes_symlink_tree() -> Result<()> {
+    const TOO_MANY_ENTRIES: usize = 100_005;
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.target_root = Some(root.path().join("targets"));
+    policy.trim_after_ms = Some(0);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let target = target_directory(&policy, &request, true)?
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside)?;
+    std::fs::write(outside.join("keep"), b"safe")?;
+    std::os::unix::fs::symlink(&outside, target.join("escape"))?;
+    for index in 0..TOO_MANY_ENTRIES {
+        std::fs::write(target.join(format!("artifact-{index}")), [])?;
+    }
+    finish_started_request(&store, &id)?;
+
+    cleanup_target(&store, &id)?;
+    assert!(!target.exists());
     assert_eq!(std::fs::read(outside.join("keep"))?, b"safe");
-    assert!(target.exists());
     Ok(())
 }
 
@@ -1190,7 +1316,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
         )
     })?;
     assert!(metrics(&store)?.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"gate\",outcome=\"ok\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"ok\"} 1"
     ));
     Ok(())
 }
@@ -1517,13 +1643,13 @@ fn outcome_counters_survive_store_reopen_and_prune() -> Result<()> {
     let output = metrics(&reopened)?;
     assert_eq!(before_prune, metric_outcome_lines(&output));
     assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"cancelled\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"cancelled\"} 1"
     ));
     assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"aborted_thermal\"} 0"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"aborted_thermal\"} 0"
     ));
     assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"failed\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"failed\"} 1"
     ));
     Ok(())
 }

@@ -19,27 +19,30 @@ const MAX_LANE_LABELS: usize = 64;
 )]
 #[serde(rename_all = "snake_case")]
 enum PriorityClass {
-    Check,
-    Test,
-    Gate,
+    MustFix,
+    Point,
+    Block,
+    Periodic,
 }
 
 impl PriorityClass {
-    const ALL: [Self; 3] = [Self::Check, Self::Test, Self::Gate];
+    const ALL: [Self; 4] = [Self::MustFix, Self::Point, Self::Block, Self::Periodic];
 
     fn label(self) -> &'static str {
         match self {
-            Self::Check => "check",
-            Self::Test => "test",
-            Self::Gate => "gate",
+            Self::MustFix => "must-fix",
+            Self::Point => "point",
+            Self::Block => "block",
+            Self::Periodic => "periodic",
         }
     }
 
-    fn from_priority(priority: u32) -> Self {
-        match priority {
-            0 => Self::Check,
-            1 => Self::Test,
-            _ => Self::Gate,
+    fn from_class(class: &str) -> Self {
+        match class {
+            "must-fix" => Self::MustFix,
+            "point" => Self::Point,
+            "block" => Self::Block,
+            _ => Self::Periodic,
         }
     }
 }
@@ -224,10 +227,10 @@ impl MetricsState {
                     .pre_reboot_wait_ms
                     .remove(&event.request_id.0)
                     .unwrap_or(0);
-                self.record_queue_wait(event.priority, event.wait_ms.saturating_add(pre_reboot))?;
+                self.record_queue_wait(&event.class, event.wait_ms.saturating_add(pre_reboot))?;
             } else if let Some(outcome) = Outcome::from_event(event) {
                 self.pre_reboot_wait_ms.remove(&event.request_id.0);
-                self.record_terminal(event.priority, outcome)?;
+                self.record_terminal(&event.class, outcome)?;
             }
             self.last_event_sequence = sequence;
         }
@@ -235,10 +238,10 @@ impl MetricsState {
         Ok(())
     }
 
-    fn record_terminal(&mut self, priority: u32, outcome: Outcome) -> Result<()> {
+    fn record_terminal(&mut self, class: &str, outcome: Outcome) -> Result<()> {
         let count = self
             .builds
-            .entry(PriorityClass::from_priority(priority).label().to_owned())
+            .entry(PriorityClass::from_class(class).label().to_owned())
             .or_default()
             .entry(outcome.label().to_owned())
             .or_default();
@@ -248,10 +251,10 @@ impl MetricsState {
         Ok(())
     }
 
-    fn record_queue_wait(&mut self, priority: u32, wait_ms: u64) -> Result<()> {
+    fn record_queue_wait(&mut self, class: &str, wait_ms: u64) -> Result<()> {
         let histogram = self
             .queue_wait
-            .entry(PriorityClass::from_priority(priority).label().to_owned())
+            .entry(PriorityClass::from_class(class).label().to_owned())
             .or_default();
         histogram.count = histogram
             .count
@@ -412,11 +415,11 @@ impl MetricsState {
                 .iter()
                 .filter(|request| {
                     request.phase == crate::model::Phase::Queued
-                        && PriorityClass::from_priority(request.priority) == priority
+                        && PriorityClass::from_class(&request.class) == priority
                 })
                 .count();
             output.push_str(&format!(
-                "ix_build_queue_depth{{host=\"{host}\",priority=\"{}\"}} {depth}\n",
+                "ix_build_queue_depth{{host=\"{host}\",class=\"{}\"}} {depth}\n",
                 priority.label()
             ));
         }
@@ -473,17 +476,17 @@ impl MetricsState {
                     .and_then(|value| value.buckets.get(&bound))
                     .copied()
                     .unwrap_or(0);
-                output.push_str(&format!("ix_build_queue_wait_seconds_bucket{{host=\"{host}\",priority=\"{}\",le=\"{bound}\"}} {bucket}\n", priority.label()));
+                output.push_str(&format!("ix_build_queue_wait_seconds_bucket{{host=\"{host}\",class=\"{}\",le=\"{bound}\"}} {bucket}\n", priority.label()));
             }
-            output.push_str(&format!("ix_build_queue_wait_seconds_bucket{{host=\"{host}\",priority=\"{}\",le=\"+Inf\"}} {count}\n", priority.label()));
+            output.push_str(&format!("ix_build_queue_wait_seconds_bucket{{host=\"{host}\",class=\"{}\",le=\"+Inf\"}} {count}\n", priority.label()));
             let sum_ms = histogram.map_or(0, |value| value.sum_ms);
             output.push_str(&format!(
-                "ix_build_queue_wait_seconds_sum{{host=\"{host}\",priority=\"{}\"}} {}\n",
+                "ix_build_queue_wait_seconds_sum{{host=\"{host}\",class=\"{}\"}} {}\n",
                 priority.label(),
                 seconds(sum_ms)
             ));
             output.push_str(&format!(
-                "ix_build_queue_wait_seconds_count{{host=\"{host}\",priority=\"{}\"}} {count}\n",
+                "ix_build_queue_wait_seconds_count{{host=\"{host}\",class=\"{}\"}} {count}\n",
                 priority.label()
             ));
         }
@@ -523,7 +526,7 @@ impl MetricsState {
                     .and_then(|counts| counts.get(outcome.label()))
                     .copied()
                     .unwrap_or(0);
-                output.push_str(&format!("ix_build_builds_total{{host=\"{host}\",priority=\"{}\",outcome=\"{}\"}} {value}\n", priority.label(), outcome.label()));
+                output.push_str(&format!("ix_build_builds_total{{host=\"{host}\",class=\"{}\",outcome=\"{}\"}} {value}\n", priority.label(), outcome.label()));
             }
         }
 
@@ -666,9 +669,12 @@ mod tests {
             ticket: "SWM-242".to_owned(),
             units: 1,
             priority: 0,
+            class: "periodic".to_owned(),
             memory_cap_bytes: None,
             caller_cargo_build_jobs: None,
             caller_rust_test_threads: None,
+            caller_cargo_incremental: None,
+            caller_cargo_target_dir: None,
             lease_record: None,
             enqueued_at_ms: 0,
             enqueued_clock_ms: 0,
@@ -734,7 +740,7 @@ mod tests {
                 "ix_build_admission_blocked_seconds_total",
             ]
         );
-        assert!(text.contains("ix_build_queue_depth{host=\"draco\",priority=\"check\"} 1"));
+        assert!(text.contains("ix_build_queue_depth{host=\"draco\",class=\"periodic\"} 1"));
         assert!(
             text.contains(
                 "ix_build_lane_running{host=\"draco\",lane=\"draco:ix-relay:running\"} 1"
@@ -848,7 +854,7 @@ mod tests {
         let text = current.metrics.exposition(&current, &config, 0, 0)?;
         let elapsed = started.elapsed();
         eprintln!("10,000-request exposition took {elapsed:?}");
-        assert!(text.contains("ix_build_queue_depth{host=\"draco\",priority=\"check\"} 10000"));
+        assert!(text.contains("ix_build_queue_depth{host=\"draco\",class=\"periodic\"} 10000"));
         assert!(
             elapsed < std::time::Duration::from_millis(200),
             "10,000-request exposition took {elapsed:?}"
@@ -865,7 +871,7 @@ mod tests {
         for priority in PriorityClass::ALL {
             for outcome in Outcome::ALL {
                 assert!(initial.contains(&format!(
-                    "ix_build_builds_total{{host=\"draco\",priority=\"{}\",outcome=\"{}\"}} 0",
+                    "ix_build_builds_total{{host=\"draco\",class=\"{}\",outcome=\"{}\"}} 0",
                     priority.label(),
                     outcome.label()
                 )));
@@ -890,10 +896,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(changed.len(), 4);
         let expected = [
-            "ix_build_builds_total{host=\"draco\",priority=\"check\",outcome=\"ok\"}",
-            "ix_build_builds_total{host=\"draco\",priority=\"test\",outcome=\"failed\"}",
-            "ix_build_builds_total{host=\"draco\",priority=\"gate\",outcome=\"cancelled\"}",
-            "ix_build_builds_total{host=\"draco\",priority=\"gate\",outcome=\"timed_out\"}",
+            "ix_build_builds_total{host=\"draco\",class=\"periodic\",outcome=\"ok\"}",
+            "ix_build_builds_total{host=\"draco\",class=\"block\",outcome=\"failed\"}",
+            "ix_build_builds_total{host=\"draco\",class=\"point\",outcome=\"cancelled\"}",
+            "ix_build_builds_total{host=\"draco\",class=\"must-fix\",outcome=\"timed_out\"}",
         ];
         for key in expected {
             assert_eq!(after.get(key).map(String::as_str), Some("1"));
@@ -903,14 +909,14 @@ mod tests {
                 .iter()
                 .all(|(key, value)| expected.contains(&key.as_str()) && *value == "1")
         );
-        assert!(counted.contains("priority=\"gate\",outcome=\"timed_out\"} 1"));
+        assert!(counted.contains("class=\"must-fix\",outcome=\"timed_out\"} 1"));
         assert!(!counted.contains("outcome=\"aborted_thermal\"} 1"));
         Ok(())
     }
 
     /// Trace: FR-015-AC-9
     #[test]
-    fn failed_check_request_increments_only_failed_from_the_zero_start() -> Result<()> {
+    fn failed_periodic_request_increments_only_failed_from_the_zero_start() -> Result<()> {
         let config = policy()?;
         let mut state = state(Vec::new());
         let initial = state.metrics.exposition(&state, &config, 0, 0)?;
@@ -928,13 +934,13 @@ mod tests {
         assert_eq!(changed.len(), 1);
         assert_eq!(
             after
-                .get("ix_build_builds_total{host=\"draco\",priority=\"check\",outcome=\"failed\"}")
+                .get("ix_build_builds_total{host=\"draco\",class=\"periodic\",outcome=\"failed\"}")
                 .map(String::as_str),
             Some("1")
         );
         assert_eq!(
             changed[0].0.as_str(),
-            "ix_build_builds_total{host=\"draco\",priority=\"check\",outcome=\"failed\"}"
+            "ix_build_builds_total{host=\"draco\",class=\"periodic\",outcome=\"failed\"}"
         );
         Ok(())
     }
@@ -953,7 +959,7 @@ mod tests {
                 Outcome::AbortedThermal,
             ] {
                 assert!(initial.contains(&format!(
-                    "ix_build_builds_total{{host=\"draco\",priority=\"{}\",outcome=\"{}\"}} 0",
+                    "ix_build_builds_total{{host=\"draco\",class=\"{}\",outcome=\"{}\"}} 0",
                     priority.label(),
                     outcome.label()
                 )));
@@ -979,10 +985,10 @@ mod tests {
         assert!(text.contains("# TYPE ix_build_builds_total counter"));
         assert!(text.contains("# TYPE ix_build_queue_wait_seconds histogram"));
         assert!(
-            text.contains("ix_build_queue_wait_seconds_count{host=\"draco\",priority=\"check\"} 1")
+            text.contains("ix_build_queue_wait_seconds_count{host=\"draco\",class=\"periodic\"} 1")
         );
         assert!(text.contains(
-            "ix_build_queue_wait_seconds_bucket{host=\"draco\",priority=\"check\",le=\"5\"} 1"
+            "ix_build_queue_wait_seconds_bucket{host=\"draco\",class=\"periodic\",le=\"5\"} 1"
         ));
         assert!(text.contains("outcome=\"ok\"} 1"));
         Ok(())
@@ -999,7 +1005,7 @@ mod tests {
         let text = metrics.exposition(&empty, &config, 0, 0)?;
         assert!(
             text.contains(
-                "ix_build_queue_wait_seconds_sum{host=\"draco\",priority=\"check\"} 4.080"
+                "ix_build_queue_wait_seconds_sum{host=\"draco\",class=\"periodic\"} 4.080"
             )
         );
         Ok(())
@@ -1107,9 +1113,12 @@ mod tests {
             ticket: "PRIVATE-TICKET".to_owned(),
             units: 1,
             priority: 0,
+            class: "periodic".to_owned(),
             memory_cap_bytes: None,
             caller_cargo_build_jobs: None,
             caller_rust_test_threads: None,
+            caller_cargo_incremental: None,
+            caller_cargo_target_dir: None,
             lease_record: None,
             enqueued_at_ms: 100,
             enqueued_clock_ms: 100,
@@ -1203,6 +1212,13 @@ mod tests {
             },
             units: 1,
             priority,
+            class: match priority {
+                0 => "periodic",
+                1 => "block",
+                2 => "point",
+                _ => "must-fix",
+            }
+            .to_owned(),
             capacity_units: 1,
             free_units: 1,
             wait_ms,
@@ -1217,5 +1233,7 @@ mod tests {
         event.reason = Some("rss_cap".to_owned());
 
         assert_eq!(Outcome::from_event(&event), Some(Outcome::RssCap));
+        event.reason = None;
+        assert_eq!(Outcome::from_event(&event), Some(Outcome::Failed));
     }
 }

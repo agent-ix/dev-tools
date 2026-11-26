@@ -13,7 +13,8 @@ All fields are required except `sample_file`, `cargo_build_jobs`,
 `memory_budget_bytes`, `memory_cap_bytes`, `memory_cap_by_class`, and
 `on_missing_cgroup`; unknown fields are rejected. `lease_accounted` requires a
 positive `memory_budget_bytes` and `memory_cap_bytes` no greater than that
-budget.
+budget. `memory_per_unit_bytes` and `memory_reserve_bytes` are required only in
+`live_available` mode.
 Relative filesystem paths resolve from the policy file's directory.
 The polling interval cannot exceed the hold deadline or termination grace.
 
@@ -22,8 +23,8 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `host` | Stable host label for requests and samples. |
 | `capacity_units` | Currently enabled units; zero pauses admission. |
 | `maximum_units` | Largest feasible request; temporary shrink preserves queue age. |
-| `memory_per_unit_bytes` | RAM budget charged per requested unit. |
-| `memory_reserve_bytes` | RAM retained outside build leases. |
+| `memory_per_unit_bytes` | RAM budget charged per requested unit in `live_available` mode; optional in `lease_accounted` mode. |
+| `memory_reserve_bytes` | RAM retained outside build leases in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_admission` | `lease_accounted` (default) charges fixed lease caps against `memory_budget_bytes` and does not read live available memory; `live_available` compares `MemAvailable` with lease-unit charges. |
 | `memory_budget_bytes` | Total concurrent lease-cap budget required by `lease_accounted` admission. |
 | `memory_cap_bytes` | Default cap for each lease. It is required by `lease_accounted`; Linux uses a systemd scope when available and the RSS watchdog otherwise. |
@@ -45,7 +46,7 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `rust_test_threads` | Optional `RUST_TEST_THREADS` value set for each leased command. |
 | `cargo_incremental` | Optional incremental compilation setting; true sets `CARGO_INCREMENTAL=1`, false sets it to `0`. |
 | `target_root` | Optional root for owner-specific `CARGO_TARGET_DIR` directories. Relative paths resolve from the policy file. |
-| `trim_after_ms` | Optional idle age after which an owner's target directory is deleted when its lease ends. |
+| `trim_after_ms` | Optional idle age since the owner's last lease ended, after which its target directory is deleted. |
 | `max_bytes` | Optional target size limit; the target directory is deleted when it exceeds this many bytes at lease end. |
 | `priority_classes` | Optional mapping of `must-fix`, `point`, `block`, and `periodic` to numeric priorities no greater than `maximum_priority`. |
 | `real_cargo` | Optional Cargo executable path used when this binary is invoked with `argv[0]` basename `cargo`. Relative paths resolve from the policy file. |
@@ -60,16 +61,22 @@ leased units include the command being started. The formula is
 a policy value of 8 with 3 active units sets `CARGO_BUILD_JOBS=2`.
 When target lifecycle is enabled, each owner receives one directory under
 `target_root`. Cleanup runs after the owner's last active lease, and is skipped
-unless the age or size limit is exceeded. Symlinks in the target tree are
-rejected, and cleanup never follows them.
-`run --class NAME` looks up `NAME` in `priority_classes`; the default numeric
-priority remains 0 when neither `--class` nor `--priority` is supplied. Class
-and numeric priority options cannot be used together. Metrics continue grouping
-numeric priorities 0, 1, and 2 or greater under `check`, `test`, and `gate`.
+unless the age or size limit is exceeded. Symlink entries are skipped and never
+followed. Inspection uses a bounded iterative walk; reaching the entry limit
+skips size-based cleanup, while age-based cleanup can still remove the whole
+target directory.
+`run --class NAME` looks up `NAME` in `priority_classes`; omitting both class and
+numeric priority records class `periodic` and uses the configured periodic priority
+when present. Class and numeric priority options cannot be used together. Metrics
+use a `class` label with `must-fix`, `point`, `block`, or `periodic`.
 
-The PATH shim reads its policy from `LOCKED_BUILD_CONFIG`, defaulting to
-`$HOME/.config/locked-build/policy.json`, and its state from
-`LOCKED_BUILD_STATE`, defaulting to `$HOME/.local/state/locked-build`. It reads
+Scheduler commands and the PATH shim read policy from `--config`, then
+`LOCKED_BUILD_CONFIG`, then `$XDG_CONFIG_HOME/locked-build/policy.json` or
+`$HOME/.config/locked-build/policy.json`. State resolves from `--state`, then
+`LOCKED_BUILD_STATE`, then `$XDG_STATE_HOME/locked-build` or
+`$HOME/.local/state/locked-build`; the state directory is created mode `0700`.
+The persisted state file is `<state-directory>/state.json`.
+Relative XDG values are ignored. The shim reads
 `LOCKED_BUILD_CLASS`, `LOCKED_BUILD_OWNER`, and `LOCKED_BUILD_TICKET`, defaulting
 to `point`, `cargo-shim`, and `MANUAL`. A leased command receives
 `LOCKED_BUILD_LEASE=1`; when a shim invocation sees that marker, it execs

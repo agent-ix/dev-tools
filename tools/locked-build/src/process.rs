@@ -184,6 +184,38 @@ impl Processes {
         killpg(Pid::from_raw(pid), signal)
             .map_err(|error| Error::new(ErrorCode::Io, format!("group signal failed: {error}")))
     }
+
+    pub(crate) fn group_oom_kill_count(&self, group: u32) -> Option<u64> {
+        if !self.complete {
+            return None;
+        }
+        self.rows
+            .iter()
+            .filter(|(_, row)| row.group == Some(group) && !row.zombie)
+            .filter_map(|(pid, _)| cgroup_oom_kill_count(*pid))
+            .max()
+    }
+}
+
+fn cgroup_oom_kill_count(pid: u32) -> Option<u64> {
+    let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?;
+    let path = std::path::Path::new("/sys/fs/cgroup")
+        .join(relative.trim_start_matches('/'))
+        .join("memory.events");
+    let events = std::fs::read_to_string(path).ok()?;
+    parse_oom_kill_count(&events)
+}
+
+fn parse_oom_kill_count(events: &str) -> Option<u64> {
+    events.lines().find_map(|line| {
+        let (name, value) = line.split_once(char::is_whitespace)?;
+        (name == "oom_kill")
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
 }
 
 #[cfg(test)]
@@ -279,5 +311,18 @@ mod tests {
             ]),
         };
         assert_eq!(processes.group_memory_bytes(77, &[77]), Some(600));
+    }
+
+    #[test]
+    fn cgroup_oom_kill_event_is_distinguished_from_a_manual_signal() {
+        assert_eq!(
+            parse_oom_kill_count("low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_oom_kill_count("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n"),
+            Some(0)
+        );
+        assert_eq!(parse_oom_kill_count("low 0\nmax 1\n"), None);
     }
 }

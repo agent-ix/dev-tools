@@ -42,8 +42,10 @@ pub struct Config {
     /// Maximum feasible request size, independent of temporary shrink.
     pub maximum_units: u32,
     /// Memory budget charged for each resource unit.
+    #[serde(default)]
     pub memory_per_unit_bytes: u64,
     /// Free memory kept outside build leases.
+    #[serde(default)]
     pub memory_reserve_bytes: u64,
     /// Filesystem space kept outside build leases.
     pub disk_reserve_bytes: u64,
@@ -144,7 +146,8 @@ impl Config {
             && self.host.len() <= 128
             && self.capacity_units <= self.maximum_units
             && self.maximum_units > 0
-            && self.memory_per_unit_bytes > 0
+            && (self.memory_admission == MemoryAdmissionMode::LeaseAccounted
+                || self.memory_per_unit_bytes > 0)
             && self.maximum_load.is_finite()
             && self.maximum_load > 0.0
             && self.aging_ms > 0
@@ -185,9 +188,10 @@ impl Config {
                         })
                 }
             })
-            && u64::from(self.maximum_units)
-                .checked_mul(self.memory_per_unit_bytes)
-                .is_some()
+            && (self.memory_admission == MemoryAdmissionMode::LeaseAccounted
+                || u64::from(self.maximum_units)
+                    .checked_mul(self.memory_per_unit_bytes)
+                    .is_some())
             && (u64::from(self.maximum_priority) + 1)
                 .checked_mul(self.aging_ms)
                 .is_some();
@@ -353,6 +357,21 @@ mod tests {
         assert_eq!(config.memory_admission, MemoryAdmissionMode::LeaseAccounted);
         assert_eq!(config.memory_budget_bytes, Some(17_179_869_184));
         assert_eq!(config.memory_cap_bytes, Some(4_294_967_296));
+        config.validate()
+    }
+
+    #[test]
+    fn lease_accounted_does_not_require_per_unit_or_reserve_values() -> Result<()> {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../policy.example.json"))?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            Error::new(ErrorCode::Configuration, "policy fixture is not an object")
+        })?;
+        object.remove("memory_per_unit_bytes");
+        object.remove("memory_reserve_bytes");
+        let config: Config = serde_json::from_value(value)?;
+        assert_eq!(config.memory_per_unit_bytes, 0);
+        assert_eq!(config.memory_reserve_bytes, 0);
         config.validate()
     }
 

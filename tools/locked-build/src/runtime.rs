@@ -68,6 +68,8 @@ pub(crate) fn enqueue(
     let cwd = std::env::current_dir()?;
     let caller_cargo_build_jobs = std::env::var("CARGO_BUILD_JOBS").ok();
     let caller_rust_test_threads = std::env::var("RUST_TEST_THREADS").ok();
+    let caller_cargo_incremental = std::env::var("CARGO_INCREMENTAL").ok();
+    let caller_cargo_target_dir = std::env::var("CARGO_TARGET_DIR").ok();
     let now = now_ms()?;
     let clock = clock_ms()?;
     store.transaction(|state, config| {
@@ -95,11 +97,14 @@ pub(crate) fn enqueue(
             ticket: ticket.to_owned(),
             units,
             priority,
+            class: class.unwrap_or("periodic").to_owned(),
             memory_cap_bytes: class
                 .and_then(|name| config.memory_cap_by_class.get(name).copied())
                 .or(config.memory_cap_bytes),
             caller_cargo_build_jobs,
             caller_rust_test_threads,
+            caller_cargo_incremental,
+            caller_cargo_target_dir,
             lease_record: None,
             enqueued_at_ms: now,
             enqueued_clock_ms: clock,
@@ -131,6 +136,7 @@ pub(crate) fn priority_for_class(store: &Store, class: &str) -> Result<u32> {
             .priority_classes
             .get(class)
             .copied()
+            .or_else(|| (class == "periodic").then_some(0))
             .ok_or_else(|| Error::new(ErrorCode::Request, "priority class is not configured"))
     })
 }
@@ -209,6 +215,8 @@ pub struct RequestReport {
     pub units: u32,
     /// Base priority.
     pub priority: u32,
+    /// Named priority class selected for the request.
+    pub class: String,
     /// Enqueue time.
     pub enqueued_at_ms: u64,
     /// Start time when admitted.
@@ -360,6 +368,7 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
                     state: phase_name(request.phase).to_owned(),
                     units: request.units,
                     priority: request.priority,
+                    class: request.class.clone(),
                     enqueued_at_ms: request.enqueued_at_ms,
                     started_at_ms: request.started_at_ms,
                     ended_at_ms: request.ended_at_ms,
@@ -645,10 +654,20 @@ fn supervise(
             return Ok(());
         }
     };
+    let mut cgroup_oom_kill_observed = false;
     let mut status = None;
     loop {
         // A dead watchdog remains a group member until its parent reaps it.
         watchdog_child.try_wait()?;
+        if request
+            .lease_record
+            .as_ref()
+            .is_some_and(|record| record.memory_enforcement == MemoryEnforcement::SystemdScope)
+        {
+            cgroup_oom_kill_observed |= Processes::read()
+                .group_oom_kill_count(watchdog.pid)
+                .is_some_and(|count| count > 0);
+        }
         if status.is_none() {
             status = child.try_wait()?;
         }
@@ -697,12 +716,13 @@ fn supervise(
                     Completion {
                         code: outcome.code(),
                         signal: outcome.signal(),
-                        reason: (outcome.signal() == Some(signal_hook::consts::SIGKILL)
-                            && request
-                                .memory_cap_bytes
-                                .or(config.memory_cap_bytes)
-                                .is_some())
-                        .then_some("rss_cap"),
+                        reason: cgroup_cap_kill_reason(
+                            request
+                                .lease_record
+                                .as_ref()
+                                .map(|record| record.memory_enforcement),
+                            cgroup_oom_kill_observed,
+                        ),
                     },
                 )?;
                 return Ok(None);
@@ -722,6 +742,37 @@ fn start_command(
     fence: &WorkerFence,
     watchdog: &crate::model::ProcessIdentity,
 ) -> Result<CommandStart> {
+    let (config_snapshot, memory_cap) = store.transaction(|state, config| {
+        fence.require_running(state.find(&request.id)?)?;
+        if state.find(&request.id)?.watchdog.as_ref() != Some(watchdog)
+            || Processes::read().role_identity(watchdog, &request.id, "watchdog", watchdog.pid)
+                != IdentityState::Matching
+        {
+            return Err(Error::new(
+                ErrorCode::State,
+                "command group ownership unavailable",
+            ));
+        }
+        Ok((
+            config.clone(),
+            request.memory_cap_bytes.or(config.memory_cap_bytes),
+        ))
+    })?;
+    let (mut enforcement, _probe_launch_spec) = select_lease_launch(
+        LauncherPlatform::current(),
+        request
+            .command
+            .first()
+            .ok_or_else(|| Error::new(ErrorCode::State, "persisted empty command"))?,
+        request.command.get(1..).unwrap_or_default(),
+        memory_cap,
+        config_snapshot.on_missing_cgroup,
+        |cap| systemd_scope_available(cap, Duration::from_secs(2)),
+    );
+    if enforcement == MemoryEnforcement::RssWatchdog && !Processes::read().can_sample_memory() {
+        enforcement = MemoryEnforcement::Refused;
+    }
+
     store.transaction(|state, config| {
         fence.require_running(state.find(&request.id)?)?;
         if state.find(&request.id)?.watchdog.as_ref() != Some(watchdog)
@@ -756,23 +807,19 @@ fn start_command(
             active_units,
         );
         let memory_cap = request.memory_cap_bytes.or(config.memory_cap_bytes);
-        let mut enforcement = select_memory_enforcement(
-            LauncherPlatform::current(),
-            memory_cap,
-            config.on_missing_cgroup,
-            systemd_scope_available,
-        );
-        if enforcement == MemoryEnforcement::RssWatchdog && !Processes::read().can_sample_memory() {
-            enforcement = MemoryEnforcement::Refused;
-        }
         let mut lease_record = environment.record;
         lease_record.memory_enforcement = enforcement;
-        state.find_mut(&request.id)?.lease_record = Some(lease_record);
         if enforcement == MemoryEnforcement::Refused {
+            state.find_mut(&request.id)?.lease_record = Some(lease_record);
             return Ok(CommandStart::Refused);
         }
-        let launch_spec =
-            lease_command_spec(LauncherPlatform::current(), program, &arguments, memory_cap);
+        let launch_spec = lease_command_spec_for_enforcement(
+            LauncherPlatform::current(),
+            program,
+            &arguments,
+            memory_cap,
+            enforcement,
+        );
         let mut command = Command::new(launch_spec.program);
         command
             .args(launch_spec.arguments)
@@ -784,8 +831,18 @@ fn start_command(
         if let Some(value) = environment.rust_test_threads_env {
             command.env("RUST_TEST_THREADS", value);
         }
-        apply_incremental_environment(&mut command, config);
-        apply_target_environment(&mut command, config, request)?;
+        let (incremental, incremental_overwrote_caller) = apply_incremental_environment(
+            &mut command,
+            config,
+            request.caller_cargo_incremental.as_deref(),
+        );
+        let (target_dir, target_overwrote_caller) =
+            apply_target_environment(&mut command, config, request)?;
+        lease_record.cargo_incremental = incremental;
+        lease_record.cargo_incremental_overwrote_caller = incremental_overwrote_caller;
+        lease_record.cargo_target_dir = target_dir;
+        lease_record.cargo_target_dir_overwrote_caller = target_overwrote_caller;
+        state.find_mut(&request.id)?.lease_record = Some(lease_record);
         command
             .spawn()
             .map(CommandStart::Started)
@@ -855,17 +912,57 @@ fn lease_command_spec(
     }
 }
 
-fn systemd_scope_available(memory_cap_bytes: u64) -> bool {
+fn lease_command_spec_for_enforcement(
+    platform: LauncherPlatform,
+    program: &str,
+    arguments: &[String],
+    memory_cap_bytes: Option<u64>,
+    enforcement: MemoryEnforcement,
+) -> LaunchSpec {
+    let scope_cap = (enforcement == MemoryEnforcement::SystemdScope)
+        .then_some(memory_cap_bytes)
+        .flatten();
+    lease_command_spec(platform, program, arguments, scope_cap)
+}
+
+fn systemd_scope_available(memory_cap_bytes: u64, timeout: Duration) -> bool {
     let spec = lease_command_spec(
         LauncherPlatform::Linux,
         "/usr/bin/true",
         &[],
         Some(memory_cap_bytes),
     );
-    Command::new(spec.program)
-        .args(spec.arguments)
-        .status()
-        .is_ok_and(|status| status.success())
+    run_probe_with_timeout(timeout, || {
+        Command::new(spec.program).args(spec.arguments).spawn()
+    })
+}
+
+fn run_probe_with_timeout(
+    timeout: Duration,
+    spawn: impl FnOnce() -> std::io::Result<Child>,
+) -> bool {
+    let Ok(mut child) = spawn() else {
+        return false;
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 fn select_memory_enforcement(
@@ -886,6 +983,32 @@ fn select_memory_enforcement(
     }
 }
 
+fn select_lease_launch(
+    platform: LauncherPlatform,
+    program: &str,
+    arguments: &[String],
+    memory_cap_bytes: Option<u64>,
+    on_missing: crate::config::OnMissingCgroup,
+    probe: impl FnMut(u64) -> bool,
+) -> (MemoryEnforcement, LaunchSpec) {
+    let enforcement = select_memory_enforcement(platform, memory_cap_bytes, on_missing, probe);
+    let launch = lease_command_spec_for_enforcement(
+        platform,
+        program,
+        arguments,
+        memory_cap_bytes,
+        enforcement,
+    );
+    (enforcement, launch)
+}
+
+fn cgroup_cap_kill_reason(
+    enforcement: Option<MemoryEnforcement>,
+    oom_kill_observed: bool,
+) -> Option<&'static str> {
+    (enforcement == Some(MemoryEnforcement::SystemdScope) && oom_kill_observed).then_some("rss_cap")
+}
+
 struct PreparedBuildEnvironment {
     cargo_build_jobs_env: Option<String>,
     rust_test_threads_env: Option<String>,
@@ -900,12 +1023,7 @@ fn prepare_build_environment(
     active_units: u32,
 ) -> PreparedBuildEnvironment {
     let cargo_cli = clamp_argument(arguments, &["-j", "--jobs"], false, config.cargo_build_jobs);
-    let rust_cli = clamp_argument(
-        arguments,
-        &["--test-threads"],
-        true,
-        config.rust_test_threads,
-    );
+    let rust_cli = clamp_test_threads(arguments, config.rust_test_threads);
 
     let (cargo_build_jobs_env, cargo_build_jobs, cargo_build_jobs_clamped) =
         if let Some(value) = cargo_cli {
@@ -950,6 +1068,7 @@ fn prepare_build_environment(
             rust_test_threads,
             rust_test_threads_clamped,
             memory_enforcement: MemoryEnforcement::NotConfigured,
+            ..LeaseRecord::default()
         },
     }
 }
@@ -1045,11 +1164,47 @@ fn to_u32(value: u64) -> Option<u32> {
     u32::try_from(value).ok()
 }
 
-fn apply_incremental_environment(command: &mut Command, config: &crate::config::Config) {
-    if let Some(incremental) = config.cargo_incremental {
-        command.env("CARGO_INCREMENTAL", if incremental { "1" } else { "0" });
+fn clamp_test_threads(arguments: &mut [String], maximum: Option<u32>) -> Option<ArgumentLimit> {
+    let separator = arguments.iter().position(|argument| argument == "--");
+    let start = separator.map_or(0, |index| index.saturating_add(1));
+    for index in start..arguments.len() {
+        if arguments[index] == "--test-threads" {
+            return Some(clamp_separate_argument(arguments, index, maximum));
+        }
+        if let Some(raw) = arguments[index].strip_prefix("--test-threads=") {
+            let parsed = raw.parse::<u64>().ok();
+            let clamped =
+                parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+            if clamped {
+                arguments[index] = format!("--test-threads={}", maximum.unwrap_or_default());
+            }
+            return Some(ArgumentLimit {
+                value: parsed.map(|value| maximum.map_or(value, |max| value.min(u64::from(max)))),
+                clamped,
+            });
+        }
+    }
+    None
+}
+
+fn apply_incremental_environment(
+    command: &mut Command,
+    config: &crate::config::Config,
+    caller_value: Option<&str>,
+) -> (Option<String>, bool) {
+    let policy_value = config
+        .cargo_incremental
+        .map(|incremental| if incremental { "1" } else { "0" });
+    let effective = policy_value
+        .map(str::to_owned)
+        .or_else(|| caller_value.map(str::to_owned));
+    if let Some(value) = &effective {
+        command.env("CARGO_INCREMENTAL", value);
+    } else {
+        command.env_remove("CARGO_INCREMENTAL");
     }
     command.env("LOCKED_BUILD_LEASE", "1");
+    (effective, policy_value.is_some() && caller_value.is_some())
 }
 
 fn target_directory(
@@ -1101,11 +1256,19 @@ fn apply_target_environment(
     command: &mut Command,
     config: &crate::config::Config,
     request: &Request,
-) -> Result<()> {
+) -> Result<(Option<std::path::PathBuf>, bool)> {
     if let Some(target) = target_directory(config, request, true)? {
-        command.env("CARGO_TARGET_DIR", target);
+        command.env("CARGO_TARGET_DIR", &target);
+        return Ok((Some(target), request.caller_cargo_target_dir.is_some()));
     }
-    Ok(())
+    if let Some(caller_value) = &request.caller_cargo_target_dir {
+        let target = std::path::PathBuf::from(caller_value);
+        command.env("CARGO_TARGET_DIR", &target);
+        Ok((Some(target), false))
+    } else {
+        command.env_remove("CARGO_TARGET_DIR");
+        Ok((None, false))
+    }
 }
 
 fn owner_target_key(owner: &str) -> String {
@@ -1126,43 +1289,106 @@ fn owner_target_key(owner: &str) -> String {
 }
 
 fn cleanup_target(store: &Store, id: &RequestId) -> Result<()> {
-    store.transaction(|state, config| {
+    let plan = store.transaction(|state, config| {
         let request = state.find(id)?;
-        let still_active = state.requests.iter().any(|candidate| {
-            candidate.id != request.id
-                && candidate.owner == request.owner
-                && candidate.phase == Phase::Running
-        });
+        let still_active = state
+            .requests
+            .iter()
+            .any(|candidate| candidate.owner == request.owner && candidate.phase == Phase::Running);
         if still_active {
-            return Ok(());
+            return Ok(None);
         }
         let Some(target) = target_directory(config, request, false)? else {
-            return Ok(());
+            return Ok(None);
         };
-        let Some((bytes, newest_modified)) = inspect_target_tree(&target)? else {
-            return Ok(());
-        };
-        let too_large = config.max_bytes.is_some_and(|limit| bytes > limit);
-        let too_old = config.trim_after_ms.is_some_and(|limit| {
-            std::time::SystemTime::now()
-                .duration_since(newest_modified)
-                .is_ok_and(|age| age.as_millis() >= u128::from(limit))
-        });
-        if too_large || too_old {
-            let confirmed = target_directory(config, request, false)?;
-            if confirmed.as_deref() != Some(target.as_path()) {
-                return Err(Error::new(
-                    ErrorCode::Configuration,
-                    "target directory changed before cleanup",
-                ));
-            }
-            std::fs::remove_dir_all(target)?;
+        if config.trim_after_ms.is_none() && config.max_bytes.is_none() {
+            return Ok(None);
         }
-        Ok(())
-    })
+        let last_lease_end_ms = state
+            .requests
+            .iter()
+            .filter(|candidate| {
+                candidate.owner == request.owner && candidate.started_at_ms.is_some()
+            })
+            .filter_map(|candidate| candidate.ended_at_ms)
+            .max();
+        Ok(Some(TargetCleanupPlan {
+            owner: request.owner.clone(),
+            target,
+            last_lease_end_ms,
+            trim_after_ms: config.trim_after_ms,
+            max_bytes: config.max_bytes,
+        }))
+    })?;
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    let Some(inspection) = inspect_target_tree(&plan.target)? else {
+        return Ok(());
+    };
+    let now = now_ms()?;
+    let too_old = plan.trim_after_ms.is_some_and(|limit| {
+        plan.last_lease_end_ms
+            .is_some_and(|ended| now.saturating_sub(ended) >= limit)
+    });
+    let too_large =
+        !inspection.bound_reached && plan.max_bytes.is_some_and(|limit| inspection.bytes > limit);
+    if !too_old && !too_large {
+        return Ok(());
+    }
+
+    let tombstone = store.transaction(|state, config| {
+        if state
+            .requests
+            .iter()
+            .any(|candidate| candidate.owner == plan.owner && candidate.phase == Phase::Running)
+        {
+            return Ok(None);
+        }
+        let request = state.find(id)?;
+        let Some(confirmed) = target_directory(config, request, false)? else {
+            return Ok(None);
+        };
+        if confirmed != plan.target {
+            return Err(Error::new(
+                ErrorCode::Configuration,
+                "target directory changed before cleanup",
+            ));
+        }
+        let parent = confirmed
+            .parent()
+            .ok_or_else(|| Error::new(ErrorCode::Configuration, "target has no parent"))?;
+        let tombstone = parent.join(format!(".locked-build-cleanup-{}", id.0.replace(':', "-")));
+        if tombstone.exists() {
+            return Err(Error::new(
+                ErrorCode::State,
+                "target cleanup staging path already exists",
+            ));
+        }
+        std::fs::rename(&confirmed, &tombstone)?;
+        Ok(Some(tombstone))
+    })?;
+    if let Some(tombstone) = tombstone {
+        std::fs::remove_dir_all(tombstone)?;
+    }
+    Ok(())
 }
 
-fn inspect_target_tree(target: &Path) -> Result<Option<(u64, std::time::SystemTime)>> {
+struct TargetCleanupPlan {
+    owner: String,
+    target: std::path::PathBuf,
+    last_lease_end_ms: Option<u64>,
+    trim_after_ms: Option<u64>,
+    max_bytes: Option<u64>,
+}
+
+struct TargetInspection {
+    bytes: u64,
+    bound_reached: bool,
+}
+
+fn inspect_target_tree(target: &Path) -> Result<Option<TargetInspection>> {
+    const MAX_ENTRIES: usize = 100_000;
     let root_metadata = match std::fs::symlink_metadata(target) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1176,35 +1402,35 @@ fn inspect_target_tree(target: &Path) -> Result<Option<(u64, std::time::SystemTi
     }
     let mut pending = vec![target.to_owned()];
     let mut bytes = 0_u64;
-    let mut newest_modified = root_metadata.modified()?;
     let mut visited = 0_usize;
+    let mut bound_reached = false;
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(directory)? {
             visited = visited.saturating_add(1);
-            if visited > 100_000 {
-                return Err(Error::new(
-                    ErrorCode::Configuration,
-                    "target directory contains too many entries to inspect",
-                ));
+            if visited > MAX_ENTRIES {
+                bound_reached = true;
+                break;
             }
             let entry = entry?;
             let path = entry.path();
             let metadata = std::fs::symlink_metadata(&path)?;
             if metadata.file_type().is_symlink() {
-                return Err(Error::new(
-                    ErrorCode::Configuration,
-                    "target directory contains a symlink",
-                ));
+                continue;
             }
             if metadata.is_dir() {
                 pending.push(path);
             } else if metadata.is_file() {
                 bytes = bytes.saturating_add(metadata.len());
             }
-            newest_modified = newest_modified.max(metadata.modified()?);
+        }
+        if bound_reached {
+            break;
         }
     }
-    Ok(Some((bytes, newest_modified)))
+    Ok(Some(TargetInspection {
+        bytes,
+        bound_reached,
+    }))
 }
 
 pub(crate) fn prune(store: &Store) -> Result<usize> {
