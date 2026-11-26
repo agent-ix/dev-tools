@@ -46,6 +46,15 @@ pub(crate) fn install_tools(
     current_exe: &Path,
     search_path: Option<&OsStr>,
 ) -> Result<()> {
+    install_tools_with_measurement(home, current_exe, search_path, Config::measured_default)
+}
+
+fn install_tools_with_measurement(
+    home: &Path,
+    current_exe: &Path,
+    search_path: Option<&OsStr>,
+    measure_policy: impl FnOnce() -> Result<Config>,
+) -> Result<()> {
     let manifest = read_manifest(TOOL_MANIFEST)?;
     let installed_path = home.join(".local/bin/locked-build");
     let installed_bin_dir = installed_path.parent().ok_or_else(|| {
@@ -67,7 +76,7 @@ pub(crate) fn install_tools(
     let mut policy = if policy_path.exists() {
         Config::read(&policy_path)?
     } else {
-        let mut policy = Config::measured_default()?;
+        let mut policy = measure_policy()?;
         policy.host = policy.host.to_ascii_lowercase();
         policy.real_cargo = discover_executable(search_path, "cargo", current_exe);
         policy.target_root = Some(home.join(".cache/locked-build/targets"));
@@ -202,11 +211,14 @@ fn read_manifest(contents: &str) -> Result<ToolManifest> {
 }
 
 fn version_matches(name: &str, expected: &str, observed: &str) -> bool {
-    observed == expected
-        || observed
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '.')
-            .any(|part| part == expected)
-        || observed == format!("{name} {expected}")
+    if observed == expected {
+        return true;
+    }
+    observed
+        .strip_prefix(name)
+        .map(str::trim_start)
+        .and_then(|version_and_details| version_and_details.split_whitespace().next())
+        == Some(expected)
 }
 
 fn discover_executable(
@@ -372,6 +384,13 @@ mod tests {
             "quire 0.53.3 (engine 0.63.2)"
         ));
         assert!(version_matches("quoin", "0.36.10", "0.36.10"));
+        assert!(!version_matches("quoin", "0.36.10", "quoin 0.36.10-rc.1"));
+        assert!(!version_matches("quoin", "0.36.10", "quoin 0.36.10+local"));
+        assert!(version_matches(
+            "quoin",
+            "0.36.10+local",
+            "quoin 0.36.10+local"
+        ));
         assert!(!version_matches("quoin", "0.36.10", "0.36.9"));
     }
 
@@ -457,7 +476,16 @@ mod tests {
         let current_exe = std::env::current_exe()?;
         let search_path = std::env::var_os("PATH");
 
-        install_tools(&home, &current_exe, search_path.as_deref())?;
+        install_tools_with_measurement(&home, &current_exe, search_path.as_deref(), || {
+            let mut config: Config =
+                serde_json::from_str(include_str!("../policy.example.json"))
+                    .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+            config.host = "test-host".to_owned();
+            config.capacity_units = 4;
+            config.maximum_units = 4;
+            config.validate()?;
+            Ok(config)
+        })?;
 
         let binary = home.join(".local/bin/locked-build");
         let policy_path = home.join(".config/locked-build/policy.json");
@@ -483,7 +511,12 @@ mod tests {
             std::fs::metadata(&record)?.modified()?,
             std::fs::metadata(home.join(".zshrc"))?.modified()?,
         ];
-        install_tools(&home, &current_exe, search_path.as_deref())?;
+        install_tools_with_measurement(&home, &current_exe, search_path.as_deref(), || {
+            Err(Error::new(
+                ErrorCode::State,
+                "existing policy should prevent another measurement",
+            ))
+        })?;
         let second_modified = [
             std::fs::metadata(&binary)?.modified()?,
             std::fs::metadata(&policy_path)?.modified()?,
