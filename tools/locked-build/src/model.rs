@@ -128,6 +128,12 @@ pub(crate) struct Request {
     /// Cargo job count paired with the reserved memory lease.
     #[serde(default)]
     pub memory_cargo_jobs: Option<u32>,
+    /// Rust test thread count paired with the reserved memory lease.
+    #[serde(default)]
+    pub memory_rust_test_threads: Option<u32>,
+    /// Maximum parallel workers charged to this memory lease.
+    #[serde(default)]
+    pub memory_parallelism: Option<u32>,
     /// Caller-supplied build env values captured when the lease was queued.
     #[serde(default)]
     pub caller_cargo_build_jobs: Option<String>,

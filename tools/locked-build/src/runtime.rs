@@ -70,7 +70,11 @@ pub(crate) fn enqueue(
     let caller_rust_test_threads = std::env::var("RUST_TEST_THREADS").ok();
     let caller_cargo_incremental = std::env::var("CARGO_INCREMENTAL").ok();
     let caller_cargo_target_dir = std::env::var("CARGO_TARGET_DIR").ok();
-    validate_cargo_jobs_input(command, caller_cargo_build_jobs.as_deref())?;
+    validate_parallelism_input(
+        command,
+        caller_cargo_build_jobs.as_deref(),
+        caller_rust_test_threads.as_deref(),
+    )?;
     let now = now_ms()?;
     let clock = clock_ms()?;
     store.transaction(|state, config| {
@@ -92,19 +96,21 @@ pub(crate) fn enqueue(
             .ok_or_else(|| Error::new(ErrorCode::State, "request sequence exhausted"))?;
         let id = RequestId(format!("{}:r{sequence}", state.store_id));
         let class_name = class.unwrap_or("periodic");
-        let memory_cargo_jobs = resolve_cargo_jobs(
-            config,
-            command,
-            caller_cargo_build_jobs.as_deref(),
-            state.used().saturating_add(units),
-        );
+        let (memory_cargo_jobs, memory_rust_test_threads, memory_parallelism) =
+            resolve_build_parallelism(
+                config,
+                command,
+                caller_cargo_build_jobs.as_deref(),
+                caller_rust_test_threads.as_deref(),
+                units,
+                state.used().saturating_add(units),
+            );
         let memory_cap_bytes =
             if config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted {
                 Some(estimate_memory_lease(
                     config,
                     class_name,
-                    units,
-                    memory_cargo_jobs,
+                    memory_parallelism,
                 )?)
             } else {
                 None
@@ -119,6 +125,8 @@ pub(crate) fn enqueue(
             class: class_name.to_owned(),
             memory_cap_bytes,
             memory_cargo_jobs,
+            memory_rust_test_threads,
+            memory_parallelism: Some(memory_parallelism),
             caller_cargo_build_jobs,
             caller_rust_test_threads,
             caller_cargo_incremental,
@@ -151,16 +159,14 @@ pub(crate) fn enqueue(
 fn estimate_memory_lease(
     config: &crate::config::Config,
     class: &str,
-    units: u32,
-    cargo_jobs: Option<u32>,
+    parallelism: u32,
 ) -> Result<u64> {
-    let jobs = cargo_jobs.unwrap_or(units);
     let per_job = config
         .memory_per_job_by_class
         .get(class)
         .copied()
         .unwrap_or(config.memory_per_job_bytes);
-    let lease_bytes = u64::from(jobs).checked_mul(per_job).ok_or_else(|| {
+    let lease_bytes = u64::from(parallelism).checked_mul(per_job).ok_or_else(|| {
         Error::new(
             ErrorCode::Request,
             "requested memory lease size overflows the supported range",
@@ -186,49 +192,80 @@ fn estimate_memory_lease(
     Ok(lease_bytes)
 }
 
-fn resolve_cargo_jobs(
+fn resolve_build_parallelism(
     config: &crate::config::Config,
     command: &[String],
     caller_cargo_build_jobs: Option<&str>,
+    caller_rust_test_threads: Option<&str>,
+    units: u32,
     active_units: u32,
-) -> Option<u32> {
+) -> (Option<u32>, Option<u32>, u32) {
     let is_cargo = command
         .first()
         .and_then(|program| std::path::Path::new(program).file_name())
         .is_some_and(|name| name == "cargo");
-    if !is_cargo {
-        return None;
-    }
-    let mut arguments = command.get(1..).unwrap_or_default().to_vec();
-    prepare_build_environment(
-        config,
+    let mut bounded_config = config.clone();
+    let mut arguments = if is_cargo {
+        command.get(1..).unwrap_or_default().to_vec()
+    } else {
+        bounded_config.cargo_build_jobs = Some(units);
+        bounded_config.rust_test_threads = Some(units);
+        Vec::new()
+    };
+    let prepared = prepare_build_environment(
+        &bounded_config,
         &mut arguments,
         caller_cargo_build_jobs,
-        None,
-        active_units,
-    )
-    .record
-    .cargo_build_jobs
+        caller_rust_test_threads,
+        if is_cargo { active_units } else { 1 },
+    );
+    if is_cargo {
+        let jobs = prepared.record.cargo_build_jobs.unwrap_or(units);
+        let test_threads = prepared.record.rust_test_threads;
+        (
+            Some(jobs),
+            test_threads,
+            jobs.max(test_threads.unwrap_or_default()),
+        )
+    } else {
+        (None, prepared.record.rust_test_threads, units)
+    }
 }
 
-fn validate_cargo_jobs_input(command: &[String], environment_value: Option<&str>) -> Result<()> {
+fn validate_parallelism_input(
+    command: &[String],
+    cargo_jobs_environment: Option<&str>,
+    test_threads_environment: Option<&str>,
+) -> Result<()> {
     let is_cargo = command
         .first()
         .and_then(|program| std::path::Path::new(program).file_name())
         .is_some_and(|name| name == "cargo");
-    if !is_cargo {
-        return Ok(());
-    }
-    let invalid = || {
+    let invalid_jobs = || {
         Error::new(
             ErrorCode::Request,
             "Cargo job limits must be positive integers",
         )
     };
-    if let Some(value) = environment_value
+    let invalid_threads = || {
+        Error::new(
+            ErrorCode::Request,
+            "Rust test thread limits must be positive integers",
+        )
+    };
+    if let Some(value) = cargo_jobs_environment
+        && is_cargo
         && !value.parse::<u32>().is_ok_and(|jobs| jobs > 0)
     {
-        return Err(invalid());
+        return Err(invalid_jobs());
+    }
+    if let Some(value) = test_threads_environment
+        && !value.parse::<u32>().is_ok_and(|threads| threads > 0)
+    {
+        return Err(invalid_threads());
+    }
+    if !is_cargo {
+        return Ok(());
     }
     let arguments = command.get(1..).unwrap_or_default();
     let end = arguments
@@ -241,7 +278,7 @@ fn validate_cargo_jobs_input(command: &[String], environment_value: Option<&str>
         if argument == "-j" || argument == "--jobs" {
             let value = arguments.get(index + 1).filter(|_| index + 1 < end);
             if !value.is_some_and(|value| value.parse::<u32>().is_ok_and(|jobs| jobs > 0)) {
-                return Err(invalid());
+                return Err(invalid_jobs());
             }
             index += 2;
             continue;
@@ -257,9 +294,32 @@ fn validate_cargo_jobs_input(command: &[String], environment_value: Option<&str>
         if let Some(value) = long_value
             && !value.parse::<u32>().is_ok_and(|jobs| jobs > 0)
         {
-            return Err(invalid());
+            return Err(invalid_jobs());
         }
         index += 1;
+    }
+    let separator = arguments.iter().position(|argument| argument == "--");
+    if let Some(separator) = separator {
+        let after = &arguments[separator + 1..];
+        let mut index = 0;
+        while index < after.len() {
+            if after[index] == "--test-threads" {
+                if !after
+                    .get(index + 1)
+                    .is_some_and(|value| value.parse::<u32>().is_ok_and(|threads| threads > 0))
+                {
+                    return Err(invalid_threads());
+                }
+                index += 2;
+                continue;
+            }
+            if let Some(value) = after[index].strip_prefix("--test-threads=")
+                && !value.parse::<u32>().is_ok_and(|threads| threads > 0)
+            {
+                return Err(invalid_threads());
+            }
+            index += 1;
+        }
     }
     Ok(())
 }
@@ -270,12 +330,28 @@ fn prepare_request_environment(
     arguments: &mut [String],
     active_units: u32,
 ) -> PreparedBuildEnvironment {
-    if let Some(jobs) = request.memory_cargo_jobs {
+    if let Some(parallelism) = request.memory_parallelism {
+        let is_cargo = request
+            .command
+            .first()
+            .and_then(|program| std::path::Path::new(program).file_name())
+            .is_some_and(|name| name == "cargo");
         let mut reserved_config = config.clone();
-        reserved_config.cargo_build_jobs = Some(jobs);
+        reserved_config.cargo_build_jobs = Some(request.memory_cargo_jobs.unwrap_or(parallelism));
+        reserved_config.rust_test_threads = if is_cargo {
+            request.memory_rust_test_threads
+        } else {
+            Some(parallelism)
+        };
+        let mut no_arguments = Vec::new();
+        let environment_arguments = if is_cargo {
+            arguments
+        } else {
+            no_arguments.as_mut_slice()
+        };
         prepare_build_environment(
             &reserved_config,
-            arguments,
+            environment_arguments,
             request.caller_cargo_build_jobs.as_deref(),
             request.caller_rust_test_threads.as_deref(),
             1,

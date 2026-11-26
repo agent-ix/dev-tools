@@ -45,6 +45,7 @@ fn lease_accounted_store(root: &Path, capacity: u32, budget: u64, reserve: u64) 
     policy.memory_per_job_by_class.clear();
     policy.memory_cap_by_class.clear();
     policy.cargo_build_jobs = Some(capacity);
+    policy.rust_test_threads = None;
     std::fs::write(&initial.config_path, serde_json::to_vec(&policy)?)?;
     Store::open(&initial.path, &initial.config_path)
 }
@@ -860,11 +861,66 @@ fn invalid_cargo_job_limits_are_rejected_in_arguments_and_environment() {
         ],
         vec!["cargo".to_owned(), "test".to_owned(), "-j".to_owned()],
     ] {
-        assert!(validate_cargo_jobs_input(&arguments, None).is_err());
+        assert!(validate_parallelism_input(&arguments, None, None).is_err());
     }
-    assert!(validate_cargo_jobs_input(&["cargo".into(), "test".into()], Some("-1")).is_err());
-    assert!(validate_cargo_jobs_input(&["cargo".into(), "test".into()], Some("default")).is_err());
-    assert!(validate_cargo_jobs_input(&["cargo".into(), "test".into()], Some("8")).is_ok());
+    assert!(
+        validate_parallelism_input(&["cargo".into(), "test".into()], Some("-1"), None).is_err()
+    );
+    assert!(
+        validate_parallelism_input(&["cargo".into(), "test".into()], Some("default"), None)
+            .is_err()
+    );
+    assert!(validate_parallelism_input(&["cargo".into(), "test".into()], Some("8"), None).is_ok());
+}
+
+#[test]
+fn memory_charge_uses_test_threads_and_non_cargo_environment_is_capped_by_units() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+    policy.memory_budget_bytes = Some(100_000_000_000);
+    policy.cargo_build_jobs = Some(16);
+    policy.rust_test_threads = Some(16);
+    policy.memory_per_job_bytes = 2_500_000_000;
+
+    let cargo_command = [
+        "cargo".into(),
+        "test".into(),
+        "-j4".into(),
+        "--".into(),
+        "--test-threads=8".into(),
+    ];
+    validate_parallelism_input(&cargo_command, None, None)?;
+    let (jobs, threads, parallelism) =
+        resolve_build_parallelism(&policy, &cargo_command, None, None, 1, 1);
+    assert_eq!(jobs, Some(4));
+    assert_eq!(threads, Some(8));
+    assert_eq!(parallelism, 8);
+    assert_eq!(
+        estimate_memory_lease(&policy, "periodic", parallelism)?,
+        20_000_000_000
+    );
+
+    let make_command = ["make".into(), "-j8".into()];
+    let (jobs, threads, parallelism) =
+        resolve_build_parallelism(&policy, &make_command, Some("16"), Some("12"), 1, 1);
+    assert_eq!(jobs, None);
+    assert_eq!(threads, Some(1));
+    assert_eq!(parallelism, 1);
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let mut request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    request.command = make_command.to_vec();
+    request.caller_cargo_build_jobs = Some("16".to_owned());
+    request.caller_rust_test_threads = Some("12".to_owned());
+    request.memory_parallelism = Some(parallelism);
+    request.memory_rust_test_threads = threads;
+    request.memory_cargo_jobs = jobs;
+    let mut arguments = request.command[1..].to_vec();
+    let environment = prepare_request_environment(&policy, &request, &mut arguments, 1);
+    assert_eq!(environment.cargo_build_jobs_env.as_deref(), Some("1"));
+    assert_eq!(environment.rust_test_threads_env.as_deref(), Some("1"));
+    Ok(())
 }
 
 #[test]

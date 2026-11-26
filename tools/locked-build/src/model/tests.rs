@@ -42,6 +42,8 @@ fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
         class: "periodic".to_owned(),
         memory_cap_bytes: None,
         memory_cargo_jobs: None,
+        memory_rust_test_threads: None,
+        memory_parallelism: None,
         caller_cargo_build_jobs: None,
         caller_rust_test_threads: None,
         caller_cargo_incremental: None,
