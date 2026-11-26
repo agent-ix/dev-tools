@@ -47,6 +47,73 @@ An external sample includes exactly these fields:
 The host must match the policy; stale or future samples block admission.
 Missing measurements remain unavailable.
 
+## Read-only sampler
+
+`sample` reads a separate strict JSON configuration and writes Prometheus text to the
+required output path. It does not open scheduler state or inspect admission/build lock
+paths. Source adapters may read process metadata, `/proc/<pid>/fdinfo`, and the
+declared controller registry; target-directory measurements enumerate only the
+explicitly configured directories. The sampler has no timer of its own; a host timer
+invokes it at the desired interval.
+
+The sampler configuration uses `schema_version`, `host`, optional `capacity_units`,
+one typed `busy_source`, and optional `target_dirs`. Target entries have `repo` and
+absolute `path` fields. For example, Terra's source configuration is:
+
+```json
+{
+  "schema_version": 1,
+  "host": "terra",
+  "capacity_units": 12,
+  "busy_source": {
+    "kind": "linux_fdinfo_lock_paths",
+    "proc_root": "/proc",
+    "owner_uid": 1000,
+    "lane_paths": [
+      "/tmp/quire-heavy-check.lane1.lock", "/tmp/quire-heavy-check.lane2.lock",
+      "/tmp/quire-heavy-check.lane3.lock", "/tmp/quire-heavy-check.lane4.lock",
+      "/tmp/quire-heavy-check.lane5.lock", "/tmp/quire-heavy-check.lane6.lock",
+      "/tmp/quire-heavy-check.lane7.lock", "/tmp/quire-heavy-check.lane8.lock",
+      "/tmp/quire-heavy-check.lane9.lock", "/tmp/quire-heavy-check.lane10.lock",
+      "/tmp/quire-heavy-check.lane11.lock", "/tmp/quire-heavy-check.lane12.lock"
+    ]
+  },
+  "target_dirs": [{"repo": "dev-tools", "path": "/home/build/dev-tools/target"}]
+}
+```
+
+The `lane_paths` array must contain all 12 configured ordinary lane paths. Host source
+types and capacities are constrained as follows:
+
+| Host | Busy source | Configured capacity |
+|---|---|---:|
+| Draco | Distinct configured slot paths whose live `/usr/bin/lockf -t 0` process has a child | 6 |
+| Terra | Distinct configured paths held by a process with a matching `/proc/<pid>/fdinfo` write lock | 12 |
+| Titan | Live admitted jobs from the cargo-resource-controller registry plus distinct arch-test lock paths outside those jobs' process groups | omitted |
+| Luna | Top-level `cargo` process trees running build, test, or check commands | omitted |
+
+Titan's `busy_source` uses `arch_lock_prefix` instead of a finite lock-path list.
+Set it to the absolute prefix ending in `arch-test-target-`, such as
+`/home/<user>/dev/worktrees/arch-test-target-`. The sampler matches only descriptor
+symlink targets with a valid repository name followed by `.lock`, `-2.lock`, `-3.lock`,
+or `-4.lock`; it never opens or stats those lock paths. Inherited descriptors count
+one lane path, and paths held within a live controller job's process group do not add
+a second activity count.
+
+The sampler emits `ix_build_slots_busy` when its busy source can be read and emits
+`ix_build_slots_configured` only for Draco and Terra. Queue depth and build/test outcome
+series are omitted because these sources cannot truthfully count them. Each explicitly
+configured target directory produces `ix_build_target_dir_bytes{host,repo}`. If a
+source cannot be read, its affected metric is omitted; `ix_build_probe_unavailable`
+identifies the bounded probe name and a bounded diagnostic is written to stderr. The
+sampler writes metrics from successful sources and returns success after the output
+write; invalid configuration or output-write failures return an error. Process,
+fdinfo, and target-directory enumeration have hard bounds;
+reaching a bound makes the affected measurement unavailable. Terra's waiter ticket
+files are readable, but the current queue-depth metric requires a priority label and
+those tickets do not provide one; the sampler omits queue depth rather than inventing
+an attribution.
+
 ## Transition events
 
 `status` and `recover` emit a versioned JSON snapshot.
@@ -121,52 +188,3 @@ Event counters and histogram observations survive `recover`, process restart, an
 `prune` without being counted twice. Queue-wait histograms add the pre-reboot age
 captured at recovery to monotonic time after recovery. The hold deadline remains
 enforced by the existing watchdog behavior.
-
-### Observed stores
-
-`observe [--kind build|test] [--priority check|test|gate] [--queued-at-ms N] -- <command...>`
-runs a command immediately after an external wrapper admits it. It does not make
-admission, resource, priority, hold, pause, signal, or termination decisions.
-The configured slots gauge reads JSON host policy `capacity_units`; busy slots
-are reported without clamping. Observed and admitted stores are mutually
-exclusive, and the first run request or observation fixes the store mode under
-the shared state lock. `run` and other scheduler transactions refuse observed
-stores; pruning cannot erase the mode.
-
-For observed stores, the closed admitted-store outcome zero set is overridden:
-`ix_build_builds_total` has only `ok` and `failed` for a priority after a matching
-build starts; `ix_build_test_runs_total` has only `ok` and `failed` after a test
-starts; and queue-wait series appear only for priorities with an observation.
-Queue depth, admission-blocked time, pause, and paused-orphan series are absent
-from both Prometheus text and the JSON snapshot. Invalid hints warn once and are
-treated as absent. The admitted command starts before observer configuration or
-state I/O. A worker performs preflight and may hold the state lock while the
-command runs; command start and signal forwarding do not wait for that lock.
-Preflight work is finished or abandoned within 1000 ms after its worker starts.
-Completion and preflight-result waits share one 1000 ms deadline after command
-exit. Failures fail open while preserving the command status.
-
-Before first use, create the state directory with mode `0700`; `observe` never
-creates it. `locked-build now-ms` prints current Unix epoch milliseconds
-without opening or modifying state, so wrappers can capture queue start before
-waiting. Existing admitted stores that contain requests but predate
-`mode.json` remain admitted; an empty query does not select a mode.
-Use a fresh private directory for observation when the current directory holds
-admitted requests, including requests retained after `prune`.
-
-Accepted observation limits: host-policy files must be regular files no larger
-than 1 MiB; observed state is limited to 32 MiB; at most 10,000 raw command
-statuses are retained. State-directory and state-file symlinks are rejected.
-If the caller starts with stdin closed, Rust's process API may supply `/dev/null`
-to the child, which then sees EOF rather than `EBADF`. PID-only delivery of
-`SIGTSTP`, `SIGTTIN`, or `SIGTTOU` may stop the observer while its command keeps
-running, so wrappers must target the process group or cgroup for these signals.
-
-The observed command inherits the caller's process group. Group signals reach
-the command directly, and catchable signals sent only to the caller-started PID
-are forwarded. A lost observer retains its busy slot while the child identity is
-verified alive; after both are gone, the next observation or export reclaims the
-slot without adding an outcome.
-
-`observe` does not forward `SIGPIPE` or `SIGXFSZ` to the command. It preserves
-whether the caller ignored `SIGPIPE` and, on Linux, `SIGCHLD`.
