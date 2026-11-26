@@ -4,25 +4,21 @@
 use super::*;
 
 pub(crate) fn policy() -> Config {
-    Config {
-        host: "test-host".into(),
-        capacity_units: 2,
-        maximum_units: 4,
-        memory_per_unit_bytes: 100,
-        memory_reserve_bytes: 100,
-        disk_reserve_bytes: 100,
-        disk_path: PathBuf::from("/"),
-        maximum_load: 10.0,
-        maximum_priority: 2,
-        aging_ms: 100,
-        hold_ms: 1000,
-        termination_grace_ms: 100,
-        sample_max_age_ms: 100,
-        heartbeat_max_age_ms: 100,
-        poll_ms: 10,
-        maximum_requests: 100,
-        sample_file: None,
-    }
+    let mut config = Config::default();
+    config.host = "test-host".into();
+    config.capacity_units = 2;
+    config.maximum_units = 4;
+    config.memory_per_unit_bytes = 100;
+    config.memory_reserve_bytes = 100;
+    config.disk_reserve_bytes = 100;
+    config.disk_path = PathBuf::from("/");
+    config.maximum_load = 10.0;
+    config.aging_ms = 100;
+    config.hold_ms = 1000;
+    config.termination_grace_ms = 100;
+    config.memory_admission = crate::config::MemoryAdmissionMode::LiveAvailable;
+    config.memory_budget_bytes = None;
+    config
 }
 
 fn sample() -> HostSample {
@@ -43,6 +39,16 @@ fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
         ticket: "TEST-1".into(),
         units,
         priority,
+        class: "periodic".to_owned(),
+        memory_cap_bytes: None,
+        memory_cargo_jobs: None,
+        memory_rust_test_threads: None,
+        memory_parallelism: None,
+        caller_cargo_build_jobs: None,
+        caller_rust_test_threads: None,
+        caller_cargo_incremental: None,
+        caller_cargo_target_dir: None,
+        lease_record: None,
         enqueued_at_ms: time,
         enqueued_clock_ms: time,
         started_at_ms: None,
@@ -222,9 +228,15 @@ fn missing_stale_wrong_host_and_resource_pressure_refuse_admission() -> Result<(
         Some("host_sample_unavailable")
     );
     let mut input = sample();
-    input.observed_at_ms = 399;
+    input.observed_at_ms = 0;
     assert_eq!(
-        state.admission_reason(&id, &config, Some(&input), 500, 0)?,
+        state.admission_reason(
+            &id,
+            &config,
+            Some(&input),
+            crate::config::SAMPLE_MAX_AGE_MS + 1,
+            0
+        )?,
         Some("host_sample_invalid_or_stale")
     );
     input = sample();
@@ -245,6 +257,33 @@ fn missing_stale_wrong_host_and_resource_pressure_refuse_admission() -> Result<(
     input = sample();
     input.load_one = config.maximum_load;
     assert_eq!(input.block_reason(&config, 500, 0, 1), Some("host_load"));
+    Ok(())
+}
+
+#[test]
+fn lease_accounted_admission_uses_caps_without_reading_available_memory() -> Result<()> {
+    let mut config = policy();
+    config.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+    config.memory_budget_bytes = Some(1_000);
+
+    let mut running = request(1, 0, 1, 0);
+    running.phase = Phase::Running;
+    running.memory_cap_bytes = Some(650);
+    let mut queued = request(2, 0, 1, 0);
+    queued.memory_cap_bytes = Some(350);
+    let mut state = state(vec![running, queued]);
+    let mut sample = sample();
+    sample.memory_available_bytes = 0;
+
+    assert_eq!(
+        state.admission_reason(&RequestId("r2".into()), &config, Some(&sample), 500, 500,)?,
+        None
+    );
+    state.find_mut(&RequestId("r2".into()))?.memory_cap_bytes = Some(351);
+    assert_eq!(
+        state.admission_reason(&RequestId("r2".into()), &config, Some(&sample), 500, 500,)?,
+        Some("memory_budget")
+    );
     Ok(())
 }
 

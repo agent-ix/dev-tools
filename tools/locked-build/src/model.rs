@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, HostSample};
+use crate::config::{Config, HostSample, MemoryAdmissionMode};
 use crate::error::{Error, ErrorCode, Result};
 use crate::metrics::MetricsState;
 
@@ -14,6 +14,10 @@ use crate::metrics::MetricsState;
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct RequestId(pub String);
+
+fn default_request_class() -> String {
+    "periodic".to_owned()
+}
 
 /// A supervisor identity includes its unguessable request token, not only PID.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -50,6 +54,7 @@ impl Phase {
 pub(crate) enum StopReason {
     Cancelled,
     TimedOut,
+    MemoryCap,
 }
 
 #[derive(Default)]
@@ -66,6 +71,45 @@ pub(crate) struct CommandOutcome {
     pub signal: Option<i32>,
 }
 
+/// Effective build limits and memory enforcement selected for a running lease.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseRecord {
+    /// Effective Cargo jobs, when numeric and known.
+    pub cargo_build_jobs: Option<u32>,
+    /// True when an explicit Cargo jobs value was clamped to policy maximum.
+    pub cargo_build_jobs_clamped: bool,
+    /// Effective Rust test threads, when numeric and known.
+    pub rust_test_threads: Option<u32>,
+    /// True when an explicit Rust test thread value was clamped to policy maximum.
+    pub rust_test_threads_clamped: bool,
+    /// Effective `CARGO_INCREMENTAL` value, if set.
+    pub cargo_incremental: Option<String>,
+    /// Whether policy replaced the caller's `CARGO_INCREMENTAL` value.
+    pub cargo_incremental_overwrote_caller: bool,
+    /// Effective `CARGO_TARGET_DIR`, if set.
+    pub cargo_target_dir: Option<PathBuf>,
+    /// Whether policy replaced the caller's `CARGO_TARGET_DIR` value.
+    pub cargo_target_dir_overwrote_caller: bool,
+    /// Memory enforcement applied to the command.
+    pub memory_enforcement: MemoryEnforcement,
+}
+
+/// Memory enforcement mechanism selected when the command starts.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEnforcement {
+    /// No cap was configured for this lease.
+    #[default]
+    NotConfigured,
+    /// A transient Linux systemd scope enforces the cap.
+    SystemdScope,
+    /// The watchdog samples process-group RSS and enforces the cap.
+    RssWatchdog,
+    /// The command was refused because no scope was available and policy requires one.
+    Refused,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
@@ -75,6 +119,36 @@ pub(crate) struct Request {
     pub ticket: String,
     pub units: u32,
     pub priority: u32,
+    /// Named priority class selected by the caller.
+    #[serde(default = "default_request_class")]
+    pub class: String,
+    /// Memory limit reserved for this lease when policy configures one.
+    #[serde(default)]
+    pub memory_cap_bytes: Option<u64>,
+    /// Cargo job count paired with the reserved memory lease.
+    #[serde(default)]
+    pub memory_cargo_jobs: Option<u32>,
+    /// Rust test thread count paired with the reserved memory lease.
+    #[serde(default)]
+    pub memory_rust_test_threads: Option<u32>,
+    /// Maximum parallel workers charged to this memory lease.
+    #[serde(default)]
+    pub memory_parallelism: Option<u32>,
+    /// Caller-supplied build env values captured when the lease was queued.
+    #[serde(default)]
+    pub caller_cargo_build_jobs: Option<String>,
+    /// Caller-supplied test-thread env value captured when the lease was queued.
+    #[serde(default)]
+    pub caller_rust_test_threads: Option<String>,
+    /// Caller-supplied incremental setting captured when the lease was queued.
+    #[serde(default)]
+    pub caller_cargo_incremental: Option<String>,
+    /// Caller-supplied Cargo target directory captured when the lease was queued.
+    #[serde(default)]
+    pub caller_cargo_target_dir: Option<String>,
+    /// Effective per-lease settings, populated when its command starts.
+    #[serde(default)]
+    pub lease_record: Option<LeaseRecord>,
     pub enqueued_at_ms: u64,
     pub enqueued_clock_ms: u64,
     pub started_at_ms: Option<u64>,
@@ -144,6 +218,9 @@ pub struct Event {
     pub units: u32,
     /// Base priority.
     pub priority: u32,
+    /// Named priority class captured at this transition.
+    #[serde(default = "default_request_class")]
+    pub class: String,
     /// Configured capacity at transition time.
     pub capacity_units: u32,
     /// Free units after transition, saturating at zero during shrink.
@@ -157,10 +234,10 @@ pub struct Event {
 }
 
 impl State {
-    pub(crate) fn validate(&self, config: &Config) -> Result<()> {
+    pub(crate) fn validate(&self, _config: &Config) -> Result<()> {
         if self.store_id.len() != 32
             || !self.store_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || self.requests.len() > config.maximum_requests
+            || self.requests.len() > crate::config::MAX_REQUESTS
             || self.next_event == 0
         {
             return Err(Error::new(
@@ -175,6 +252,27 @@ impl State {
                 || !sequences.insert(request.sequence)
                 || request.id.0 != format!("{}:r{}", self.store_id, request.sequence)
                 || request.units == 0
+                || !matches!(
+                    request.class.as_str(),
+                    "must-fix" | "point" | "block" | "periodic"
+                )
+                || request.memory_cap_bytes.is_some_and(|cap| cap == 0)
+                || request
+                    .caller_cargo_build_jobs
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 64)
+                || request
+                    .caller_rust_test_threads
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 64)
+                || request
+                    .caller_cargo_incremental
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 64)
+                || request
+                    .caller_cargo_target_dir
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 32_768)
                 || request.command.is_empty()
                 || request.command.len() > 256
                 || request
@@ -222,6 +320,15 @@ impl State {
             .fold(0_u32, |sum, request| sum.saturating_add(request.units))
     }
 
+    fn memory_used(&self, _config: &Config) -> u64 {
+        self.requests
+            .iter()
+            .filter(|request| request.phase == Phase::Running)
+            .fold(0_u64, |sum, request| {
+                sum.saturating_add(request.memory_cap_bytes.unwrap_or(0))
+            })
+    }
+
     pub(crate) fn event(
         &mut self,
         id: &RequestId,
@@ -245,6 +352,7 @@ impl State {
             state: request.phase,
             units: request.units,
             priority: request.priority,
+            class: request.class.clone(),
             capacity_units: config.capacity_units,
             free_units: config.capacity_units.saturating_sub(self.used()),
             wait_ms: monotonic_wait,
@@ -269,8 +377,7 @@ impl State {
                     && request.stop.is_none()
             })
         };
-        let reservation_ms =
-            (u64::from(config.maximum_priority) + 1).saturating_mul(config.aging_ms);
+        let reservation_ms = (u64::from(config.max_priority()) + 1).saturating_mul(config.aging_ms);
         if let Some(reserved) = feasible()
             .filter(|request| clock.saturating_sub(request.enqueued_clock_ms) >= reservation_ms)
             .min_by_key(|request| request.sequence)
@@ -314,7 +421,17 @@ impl State {
         let Some(sample) = sample else {
             return Ok(Some("host_sample_unavailable"));
         };
-        Ok(sample.block_reason(config, now, used, request.units))
+        if let Some(reason) = sample.block_reason(config, now, used, request.units) {
+            return Ok(Some(reason));
+        }
+        if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
+            let budget = config.memory_budget_bytes.unwrap_or(0);
+            let cap = request.memory_cap_bytes.unwrap_or(0);
+            if self.memory_used(config).saturating_add(cap) > budget {
+                return Ok(Some("memory_budget"));
+            }
+        }
+        Ok(None)
     }
 
     pub(crate) fn finish(
@@ -337,6 +454,7 @@ impl State {
         request.phase = match request.stop {
             Some(StopReason::Cancelled) => Phase::Cancelled,
             Some(StopReason::TimedOut) => Phase::TimedOut,
+            Some(StopReason::MemoryCap) => Phase::Failed,
             None if code == Some(0) && signal.is_none() && reason.is_none() => Phase::Succeeded,
             None => Phase::Failed,
         };
@@ -347,6 +465,7 @@ impl State {
             .map(|stop| match stop {
                 StopReason::Cancelled => "cancelled".to_owned(),
                 StopReason::TimedOut => "hold_timeout".to_owned(),
+                StopReason::MemoryCap => "rss_cap".to_owned(),
             })
             .or_else(|| reason.map(str::to_owned))
             .or_else(|| {

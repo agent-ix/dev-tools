@@ -7,29 +7,85 @@ A host policy is a JSON document defining build admission and supervision limits
 
 ## Fields
 
-All fields except `sample_file` are required; unknown fields are rejected.
+Every policy field has a serde default; unknown fields are rejected. A small
+policy can set only `host`, `capacity_units`, and `maximum_units`. `lease_accounted`
+requires a positive `memory_budget_bytes` and `memory_per_job_bytes`. It charges
+each request by its resolved Cargo job count times the per-job estimate;
+non-Cargo commands use requested units. `memory_per_unit_bytes` and
+`memory_reserve_bytes` are required only in `live_available` mode.
 Relative filesystem paths resolve from the policy file's directory.
-The polling interval cannot exceed the hold deadline or termination grace.
+On first use, locked-build measures the host and writes a conservative policy.
+Use `locked-build policy show` to print it or `locked-build policy init --force`
+to regenerate it.
 
 | Field | Meaning |
 |---|---|
 | `host` | Stable host label for requests and samples. |
 | `capacity_units` | Currently enabled units; zero pauses admission. |
 | `maximum_units` | Largest feasible request; temporary shrink preserves queue age. |
-| `memory_per_unit_bytes` | RAM budget charged per requested unit. |
-| `memory_reserve_bytes` | RAM retained outside build leases. |
+| `memory_per_unit_bytes` | RAM budget charged per requested unit in `live_available` mode; optional in `lease_accounted` mode. |
+| `memory_reserve_bytes` | RAM retained outside build leases in `live_available` mode; optional in `lease_accounted` mode. |
+| `memory_admission` | `lease_accounted` (default) sums fixed leases against `memory_budget_bytes` without reading live available memory; `live_available` compares `MemAvailable` with lease-unit charges. |
+| `memory_budget_bytes` | Total memory available to concurrent leases in `lease_accounted` mode. |
+| `memory_per_job_bytes` | Default memory estimate per effective Cargo job or non-Cargo unit; generated policies use 2.5 GB. |
+| `memory_per_job_by_class` | Optional per-class per-job estimates, bounded by the class cap when one is configured. |
+| `memory_cap_by_class` | Optional maximum total lease size for each named class. |
+| `on_missing_cgroup` | `rss_watchdog` (default) enforces a configured cap with process-group RSS when a systemd scope is unavailable; `refuse` fails the lease without running the command. |
 | `disk_reserve_bytes` | Minimum free bytes for admission. |
 | `disk_path` | Directory selecting the measured filesystem. |
 | `maximum_load` | New admission requires load strictly below this value. |
-| `maximum_priority` | Largest accepted base priority. |
 | `aging_ms` | Positive priority aging interval. |
 | `hold_ms` | Positive running command deadline. |
 | `termination_grace_ms` | SIGTERM grace before forced cleanup. |
-| `sample_max_age_ms` | Maximum host sample age. |
-| `heartbeat_max_age_ms` | Age marking supervisor evidence suspect. |
-| `poll_ms` | Positive supervisor observation cadence. |
-| `maximum_requests` | Retained request limit; explicit pruning frees space. |
 | `sample_file` | Host-agent sample path, or null for local measurements. |
+| `cargo_build_jobs` | Optional maximum Cargo jobs at one active leased unit. At spawn, divide by the total active leased units and clamp to at least one. |
+| `rust_test_threads` | Optional `RUST_TEST_THREADS` value set for each leased command. |
+| `cargo_incremental` | Optional incremental compilation setting; true sets `CARGO_INCREMENTAL=1`, false sets it to `0`. |
+| `target_root` | Optional root for owner-specific `CARGO_TARGET_DIR` directories. Relative paths resolve from the policy file. |
+| `max_bytes` | Optional target size limit; the target directory is deleted when it exceeds this many bytes at lease end. |
+| `priority_classes` | Mapping of `must-fix`, `point`, `block`, and `periodic` to numeric priorities. The largest value sets the accepted priority limit. |
+| `real_cargo` | Optional Cargo executable path used when this binary is invoked with `argv[0]` basename `cargo`. Relative paths resolve from the policy file. |
+
+Explicit command-line `-j`/`--jobs` and `--test-threads` values, and explicit
+`CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` environment values, take precedence
+over policy defaults. Values above the configured policy maximum are clamped;
+the request report records the effective values and clamp flags. Pressure
+scaling applies only when the caller leaves `CARGO_BUILD_JOBS` unset. Active
+leased units include the command being started. The formula is
+`max(1, floor(configured_cargo_build_jobs / active_leased_units))`; for example,
+a policy value of 8 with 3 active units sets `CARGO_BUILD_JOBS=2`.
+When target lifecycle is enabled, each owner receives one directory under
+`target_root`. After the owner's final active lease, cleanup removes the whole
+directory when its measured size exceeds `max_bytes`. Symlink entries are skipped
+and never followed. Reaching the bounded walk's entry limit marks the target
+oversized and removes the whole directory.
+`run --class NAME` looks up `NAME` in `priority_classes`; omitting class records
+class `periodic` and uses its configured priority, or zero when absent. Metrics
+use a `class` label with `must-fix`, `point`, `block`, or `periodic`.
+
+Scheduler commands and the PATH shim read policy from `--config`, then
+`LOCKED_BUILD_CONFIG`, then `$XDG_CONFIG_HOME/locked-build/policy.json` or
+`$HOME/.config/locked-build/policy.json`. State resolves from `--state`, then
+`LOCKED_BUILD_STATE`, then `$XDG_STATE_HOME/locked-build` or
+`$HOME/.local/state/locked-build`; the state directory is created mode `0700`.
+The persisted state file is `<state-directory>/state.json`.
+Relative XDG values are ignored. The shim reads
+`LOCKED_BUILD_CLASS`, `LOCKED_BUILD_OWNER`, and `LOCKED_BUILD_TICKET`, defaulting
+to `point`, `cargo-shim`, and `MANUAL`. A leased command receives
+`LOCKED_BUILD_LEASE=1`; when a shim invocation sees that marker, it execs
+`real_cargo` directly to avoid queue recursion.
+
+In `lease_accounted` mode, admission requires the sum of active leases plus
+the new request to be at most `memory_budget_bytes`; requests larger than the
+whole budget fail at enqueue. The systemd `MemoryMax` and RSS fallback cap equal
+the computed lease size. A zero live `memory_available_bytes` value does not
+block the request. Linux starts capped commands as
+`systemd-run --user --scope --quiet -p MemoryMax=<cap>
+-p MemorySwapMax=0 -- <command>`. On macOS, where systemd-run is unavailable,
+the watchdog samples process-group RSS and kills a group that exceeds its cap.
+Cap-triggered termination is counted as `rss_cap`.
+The request report records whether the selected enforcement was `systemd_scope`,
+`rss_watchdog`, or `refused`.
 
 Resource observations use available RAM, available filesystem bytes, and one-minute load.
 An external sample includes exactly these fields:

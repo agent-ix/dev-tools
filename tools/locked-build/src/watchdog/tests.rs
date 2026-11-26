@@ -7,6 +7,19 @@ use std::process::Child;
 
 use super::*;
 
+#[test]
+fn only_rss_watchdog_enforcement_uses_the_process_rss_cap() {
+    assert_eq!(
+        rss_fallback_cap(MemoryEnforcement::RssWatchdog, Some(100)),
+        Some(100)
+    );
+    assert_eq!(rss_fallback_cap(MemoryEnforcement::RssWatchdog, None), None);
+    assert_eq!(
+        rss_fallback_cap(MemoryEnforcement::SystemdScope, Some(100)),
+        None
+    );
+}
+
 fn fixture(mode: &str, root: &Path) -> Result<Command> {
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -49,7 +62,15 @@ fn watchdog_snapshot_scenario(root: &Path, mode: &str) -> Result<()> {
     let config = root.join("policy.json");
     fs::write(&config, include_bytes!("../../policy.example.json"))?;
     let store = Store::open(&root.join("state"), &config)?;
-    let id = crate::runtime::enqueue(&store, "test:team:lead", "TEST-1", 1, 0, &["unused".into()])?;
+    let id = crate::runtime::enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-1",
+        1,
+        0,
+        None,
+        &["unused".into()],
+    )?;
     let watchdog = Processes::read().current()?;
     let worker = ProcessIdentity {
         pid: u32::MAX - 1,

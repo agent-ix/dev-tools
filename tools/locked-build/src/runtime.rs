@@ -14,9 +14,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::config::HostSample;
+use crate::config::{Config, HostSample};
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{CommandOutcome, Completion, Event, Phase, Request, RequestId, StopReason};
+use crate::model::{
+    CommandOutcome, Completion, Event, LeaseRecord, MemoryEnforcement, Phase, Request, RequestId,
+    StopReason,
+};
 use crate::process::{IdentityState, Processes, group_absent};
 use crate::store::Store;
 
@@ -46,6 +49,7 @@ pub(crate) fn enqueue(
     ticket: &str,
     units: u32,
     priority: u32,
+    class: Option<&str>,
     command: &[String],
 ) -> Result<RequestId> {
     if owner.is_empty()
@@ -62,16 +66,25 @@ pub(crate) fn enqueue(
         ));
     }
     let cwd = std::env::current_dir()?;
+    let caller_cargo_build_jobs = std::env::var("CARGO_BUILD_JOBS").ok();
+    let caller_rust_test_threads = std::env::var("RUST_TEST_THREADS").ok();
+    let caller_cargo_incremental = std::env::var("CARGO_INCREMENTAL").ok();
+    let caller_cargo_target_dir = std::env::var("CARGO_TARGET_DIR").ok();
+    validate_parallelism_input(
+        command,
+        caller_cargo_build_jobs.as_deref(),
+        caller_rust_test_threads.as_deref(),
+    )?;
     let now = now_ms()?;
     let clock = clock_ms()?;
     store.transaction(|state, config| {
-        if units == 0 || units > config.maximum_units || priority > config.maximum_priority {
+        if units == 0 || units > config.maximum_units || priority > config.max_priority() {
             return Err(Error::new(
                 ErrorCode::Request,
                 "units or priority outside configured bounds",
             ));
         }
-        if state.requests.len() >= config.maximum_requests {
+        if state.requests.len() >= crate::config::MAX_REQUESTS {
             return Err(Error::new(
                 ErrorCode::State,
                 "retained request limit reached; prune terminal requests",
@@ -82,6 +95,26 @@ pub(crate) fn enqueue(
             .checked_add(1)
             .ok_or_else(|| Error::new(ErrorCode::State, "request sequence exhausted"))?;
         let id = RequestId(format!("{}:r{sequence}", state.store_id));
+        let class_name = class.unwrap_or("periodic");
+        let (memory_cargo_jobs, memory_rust_test_threads, memory_parallelism) =
+            resolve_build_parallelism(
+                config,
+                command,
+                caller_cargo_build_jobs.as_deref(),
+                caller_rust_test_threads.as_deref(),
+                units,
+                state.used().saturating_add(units),
+            );
+        let memory_cap_bytes =
+            if config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted {
+                Some(estimate_memory_lease(
+                    config,
+                    class_name,
+                    memory_parallelism,
+                )?)
+            } else {
+                None
+            };
         state.requests.push(Request {
             id: id.clone(),
             sequence,
@@ -89,6 +122,16 @@ pub(crate) fn enqueue(
             ticket: ticket.to_owned(),
             units,
             priority,
+            class: class_name.to_owned(),
+            memory_cap_bytes,
+            memory_cargo_jobs,
+            memory_rust_test_threads,
+            memory_parallelism: Some(memory_parallelism),
+            caller_cargo_build_jobs,
+            caller_rust_test_threads,
+            caller_cargo_incremental,
+            caller_cargo_target_dir,
+            lease_record: None,
             enqueued_at_ms: now,
             enqueued_clock_ms: clock,
             started_at_ms: None,
@@ -110,6 +153,228 @@ pub(crate) fn enqueue(
         });
         state.event(&id, config, now, clock)?;
         Ok(id)
+    })
+}
+
+fn estimate_memory_lease(
+    config: &crate::config::Config,
+    class: &str,
+    parallelism: u32,
+) -> Result<u64> {
+    let per_job = config
+        .memory_per_job_by_class
+        .get(class)
+        .copied()
+        .unwrap_or(config.memory_per_job_bytes);
+    let lease_bytes = u64::from(parallelism).checked_mul(per_job).ok_or_else(|| {
+        Error::new(
+            ErrorCode::Request,
+            "requested memory lease size overflows the supported range",
+        )
+    })?;
+    if config
+        .memory_cap_by_class
+        .get(class)
+        .is_some_and(|cap| lease_bytes > *cap)
+    {
+        return Err(Error::new(
+            ErrorCode::Request,
+            format!("requested memory lease {lease_bytes} exceeds class `{class}` memory cap"),
+        ));
+    }
+    let budget = config.memory_budget_bytes.unwrap_or(0);
+    if lease_bytes > budget {
+        return Err(Error::new(
+            ErrorCode::Request,
+            format!("requested memory lease {lease_bytes} exceeds memory budget {budget}"),
+        ));
+    }
+    Ok(lease_bytes)
+}
+
+fn resolve_build_parallelism(
+    config: &crate::config::Config,
+    command: &[String],
+    caller_cargo_build_jobs: Option<&str>,
+    caller_rust_test_threads: Option<&str>,
+    units: u32,
+    active_units: u32,
+) -> (Option<u32>, Option<u32>, u32) {
+    let is_cargo = command
+        .first()
+        .and_then(|program| std::path::Path::new(program).file_name())
+        .is_some_and(|name| name == "cargo");
+    let mut bounded_config = config.clone();
+    let mut arguments = if is_cargo {
+        command.get(1..).unwrap_or_default().to_vec()
+    } else {
+        bounded_config.cargo_build_jobs = Some(units);
+        bounded_config.rust_test_threads = Some(units);
+        Vec::new()
+    };
+    let prepared = prepare_build_environment(
+        &bounded_config,
+        &mut arguments,
+        caller_cargo_build_jobs,
+        caller_rust_test_threads,
+        if is_cargo { active_units } else { 1 },
+    );
+    if is_cargo {
+        let jobs = prepared.record.cargo_build_jobs.unwrap_or(units);
+        let test_threads = prepared.record.rust_test_threads;
+        (
+            Some(jobs),
+            test_threads,
+            jobs.max(test_threads.unwrap_or_default()),
+        )
+    } else {
+        (None, prepared.record.rust_test_threads, units)
+    }
+}
+
+fn validate_parallelism_input(
+    command: &[String],
+    cargo_jobs_environment: Option<&str>,
+    test_threads_environment: Option<&str>,
+) -> Result<()> {
+    let is_cargo = command
+        .first()
+        .and_then(|program| std::path::Path::new(program).file_name())
+        .is_some_and(|name| name == "cargo");
+    let invalid_jobs = || {
+        Error::new(
+            ErrorCode::Request,
+            "Cargo job limits must be positive integers",
+        )
+    };
+    let invalid_threads = || {
+        Error::new(
+            ErrorCode::Request,
+            "Rust test thread limits must be positive integers",
+        )
+    };
+    if let Some(value) = cargo_jobs_environment
+        && is_cargo
+        && !value.parse::<u32>().is_ok_and(|jobs| jobs > 0)
+    {
+        return Err(invalid_jobs());
+    }
+    if let Some(value) = test_threads_environment
+        && !value.parse::<u32>().is_ok_and(|threads| threads > 0)
+    {
+        return Err(invalid_threads());
+    }
+    if !is_cargo {
+        return Ok(());
+    }
+    let arguments = command.get(1..).unwrap_or_default();
+    let end = arguments
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(arguments.len());
+    let mut index = 0;
+    while index < end {
+        let argument = &arguments[index];
+        if argument == "-j" || argument == "--jobs" {
+            let value = arguments.get(index + 1).filter(|_| index + 1 < end);
+            if !value.is_some_and(|value| value.parse::<u32>().is_ok_and(|jobs| jobs > 0)) {
+                return Err(invalid_jobs());
+            }
+            index += 2;
+            continue;
+        }
+        let long_value = argument
+            .strip_prefix("--jobs=")
+            .or_else(|| argument.strip_prefix("-j="))
+            .or_else(|| {
+                argument
+                    .strip_prefix("-j")
+                    .filter(|value| !value.is_empty())
+            });
+        if let Some(value) = long_value
+            && !value.parse::<u32>().is_ok_and(|jobs| jobs > 0)
+        {
+            return Err(invalid_jobs());
+        }
+        index += 1;
+    }
+    let separator = arguments.iter().position(|argument| argument == "--");
+    if let Some(separator) = separator {
+        let after = &arguments[separator + 1..];
+        let mut index = 0;
+        while index < after.len() {
+            if after[index] == "--test-threads" {
+                if !after
+                    .get(index + 1)
+                    .is_some_and(|value| value.parse::<u32>().is_ok_and(|threads| threads > 0))
+                {
+                    return Err(invalid_threads());
+                }
+                index += 2;
+                continue;
+            }
+            if let Some(value) = after[index].strip_prefix("--test-threads=")
+                && !value.parse::<u32>().is_ok_and(|threads| threads > 0)
+            {
+                return Err(invalid_threads());
+            }
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_request_environment(
+    config: &crate::config::Config,
+    request: &Request,
+    arguments: &mut [String],
+    active_units: u32,
+) -> PreparedBuildEnvironment {
+    if let Some(parallelism) = request.memory_parallelism {
+        let is_cargo = request
+            .command
+            .first()
+            .and_then(|program| std::path::Path::new(program).file_name())
+            .is_some_and(|name| name == "cargo");
+        let mut reserved_config = config.clone();
+        reserved_config.cargo_build_jobs = Some(request.memory_cargo_jobs.unwrap_or(parallelism));
+        reserved_config.rust_test_threads = if is_cargo {
+            request.memory_rust_test_threads
+        } else {
+            Some(parallelism)
+        };
+        let mut no_arguments = Vec::new();
+        let environment_arguments = if is_cargo {
+            arguments
+        } else {
+            no_arguments.as_mut_slice()
+        };
+        prepare_build_environment(
+            &reserved_config,
+            environment_arguments,
+            request.caller_cargo_build_jobs.as_deref(),
+            request.caller_rust_test_threads.as_deref(),
+            1,
+        )
+    } else {
+        prepare_build_environment(
+            config,
+            arguments,
+            request.caller_cargo_build_jobs.as_deref(),
+            request.caller_rust_test_threads.as_deref(),
+            active_units,
+        )
+    }
+}
+
+pub(crate) fn priority_for_class(store: &Store, class: &str) -> Result<u32> {
+    store.transaction(|_, config| {
+        config
+            .priority_classes
+            .get(class)
+            .copied()
+            .or_else(|| (class == "periodic").then_some(0))
+            .ok_or_else(|| Error::new(ErrorCode::Request, "priority class is not configured"))
     })
 }
 
@@ -187,6 +452,8 @@ pub struct RequestReport {
     pub units: u32,
     /// Base priority.
     pub priority: u32,
+    /// Named priority class selected for the request.
+    pub class: String,
     /// Enqueue time.
     pub enqueued_at_ms: u64,
     /// Start time when admitted.
@@ -205,6 +472,8 @@ pub struct RequestReport {
     pub exit_code: Option<i32>,
     /// Signal terminating the direct child when observed.
     pub signal: Option<i32>,
+    /// Effective settings and memory enforcement selected for this lease.
+    pub lease_record: Option<LeaseRecord>,
 }
 
 pub(crate) fn recover(store: &Store) -> Result<Vec<RequestId>> {
@@ -336,6 +605,7 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
                     state: phase_name(request.phase).to_owned(),
                     units: request.units,
                     priority: request.priority,
+                    class: request.class.clone(),
                     enqueued_at_ms: request.enqueued_at_ms,
                     started_at_ms: request.started_at_ms,
                     ended_at_ms: request.ended_at_ms,
@@ -349,11 +619,12 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
                     suspect: request.phase == Phase::Running
                         && (identity != Some(IdentityState::Matching)
                             || request.heartbeat_at_ms.is_none_or(|heartbeat| {
-                                now.saturating_sub(heartbeat) > config.heartbeat_max_age_ms
+                                now.saturating_sub(heartbeat) > crate::config::HEARTBEAT_MAX_AGE_MS
                             })),
                     reason: request.reason.clone(),
                     exit_code: request.exit_code,
                     signal: request.signal,
+                    lease_record: request.lease_record.clone(),
                 }
             })
             .collect();
@@ -432,7 +703,7 @@ pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Re
         for missing in recover(store)? {
             workers.push(spawn_worker(store, &missing)?);
         }
-        let result = store.transaction(|state, config| {
+        let result = store.transaction(|state, _config| {
             let request = state.find(id)?;
             let code = match request.phase {
                 Phase::Queued | Phase::Running => None,
@@ -447,7 +718,7 @@ pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Re
                         .unwrap_or(1),
                 ),
             };
-            Ok((code, config.poll_ms))
+            Ok((code, crate::config::POLL_INTERVAL_MS))
         })?;
         if let Some(code) = result.0 {
             return Ok(code);
@@ -456,6 +727,7 @@ pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Re
     }
 }
 
+#[derive(Clone)]
 struct WorkerFence {
     identity: crate::model::ProcessIdentity,
     generation: u64,
@@ -534,7 +806,7 @@ fn admit_worker(
         let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
         state.metrics.observe_block(blocked, now, clock)?;
         if reason.is_some() {
-            return Ok(Admission::Waiting(config.poll_ms));
+            return Ok(Admission::Waiting(crate::config::POLL_INTERVAL_MS));
         }
         let admitted = {
             let request = state.find_mut(id)?;
@@ -590,7 +862,8 @@ pub(crate) fn worker(store: &Store, id: &RequestId) -> Result<()> {
         &watchdog,
         &mut watchdog_child,
         &interrupted,
-    )
+    )?;
+    cleanup_target(store, id)
 }
 
 fn supervise(
@@ -601,13 +874,72 @@ fn supervise(
     watchdog_child: &mut Child,
     interrupted: &AtomicBool,
 ) -> Result<()> {
-    let mut child = start_command(store, request, fence, watchdog)?;
+    let child = match start_command(store, request, fence, watchdog)? {
+        CommandStart::Started(child) => child,
+        CommandStart::Refused => {
+            store.transaction(|state, config| {
+                finish_refused_command(state, config, &request.id, fence)
+            })?;
+            return Ok(());
+        }
+    };
+    supervise_started_command(
+        store,
+        request,
+        fence,
+        watchdog,
+        watchdog_child,
+        interrupted,
+        child,
+        |evidence, processes, group| evidence.observe_group(processes, group),
+    )
+}
+
+fn finish_refused_command(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    fence: &WorkerFence,
+) -> Result<()> {
+    fence.require_running(state.find(id)?)?;
+    state.finish(
+        id,
+        Completion {
+            reason: Some("memory_cap_unavailable"),
+            ..Completion::default()
+        },
+        config,
+        now_ms()?,
+        clock_ms()?,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn supervise_started_command(
+    store: &Store,
+    request: &Request,
+    fence: &WorkerFence,
+    watchdog: &crate::model::ProcessIdentity,
+    watchdog_child: &mut Child,
+    interrupted: &AtomicBool,
+    mut child: Child,
+    mut observe_oom: impl FnMut(&mut CgroupOomEvidence, &Processes, u32),
+) -> Result<()> {
+    let enforcement = persisted_memory_enforcement(store, &request.id)?;
+    let mut cgroup_oom_evidence = CgroupOomEvidence::default();
     let mut status = None;
     loop {
         // A dead watchdog remains a group member until its parent reaps it.
         watchdog_child.try_wait()?;
+        if enforcement == Some(MemoryEnforcement::SystemdScope) {
+            observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
+        }
         if status.is_none() {
             status = child.try_wait()?;
+        }
+        if status.is_some() && enforcement == Some(MemoryEnforcement::SystemdScope) {
+            observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
+            cgroup_oom_evidence.read_known_files();
         }
         let policy = store.transaction(|state, config| {
             if state.find(&request.id)?.phase.terminal() {
@@ -645,7 +977,10 @@ fn supervise(
             if let Some(outcome) = status
                 && group_absent(watchdog.pid)
             {
-                finish_owned(
+                if enforcement == Some(MemoryEnforcement::SystemdScope) {
+                    cgroup_oom_evidence.read_known_files();
+                }
+                finish_supervised_command(
                     state,
                     config,
                     &request.id,
@@ -654,12 +989,12 @@ fn supervise(
                     Completion {
                         code: outcome.code(),
                         signal: outcome.signal(),
-                        reason: None,
+                        reason: cgroup_cap_kill_reason(enforcement, cgroup_oom_evidence.detected()),
                     },
                 )?;
                 return Ok(None);
             }
-            Ok(Some(config.poll_ms))
+            Ok(Some(crate::config::POLL_INTERVAL_MS))
         })?;
         let Some(poll_ms) = policy else {
             return Ok(());
@@ -668,13 +1003,65 @@ fn supervise(
     }
 }
 
+fn persisted_memory_enforcement(
+    store: &Store,
+    id: &RequestId,
+) -> Result<Option<MemoryEnforcement>> {
+    store.transaction(|state, _| {
+        Ok(state
+            .find(id)?
+            .lease_record
+            .as_ref()
+            .map(|record| record.memory_enforcement))
+    })
+}
+
+fn finish_supervised_command(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    fence: &WorkerFence,
+    group: u32,
+    completion: Completion,
+) -> Result<()> {
+    finish_owned(state, config, id, fence, group, completion)
+}
+
 fn start_command(
     store: &Store,
     request: &Request,
     fence: &WorkerFence,
     watchdog: &crate::model::ProcessIdentity,
-) -> Result<Child> {
-    store.transaction(|state, _| {
+) -> Result<CommandStart> {
+    let (config_snapshot, memory_cap) = store.transaction(|state, config| {
+        fence.require_running(state.find(&request.id)?)?;
+        if state.find(&request.id)?.watchdog.as_ref() != Some(watchdog)
+            || Processes::read().role_identity(watchdog, &request.id, "watchdog", watchdog.pid)
+                != IdentityState::Matching
+        {
+            return Err(Error::new(
+                ErrorCode::State,
+                "command group ownership unavailable",
+            ));
+        }
+        Ok((config.clone(), request.memory_cap_bytes))
+    })?;
+    let (mut enforcement, _probe_launch_spec) = select_lease_launch(
+        LauncherPlatform::current(),
+        request
+            .command
+            .first()
+            .ok_or_else(|| Error::new(ErrorCode::State, "persisted empty command"))?,
+        request.command.get(1..).unwrap_or_default(),
+        memory_cap,
+        config_snapshot.on_missing_cgroup,
+        |cap| systemd_scope_available(cap, Duration::from_secs(2)),
+    );
+    if enforcement == MemoryEnforcement::RssWatchdog && !Processes::read().can_sample_memory() {
+        enforcement = MemoryEnforcement::Refused;
+    }
+
+    store.transaction(|state, config| {
         fence.require_running(state.find(&request.id)?)?;
         if state.find(&request.id)?.watchdog.as_ref() != Some(watchdog)
             || Processes::read().role_identity(watchdog, &request.id, "watchdog", watchdog.pid)
@@ -692,13 +1079,687 @@ fn start_command(
         let group = i32::try_from(watchdog.pid)
             .map_err(|_| Error::new(ErrorCode::State, "command group out of range"))?;
         // Creation and every quiescence decision share the durable store lock.
-        Command::new(program)
-            .args(request.command.iter().skip(1))
+        let active_units = state
+            .requests
+            .iter()
+            .filter(|candidate| candidate.phase == Phase::Running)
+            .fold(0_u32, |total, candidate| {
+                total.saturating_add(candidate.units)
+            });
+        let mut arguments = request.command[1..].to_vec();
+        let environment =
+            prepare_request_environment(config, request, &mut arguments, active_units);
+        let memory_cap = request.memory_cap_bytes;
+        let mut lease_record = environment.record;
+        lease_record.memory_enforcement = enforcement;
+        if enforcement == MemoryEnforcement::Refused {
+            state.find_mut(&request.id)?.lease_record = Some(lease_record);
+            return Ok(CommandStart::Refused);
+        }
+        let launch_spec = lease_command_spec_for_enforcement(
+            LauncherPlatform::current(),
+            program,
+            &arguments,
+            memory_cap,
+            enforcement,
+        );
+        let mut command = Command::new(launch_spec.program);
+        command
+            .args(launch_spec.arguments)
             .current_dir(&request.cwd)
-            .process_group(group)
+            .process_group(group);
+        if let Some(value) = environment.cargo_build_jobs_env {
+            command.env("CARGO_BUILD_JOBS", value);
+        }
+        if let Some(value) = environment.rust_test_threads_env {
+            command.env("RUST_TEST_THREADS", value);
+        }
+        let (incremental, incremental_overwrote_caller) = apply_incremental_environment(
+            &mut command,
+            config,
+            request.caller_cargo_incremental.as_deref(),
+        );
+        let (target_dir, target_overwrote_caller) =
+            apply_target_environment(&mut command, config, request)?;
+        lease_record.cargo_incremental = incremental;
+        lease_record.cargo_incremental_overwrote_caller = incremental_overwrote_caller;
+        lease_record.cargo_target_dir = target_dir;
+        lease_record.cargo_target_dir_overwrote_caller = target_overwrote_caller;
+        state.find_mut(&request.id)?.lease_record = Some(lease_record);
+        command
             .spawn()
+            .map(CommandStart::Started)
             .map_err(Into::into)
     })
+}
+
+enum CommandStart {
+    Started(Child),
+    Refused,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LauncherPlatform {
+    Linux,
+    Other,
+}
+
+impl LauncherPlatform {
+    fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self::Linux
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::Other
+        }
+    }
+}
+
+struct LaunchSpec {
+    program: std::ffi::OsString,
+    arguments: Vec<std::ffi::OsString>,
+}
+
+fn lease_command_spec(
+    platform: LauncherPlatform,
+    program: &str,
+    arguments: &[String],
+    memory_cap_bytes: Option<u64>,
+) -> LaunchSpec {
+    if platform == LauncherPlatform::Linux
+        && let Some(memory_cap_bytes) = memory_cap_bytes
+    {
+        let mut command_arguments = vec![
+            "--user".into(),
+            "--scope".into(),
+            "--quiet".into(),
+            "-p".into(),
+            format!("MemoryMax={memory_cap_bytes}").into(),
+            "-p".into(),
+            "MemorySwapMax=0".into(),
+            "--".into(),
+            program.into(),
+        ];
+        command_arguments.extend(arguments.iter().map(Into::into));
+        LaunchSpec {
+            program: "systemd-run".into(),
+            arguments: command_arguments,
+        }
+    } else {
+        LaunchSpec {
+            program: program.into(),
+            arguments: arguments.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+fn lease_command_spec_for_enforcement(
+    platform: LauncherPlatform,
+    program: &str,
+    arguments: &[String],
+    memory_cap_bytes: Option<u64>,
+    enforcement: MemoryEnforcement,
+) -> LaunchSpec {
+    let scope_cap = (enforcement == MemoryEnforcement::SystemdScope)
+        .then_some(memory_cap_bytes)
+        .flatten();
+    lease_command_spec(platform, program, arguments, scope_cap)
+}
+
+fn systemd_scope_available(memory_cap_bytes: u64, timeout: Duration) -> bool {
+    if !memory_controller_delegated() {
+        return false;
+    }
+    let spec = lease_command_spec(
+        LauncherPlatform::Linux,
+        "/usr/bin/true",
+        &[],
+        Some(memory_cap_bytes),
+    );
+    run_probe_with_timeout(timeout, || {
+        Command::new(spec.program).args(spec.arguments).spawn()
+    })
+}
+
+fn memory_controller_delegated() -> bool {
+    let Ok(membership) = std::fs::read_to_string("/proc/self/cgroup") else {
+        return false;
+    };
+    let Some(relative) = membership.lines().find_map(|line| line.strip_prefix("0::")) else {
+        return false;
+    };
+    memory_controller_delegated_at(std::path::Path::new("/sys/fs/cgroup"), relative)
+}
+
+fn memory_controller_delegated_at(cgroup_root: &std::path::Path, relative: &str) -> bool {
+    let relative = std::path::Path::new(relative.trim_start_matches('/'));
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let group = cgroup_root.join(relative);
+    if !group.join("memory.max").is_file() {
+        return false;
+    }
+    let Some(parent) = group.parent() else {
+        return false;
+    };
+    std::fs::read_to_string(parent.join("cgroup.subtree_control"))
+        .is_ok_and(|controllers| controllers.split_whitespace().any(|item| item == "memory"))
+}
+
+fn run_probe_with_timeout(
+    timeout: Duration,
+    spawn: impl FnOnce() -> std::io::Result<Child>,
+) -> bool {
+    let Ok(mut child) = spawn() else {
+        return false;
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn select_memory_enforcement(
+    platform: LauncherPlatform,
+    memory_cap_bytes: Option<u64>,
+    on_missing: crate::config::OnMissingCgroup,
+    mut systemd_scope_probe: impl FnMut(u64) -> bool,
+) -> MemoryEnforcement {
+    let Some(memory_cap_bytes) = memory_cap_bytes else {
+        return MemoryEnforcement::NotConfigured;
+    };
+    if platform == LauncherPlatform::Linux && systemd_scope_probe(memory_cap_bytes) {
+        return MemoryEnforcement::SystemdScope;
+    }
+    match on_missing {
+        crate::config::OnMissingCgroup::Refuse => MemoryEnforcement::Refused,
+        crate::config::OnMissingCgroup::RssWatchdog => MemoryEnforcement::RssWatchdog,
+    }
+}
+
+fn select_lease_launch(
+    platform: LauncherPlatform,
+    program: &str,
+    arguments: &[String],
+    memory_cap_bytes: Option<u64>,
+    on_missing: crate::config::OnMissingCgroup,
+    probe: impl FnMut(u64) -> bool,
+) -> (MemoryEnforcement, LaunchSpec) {
+    let enforcement = select_memory_enforcement(platform, memory_cap_bytes, on_missing, probe);
+    let launch = lease_command_spec_for_enforcement(
+        platform,
+        program,
+        arguments,
+        memory_cap_bytes,
+        enforcement,
+    );
+    (enforcement, launch)
+}
+
+fn cgroup_cap_kill_reason(
+    enforcement: Option<MemoryEnforcement>,
+    oom_kill_observed: bool,
+) -> Option<&'static str> {
+    (enforcement == Some(MemoryEnforcement::SystemdScope) && oom_kill_observed).then_some("rss_cap")
+}
+
+#[derive(Default)]
+struct CgroupOomEvidence {
+    event_files: std::collections::BTreeSet<std::path::PathBuf>,
+    detected: bool,
+}
+
+impl CgroupOomEvidence {
+    fn observe_group(&mut self, processes: &Processes, group: u32) {
+        self.event_files
+            .extend(processes.group_memory_events_files(group));
+        self.read_known_files();
+    }
+
+    #[cfg(test)]
+    fn observe_file(&mut self, path: &std::path::Path) {
+        self.event_files.insert(path.to_owned());
+        self.read_known_files();
+    }
+
+    fn read_known_files(&mut self) {
+        self.detected |= self.event_files.iter().any(|path| {
+            crate::process::oom_kill_count_from_file(path).is_some_and(|count| count > 0)
+        });
+    }
+
+    fn detected(&self) -> bool {
+        self.detected
+    }
+}
+
+struct PreparedBuildEnvironment {
+    cargo_build_jobs_env: Option<String>,
+    rust_test_threads_env: Option<String>,
+    record: LeaseRecord,
+}
+
+fn prepare_build_environment(
+    config: &crate::config::Config,
+    arguments: &mut [String],
+    caller_cargo_build_jobs: Option<&str>,
+    caller_rust_test_threads: Option<&str>,
+    active_units: u32,
+) -> PreparedBuildEnvironment {
+    let cargo_cli = clamp_argument(arguments, &["-j", "--jobs"], false, config.cargo_build_jobs);
+    let rust_cli = clamp_test_threads(arguments, config.rust_test_threads);
+
+    let (cargo_build_jobs_env, cargo_build_jobs, cargo_build_jobs_clamped) =
+        if let Some(value) = cargo_cli {
+            (
+                value.value.map(|v| v.to_string()),
+                value.value.and_then(to_u32),
+                value.clamped,
+            )
+        } else if let Some(value) = caller_cargo_build_jobs {
+            let (effective, numeric, clamped) = clamp_env_value(value, config.cargo_build_jobs);
+            (Some(effective), numeric, clamped)
+        } else if let Some(maximum_jobs) = config.cargo_build_jobs {
+            let pressure_units = active_units.max(1);
+            let scaled = (maximum_jobs / pressure_units).max(1);
+            (Some(scaled.to_string()), Some(scaled), false)
+        } else {
+            let jobs = active_units.max(1);
+            (Some(jobs.to_string()), Some(jobs), false)
+        };
+
+    let (rust_test_threads_env, rust_test_threads, rust_test_threads_clamped) =
+        if let Some(value) = rust_cli {
+            (
+                value.value.map(|v| v.to_string()),
+                value.value.and_then(to_u32),
+                value.clamped,
+            )
+        } else if let Some(value) = caller_rust_test_threads {
+            let (effective, numeric, clamped) = clamp_env_value(value, config.rust_test_threads);
+            (Some(effective), numeric, clamped)
+        } else if let Some(threads) = config.rust_test_threads {
+            (Some(threads.to_string()), Some(threads), false)
+        } else {
+            (None, None, false)
+        };
+
+    PreparedBuildEnvironment {
+        cargo_build_jobs_env,
+        rust_test_threads_env,
+        record: LeaseRecord {
+            cargo_build_jobs,
+            cargo_build_jobs_clamped,
+            rust_test_threads,
+            rust_test_threads_clamped,
+            memory_enforcement: MemoryEnforcement::NotConfigured,
+            ..LeaseRecord::default()
+        },
+    }
+}
+
+struct ArgumentLimit {
+    value: Option<u64>,
+    clamped: bool,
+}
+
+fn clamp_argument(
+    arguments: &mut [String],
+    options: &[&str],
+    after_separator: bool,
+    maximum: Option<u32>,
+) -> Option<ArgumentLimit> {
+    let separator = arguments.iter().position(|argument| argument == "--");
+    let (start, end) = if after_separator {
+        (separator?.saturating_add(1), arguments.len())
+    } else {
+        (0, separator.unwrap_or(arguments.len()))
+    };
+    for index in start..end {
+        for option in options {
+            if arguments[index] == *option {
+                return Some(clamp_separate_argument(arguments, index, maximum));
+            }
+            if let Some(raw) = arguments[index].strip_prefix(&format!("{option}=")) {
+                let parsed = raw.parse::<u64>().ok();
+                let clamped =
+                    parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+                if clamped {
+                    arguments[index] = format!("{option}={}", maximum.unwrap_or_default());
+                }
+                return Some(ArgumentLimit {
+                    value: parsed
+                        .map(|value| maximum.map_or(value, |max| value.min(u64::from(max)))),
+                    clamped,
+                });
+            }
+            if *option == "-j"
+                && let Some(raw) = arguments[index].strip_prefix("-j")
+                && !raw.is_empty()
+            {
+                let raw = raw.strip_prefix('=').unwrap_or(raw);
+                let parsed = raw.parse::<u64>().ok();
+                let clamped =
+                    parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+                if clamped {
+                    arguments[index] = format!("-j{}", maximum.unwrap_or_default());
+                }
+                return Some(ArgumentLimit {
+                    value: parsed
+                        .map(|value| maximum.map_or(value, |max| value.min(u64::from(max)))),
+                    clamped,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn clamp_separate_argument(
+    arguments: &mut [String],
+    index: usize,
+    maximum: Option<u32>,
+) -> ArgumentLimit {
+    let Some(next) = arguments.get(index + 1) else {
+        return ArgumentLimit {
+            value: None,
+            clamped: false,
+        };
+    };
+    let parsed = next.parse::<u64>().ok();
+    let clamped = parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+    if clamped {
+        arguments[index + 1] = maximum.unwrap_or_default().to_string();
+    }
+    ArgumentLimit {
+        value: parsed.map(|value| maximum.map_or(value, |max| value.min(u64::from(max)))),
+        clamped,
+    }
+}
+
+fn clamp_env_value(value: &str, maximum: Option<u32>) -> (String, Option<u32>, bool) {
+    let parsed = value.parse::<u64>().ok();
+    let clamped = parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+    let effective = parsed.map(|value| maximum.map_or(value, |max| value.min(u64::from(max))));
+    let output = effective.map_or_else(|| value.to_owned(), |value| value.to_string());
+    (output, effective.and_then(to_u32), clamped)
+}
+
+fn to_u32(value: u64) -> Option<u32> {
+    u32::try_from(value).ok()
+}
+
+fn clamp_test_threads(arguments: &mut [String], maximum: Option<u32>) -> Option<ArgumentLimit> {
+    let separator = arguments.iter().position(|argument| argument == "--");
+    let start = separator.map_or(0, |index| index.saturating_add(1));
+    for index in start..arguments.len() {
+        if arguments[index] == "--test-threads" {
+            return Some(clamp_separate_argument(arguments, index, maximum));
+        }
+        if let Some(raw) = arguments[index].strip_prefix("--test-threads=") {
+            let parsed = raw.parse::<u64>().ok();
+            let clamped =
+                parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+            if clamped {
+                arguments[index] = format!("--test-threads={}", maximum.unwrap_or_default());
+            }
+            return Some(ArgumentLimit {
+                value: parsed.map(|value| maximum.map_or(value, |max| value.min(u64::from(max)))),
+                clamped,
+            });
+        }
+    }
+    None
+}
+
+fn apply_incremental_environment(
+    command: &mut Command,
+    config: &crate::config::Config,
+    caller_value: Option<&str>,
+) -> (Option<String>, bool) {
+    let policy_value = config
+        .cargo_incremental
+        .map(|incremental| if incremental { "1" } else { "0" });
+    let effective = policy_value
+        .map(str::to_owned)
+        .or_else(|| caller_value.map(str::to_owned));
+    if let Some(value) = &effective {
+        command.env("CARGO_INCREMENTAL", value);
+    } else {
+        command.env_remove("CARGO_INCREMENTAL");
+    }
+    command.env("LOCKED_BUILD_LEASE", "1");
+    (effective, policy_value.is_some() && caller_value.is_some())
+}
+
+fn target_directory(
+    config: &crate::config::Config,
+    request: &Request,
+    create: bool,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(configured_root) = &config.target_root else {
+        return Ok(None);
+    };
+    if create {
+        std::fs::create_dir_all(configured_root)?;
+    } else if !configured_root.exists() {
+        return Ok(None);
+    }
+    let root = configured_root.canonicalize()?;
+    let target = root.join(owner_target_key(&request.owner));
+    if create {
+        match std::fs::create_dir(&target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let metadata = match std::fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "target directory is not a regular directory",
+        ));
+    }
+    let canonical_target = target.canonicalize()?;
+    if !canonical_target.starts_with(&root) {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "target directory escapes target_root",
+        ));
+    }
+    Ok(Some(canonical_target))
+}
+
+fn apply_target_environment(
+    command: &mut Command,
+    config: &crate::config::Config,
+    request: &Request,
+) -> Result<(Option<std::path::PathBuf>, bool)> {
+    if let Some(target) = target_directory(config, request, true)? {
+        command.env("CARGO_TARGET_DIR", &target);
+        return Ok((Some(target), request.caller_cargo_target_dir.is_some()));
+    }
+    if let Some(caller_value) = &request.caller_cargo_target_dir {
+        let target = std::path::PathBuf::from(caller_value);
+        command.env("CARGO_TARGET_DIR", &target);
+        Ok((Some(target), false))
+    } else {
+        command.env_remove("CARGO_TARGET_DIR");
+        Ok((None, false))
+    }
+}
+
+fn owner_target_key(owner: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in owner.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let prefix: String = owner
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || "-_.".contains(*character))
+        .take(48)
+        .collect();
+    format!(
+        "{}-{hash:016x}",
+        if prefix.is_empty() { "owner" } else { &prefix }
+    )
+}
+
+fn cleanup_target(store: &Store, id: &RequestId) -> Result<()> {
+    let plan = store.transaction(|state, config| {
+        let request = state.find(id)?;
+        let still_active = state
+            .requests
+            .iter()
+            .any(|candidate| candidate.owner == request.owner && candidate.phase == Phase::Running);
+        if still_active {
+            return Ok(None);
+        }
+        let Some(target) = target_directory(config, request, false)? else {
+            return Ok(None);
+        };
+        if config.max_bytes.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(TargetCleanupPlan {
+            owner: request.owner.clone(),
+            target,
+            max_bytes: config.max_bytes,
+        }))
+    })?;
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    let Some(inspection) = inspect_target_tree(&plan.target)? else {
+        return Ok(());
+    };
+    let too_large =
+        inspection.bound_reached || plan.max_bytes.is_some_and(|limit| inspection.bytes > limit);
+    if !too_large {
+        return Ok(());
+    }
+
+    let tombstone = store.transaction(|state, config| {
+        if state
+            .requests
+            .iter()
+            .any(|candidate| candidate.owner == plan.owner && candidate.phase == Phase::Running)
+        {
+            return Ok(None);
+        }
+        let request = state.find(id)?;
+        let Some(confirmed) = target_directory(config, request, false)? else {
+            return Ok(None);
+        };
+        if confirmed != plan.target {
+            return Err(Error::new(
+                ErrorCode::Configuration,
+                "target directory changed before cleanup",
+            ));
+        }
+        let parent = confirmed
+            .parent()
+            .ok_or_else(|| Error::new(ErrorCode::Configuration, "target has no parent"))?;
+        let tombstone = parent.join(format!(".locked-build-cleanup-{}", id.0.replace(':', "-")));
+        if tombstone.exists() {
+            return Err(Error::new(
+                ErrorCode::State,
+                "target cleanup staging path already exists",
+            ));
+        }
+        std::fs::rename(&confirmed, &tombstone)?;
+        Ok(Some(tombstone))
+    })?;
+    if let Some(tombstone) = tombstone {
+        std::fs::remove_dir_all(tombstone)?;
+    }
+    Ok(())
+}
+
+struct TargetCleanupPlan {
+    owner: String,
+    target: std::path::PathBuf,
+    max_bytes: Option<u64>,
+}
+
+struct TargetInspection {
+    bytes: u64,
+    bound_reached: bool,
+}
+
+fn inspect_target_tree(target: &Path) -> Result<Option<TargetInspection>> {
+    const MAX_ENTRIES: usize = 100_000;
+    let root_metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "target directory is not a regular directory",
+        ));
+    }
+    let mut pending = vec![target.to_owned()];
+    let mut bytes = 0_u64;
+    let mut visited = 0_usize;
+    let mut bound_reached = false;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            visited = visited.saturating_add(1);
+            if visited > MAX_ENTRIES {
+                bound_reached = true;
+                break;
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if metadata.is_file() {
+                bytes = bytes.saturating_add(metadata.len());
+            }
+        }
+        if bound_reached {
+            break;
+        }
+    }
+    Ok(Some(TargetInspection {
+        bytes,
+        bound_reached,
+    }))
 }
 
 pub(crate) fn prune(store: &Store) -> Result<usize> {

@@ -128,7 +128,7 @@ impl Store {
             state.metrics.finish_for_reboot(
                 sysinfo::System::boot_time().saturating_mul(1_000),
                 last_host_poll_at_ms,
-                config.poll_ms,
+                crate::config::POLL_INTERVAL_MS,
             )?;
         }
         let now = crate::runtime::now_ms()?;
@@ -138,7 +138,7 @@ impl Store {
             &state.requests,
             now,
             clock,
-            config.poll_ms,
+            crate::config::POLL_INTERVAL_MS,
             |request| {
                 let Some(worker) = request.worker.as_ref() else {
                     return false;

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Process identity and conservative recovery of isolated supervisor groups.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::{Pid, getpgid};
@@ -26,6 +27,7 @@ pub(crate) struct Processes {
 struct Row {
     start: u64,
     group: Option<u32>,
+    memory_bytes: u64,
     arguments: Vec<String>,
     zombie: bool,
 }
@@ -60,6 +62,7 @@ impl Processes {
                     Row {
                         start: process.start_time(),
                         group,
+                        memory_bytes: process.memory(),
                         arguments: process
                             .cmd()
                             .iter()
@@ -130,6 +133,10 @@ impl Processes {
         })
     }
 
+    pub(crate) fn can_sample_memory(&self) -> bool {
+        self.complete
+    }
+
     pub(crate) fn group_has_live_members(&self, group: u32, excluding: Option<u32>) -> bool {
         self.group_has_live_members_excluding(group, excluding.as_slice())
     }
@@ -142,6 +149,18 @@ impl Processes {
             (row.group == Some(group) || row.group.is_none())
                 && !row.zombie
                 && !excluding.contains(pid)
+        })
+    }
+
+    pub(crate) fn group_memory_bytes(&self, group: u32, excluding: &[u32]) -> Option<u64> {
+        self.complete.then(|| {
+            self.rows
+                .iter()
+                .filter(|(pid, row)| {
+                    row.group == Some(group) && !row.zombie && !excluding.contains(pid)
+                })
+                .map(|(_, row)| row)
+                .fold(0_u64, |sum, row| sum.saturating_add(row.memory_bytes))
         })
     }
 
@@ -166,6 +185,43 @@ impl Processes {
         killpg(Pid::from_raw(pid), signal)
             .map_err(|error| Error::new(ErrorCode::Io, format!("group signal failed: {error}")))
     }
+
+    pub(crate) fn group_memory_events_files(&self, group: u32) -> BTreeSet<PathBuf> {
+        if !self.complete {
+            return BTreeSet::new();
+        }
+        self.rows
+            .iter()
+            .filter(|(_, row)| row.group == Some(group) && !row.zombie)
+            .filter_map(|(pid, _)| cgroup_memory_events_file(*pid))
+            .collect()
+    }
+}
+
+fn cgroup_memory_events_file(pid: u32) -> Option<PathBuf> {
+    let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?;
+    Some(
+        std::path::Path::new("/sys/fs/cgroup")
+            .join(relative.trim_start_matches('/'))
+            .join("memory.events"),
+    )
+}
+
+pub(crate) fn oom_kill_count_from_file(path: &std::path::Path) -> Option<u64> {
+    let events = std::fs::read_to_string(path).ok()?;
+    parse_oom_kill_count(&events)
+}
+
+fn parse_oom_kill_count(events: &str) -> Option<u64> {
+    events.lines().find_map(|line| {
+        let (name, value) = line.split_once(char::is_whitespace)?;
+        (name == "oom_kill")
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
 }
 
 #[cfg(test)]
@@ -202,6 +258,7 @@ mod tests {
                 Row {
                     start: 100,
                     group: Some(77),
+                    memory_bytes: 4_096,
                     arguments: vec!["unrelated".into()],
                     zombie: false,
                 },
@@ -220,5 +277,58 @@ mod tests {
                 .map_err(|error| error.code),
             Err(ErrorCode::State)
         );
+    }
+
+    #[test]
+    fn rss_fallback_sums_only_live_group_members_and_excludes_watchdog() {
+        let processes = Processes {
+            complete: true,
+            rows: BTreeMap::from([
+                (
+                    77,
+                    Row {
+                        start: 1,
+                        group: Some(77),
+                        memory_bytes: 100,
+                        arguments: vec!["watchdog".into()],
+                        zombie: false,
+                    },
+                ),
+                (
+                    78,
+                    Row {
+                        start: 1,
+                        group: Some(77),
+                        memory_bytes: 600,
+                        arguments: vec!["cargo".into()],
+                        zombie: false,
+                    },
+                ),
+                (
+                    79,
+                    Row {
+                        start: 1,
+                        group: Some(79),
+                        memory_bytes: 900,
+                        arguments: vec!["unrelated".into()],
+                        zombie: false,
+                    },
+                ),
+            ]),
+        };
+        assert_eq!(processes.group_memory_bytes(77, &[77]), Some(600));
+    }
+
+    #[test]
+    fn cgroup_oom_kill_event_is_distinguished_from_a_manual_signal() {
+        assert_eq!(
+            parse_oom_kill_count("low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_oom_kill_count("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n"),
+            Some(0)
+        );
+        assert_eq!(parse_oom_kill_count("low 0\nmax 1\n"), None);
     }
 }

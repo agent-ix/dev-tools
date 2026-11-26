@@ -11,7 +11,7 @@ use nix::unistd::{Pid, setpgid};
 
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{Completion, Phase, ProcessIdentity, RequestId, StopReason};
+use crate::model::{Completion, MemoryEnforcement, Phase, ProcessIdentity, RequestId, StopReason};
 use crate::process::{IdentityState, Processes, group_absent};
 use crate::runtime::{clock_ms, now_ms};
 use crate::store::Store;
@@ -50,7 +50,7 @@ pub(crate) fn launch(
                 && processes.role_identity(watchdog, id, "watchdog", watchdog.pid)
                     == IdentityState::Matching
             {
-                return Ok((Some(watchdog.clone()), config.poll_ms));
+                return Ok((Some(watchdog.clone()), crate::config::POLL_INTERVAL_MS));
             }
             if request.started_clock_ms.is_some_and(|started| {
                 clock_ms().is_ok_and(|now| now.saturating_sub(started) >= config.hold_ms)
@@ -61,7 +61,7 @@ pub(crate) fn launch(
                     "watchdog startup exceeded hold deadline",
                 ));
             }
-            Ok((None, config.poll_ms))
+            Ok((None, crate::config::POLL_INTERVAL_MS))
         })?;
         if let Some(identity) = ready.0 {
             return Ok((identity, child));
@@ -121,6 +121,7 @@ enum Decision {
     Done,
     Observe {
         stop: bool,
+        memory_cap_exceeded: bool,
         grace_ms: u64,
         poll_ms: u64,
     },
@@ -152,6 +153,21 @@ fn observe(
         {
             request.stop = Some(StopReason::TimedOut);
         }
+        if request.stop.is_none()
+            && request
+                .lease_record
+                .as_ref()
+                .and_then(|record| {
+                    rss_fallback_cap(record.memory_enforcement, request.memory_cap_bytes)
+                })
+                .is_some_and(|cap| {
+                    processes
+                        .group_memory_bytes(watchdog.pid, &[watchdog.pid])
+                        .is_some_and(|used| used > cap)
+                })
+        {
+            request.stop = Some(StopReason::MemoryCap);
+        }
         let worker_state = processes.identity(worker, id);
         let worker_lost = matches!(
             worker_state,
@@ -182,10 +198,19 @@ fn observe(
         }
         Ok(Decision::Observe {
             stop: request.stop.is_some() || request.command_finished.is_some(),
+            memory_cap_exceeded: request.stop == Some(StopReason::MemoryCap),
             grace_ms: config.termination_grace_ms,
-            poll_ms: config.poll_ms,
+            poll_ms: crate::config::POLL_INTERVAL_MS,
         })
     })
+}
+
+fn rss_fallback_cap(enforcement: MemoryEnforcement, request_cap: Option<u64>) -> Option<u64> {
+    if enforcement == MemoryEnforcement::RssWatchdog {
+        request_cap
+    } else {
+        None
+    }
 }
 
 fn enforce(
@@ -210,12 +235,22 @@ fn enforce(
             Decision::Done => return Ok(()),
             Decision::Observe {
                 stop,
+                memory_cap_exceeded,
                 grace_ms,
                 poll_ms,
             } => {
                 if stop {
                     let processes = Processes::read();
-                    if let Some(started) = stopping {
+                    if memory_cap_exceeded {
+                        processes.signal_member_owned(
+                            watchdog,
+                            id,
+                            "watchdog",
+                            watchdog.pid,
+                            Signal::SIGKILL,
+                        )?;
+                        stopping = Some(Instant::now());
+                    } else if let Some(started) = stopping {
                         if started.elapsed() >= Duration::from_millis(grace_ms) {
                             processes.signal_member_owned(
                                 watchdog,
@@ -300,7 +335,7 @@ fn terminate_group(
         if started.elapsed() >= Duration::from_millis(policy.termination_grace_ms) {
             processes.signal_member_owned(watchdog, id, "watchdog", group, Signal::SIGKILL)?;
         }
-        std::thread::sleep(Duration::from_millis(policy.poll_ms));
+        std::thread::sleep(Duration::from_millis(crate::config::POLL_INTERVAL_MS));
     }
 }
 

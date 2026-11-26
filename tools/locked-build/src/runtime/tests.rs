@@ -15,6 +15,9 @@ fn store(root: &Path) -> Result<Store> {
     policy.memory_reserve_bytes = 0;
     policy.disk_reserve_bytes = 0;
     policy.maximum_load = 1_000_000.0;
+    policy.memory_admission = crate::config::MemoryAdmissionMode::LiveAvailable;
+    policy.memory_budget_bytes = None;
+    policy.memory_cap_by_class.clear();
     let sample_path = root.join("sample.json");
     let sample = crate::config::HostSample {
         host: policy.host.clone(),
@@ -30,6 +33,23 @@ fn store(root: &Path) -> Result<Store> {
     Store::open(&root.join("queue"), &path)
 }
 
+fn lease_accounted_store(root: &Path, capacity: u32, budget: u64, reserve: u64) -> Result<Store> {
+    let initial = store(root)?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&initial.config_path)?)?;
+    policy.capacity_units = capacity;
+    policy.maximum_units = capacity;
+    policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+    policy.memory_budget_bytes = Some(budget);
+    policy.memory_reserve_bytes = reserve;
+    policy.memory_per_job_bytes = 2_500_000_000;
+    policy.memory_per_job_by_class.clear();
+    policy.memory_cap_by_class.clear();
+    policy.cargo_build_jobs = Some(capacity);
+    policy.rust_test_threads = None;
+    std::fs::write(&initial.config_path, serde_json::to_vec(&policy)?)?;
+    Store::open(&initial.path, &initial.config_path)
+}
+
 fn queued(store: &Store) -> Result<RequestId> {
     enqueue(
         store,
@@ -37,8 +57,51 @@ fn queued(store: &Store) -> Result<RequestId> {
         "TEST-1",
         1,
         0,
+        None,
         &["/usr/bin/true".into()],
     )
+}
+
+/// Trace: FR-005-AC-4
+#[test]
+fn refused_command_cannot_finish_after_worker_fence_changes() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    store.transaction(|state, config| {
+        let identity = ProcessIdentity {
+            pid: 41,
+            started_seconds: 7,
+        };
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.worker = Some(identity.clone());
+        request.worker_generation = 2;
+        request.started_at_ms = Some(1);
+        request.started_clock_ms = Some(1);
+        let stale_fence = WorkerFence {
+            identity,
+            generation: 1,
+        };
+
+        assert!(finish_refused_command(state, config, &id, &stale_fence).is_err());
+        let request = state.find(&id)?;
+        assert_eq!(request.phase, Phase::Running);
+        assert_eq!(request.reason, None);
+        Ok(())
+    })
+}
+
+/// Trace: FR-011-AC-7
+#[test]
+fn direct_run_default_class_is_persisted_on_the_request() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    store.transaction(|state, _| {
+        assert_eq!(state.find(&id)?.class, "periodic");
+        Ok(())
+    })
 }
 
 fn live_worker_process(id: &RequestId) -> Result<(Child, ProcessIdentity)> {
@@ -104,10 +167,10 @@ fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
     assert!(admitted.contains("ix_build_slots_busy{host=\"your-build-host\"} 1"));
     assert!(admitted.contains("ix_build_slots_configured{host=\"your-build-host\"} 1"));
     assert!(admitted.contains(
-        "ix_build_queue_wait_seconds_count{host=\"your-build-host\",priority=\"check\"} 1"
+        "ix_build_queue_wait_seconds_count{host=\"your-build-host\",class=\"periodic\"} 1"
     ));
     assert!(
-        admitted.contains("ix_build_queue_depth{host=\"your-build-host\",priority=\"check\"} 0")
+        admitted.contains("ix_build_queue_depth{host=\"your-build-host\",class=\"periodic\"} 0")
     );
 
     store.transaction(|state, config| {
@@ -124,7 +187,7 @@ fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
     })?;
     let completed = metrics(&store)?;
     assert!(completed.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"ok\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"ok\"} 1"
     ));
     assert!(completed.contains("ix_build_slots_busy{host=\"your-build-host\"} 0"));
     let state_bytes = std::fs::read_to_string(store.path.join("state.json"))?;
@@ -223,7 +286,6 @@ fn host_blocked_accumulator_survives_late_polls_recovery_and_interrupts() -> Res
     let config_path = root.path().join("policy.json");
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     policy.memory_reserve_bytes = 2_000_000;
-    policy.poll_ms = 5;
     std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
     let first = queued(&store)?;
     let second = queued(&store)?;
@@ -347,7 +409,6 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
     let config_path = root.path().join("policy.json");
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     policy.memory_reserve_bytes = 2_000_000;
-    policy.poll_ms = 5;
     std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
     let id = queued(&store)?;
     let (mut child, identity) = live_worker_process(&id)?;
@@ -357,7 +418,9 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
         admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
         Admission::Waiting(_)
     ));
-    std::thread::sleep(Duration::from_millis(30));
+    std::thread::sleep(Duration::from_millis(
+        2 * crate::config::POLL_INTERVAL_MS + 50,
+    ));
     stop_child_group(&mut child)?;
 
     let expired = metrics(&store)?;
@@ -491,6 +554,7 @@ fn host_interval_reselects_the_next_queued_reason_after_head_cancellation() -> R
         "TEST-LARGE",
         2,
         0,
+        None,
         &["/usr/bin/true".into()],
     )?;
     let second = enqueue(
@@ -499,6 +563,7 @@ fn host_interval_reselects_the_next_queued_reason_after_head_cancellation() -> R
         "TEST-SMALL",
         1,
         0,
+        None,
         &["/usr/bin/true".into()],
     )?;
     for (id, pid) in [(&first, u32::MAX - 5), (&second, u32::MAX - 6)] {
@@ -637,31 +702,961 @@ fn metric_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
 fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()> {
     let root = tempfile::tempdir()?;
     let config = root.path().join("policy.json");
-    std::fs::write(
-        &config,
-        serde_json::to_vec(&Config {
-            host: "host".to_owned(),
-            capacity_units: 1,
-            maximum_units: 1,
-            memory_per_unit_bytes: 1,
-            memory_reserve_bytes: 0,
-            disk_reserve_bytes: 0,
-            disk_path: root.path().to_owned(),
-            maximum_load: 1.0,
-            maximum_priority: 2,
-            aging_ms: 1,
-            hold_ms: 1,
-            termination_grace_ms: 1,
-            sample_max_age_ms: 1,
-            heartbeat_max_age_ms: 2,
-            poll_ms: 1,
-            maximum_requests: 1,
-            sample_file: None,
-        })?,
-    )?;
+    let policy = Config {
+        host: "host".to_owned(),
+        disk_path: root.path().to_owned(),
+        memory_admission: crate::config::MemoryAdmissionMode::LiveAvailable,
+        memory_per_unit_bytes: 1,
+        ..Config::default()
+    };
+    std::fs::write(&config, serde_json::to_vec(&policy)?)?;
     let missing = root.path().join("not-created");
     assert!(Store::open_existing(&missing, &config).is_err());
     assert!(!missing.exists());
+    Ok(())
+}
+
+#[test]
+fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.cargo_build_jobs = Some(8);
+    policy.rust_test_threads = Some(3);
+    policy.cargo_incremental = Some(false);
+
+    let mut command = Command::new("/usr/bin/env");
+    command
+        .env_remove("CARGO_BUILD_JOBS")
+        .env_remove("RUST_TEST_THREADS")
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("LOCKED_BUILD_LEASE");
+    let mut arguments = Vec::new();
+    let prepared = prepare_build_environment(&policy, &mut arguments, None, None, 2);
+    if let Some(value) = prepared.cargo_build_jobs_env {
+        command.env("CARGO_BUILD_JOBS", value);
+    }
+    if let Some(value) = prepared.rust_test_threads_env {
+        command.env("RUST_TEST_THREADS", value);
+    }
+    apply_incremental_environment(&mut command, &policy, None);
+    let output = command.output()?;
+    assert!(output.status.success());
+    let environment = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut actual: Vec<_> = environment
+        .lines()
+        .filter(|line| {
+            line.starts_with("CARGO_BUILD_JOBS=")
+                || line.starts_with("RUST_TEST_THREADS=")
+                || line.starts_with("CARGO_INCREMENTAL=")
+                || line.starts_with("LOCKED_BUILD_LEASE=")
+        })
+        .collect();
+    actual.sort_unstable();
+    assert_eq!(
+        actual,
+        [
+            "CARGO_BUILD_JOBS=4",
+            "CARGO_INCREMENTAL=0",
+            "LOCKED_BUILD_LEASE=1",
+            "RUST_TEST_THREADS=3"
+        ]
+    );
+    assert_eq!(prepared.record.cargo_build_jobs, Some(4));
+    assert_eq!(prepared.record.rust_test_threads, Some(3));
+    Ok(())
+}
+
+#[test]
+fn direct_test_binary_thread_limit_is_clamped_without_separator() {
+    let mut arguments = vec!["--test-threads=20".to_owned()];
+    let limited = clamp_test_threads(&mut arguments, Some(4));
+    assert!(limited.is_some_and(|limit| limit.clamped));
+    assert_eq!(arguments, ["--test-threads=4"]);
+}
+
+#[test]
+fn caller_environment_overrides_are_recorded_and_preserved_without_policy_values() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.cargo_incremental = None;
+    policy.target_root = None;
+    let mut request = request;
+    request.caller_cargo_incremental = Some("1".to_owned());
+    request.caller_cargo_target_dir = Some("/caller/target".to_owned());
+    let mut command = Command::new("/usr/bin/env");
+    command
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("CARGO_TARGET_DIR");
+    let (incremental, incremental_overwrote) = apply_incremental_environment(
+        &mut command,
+        &policy,
+        request.caller_cargo_incremental.as_deref(),
+    );
+    let (target, target_overwrote) = apply_target_environment(&mut command, &policy, &request)?;
+    let output = command.output()?;
+    assert!(output.status.success());
+    let environment = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        environment
+            .lines()
+            .any(|line| line == "CARGO_INCREMENTAL=1")
+    );
+    assert!(
+        environment
+            .lines()
+            .any(|line| line == "CARGO_TARGET_DIR=/caller/target")
+    );
+    assert_eq!(incremental.as_deref(), Some("1"));
+    assert!(!incremental_overwrote);
+    assert_eq!(
+        target.as_deref(),
+        Some(std::path::Path::new("/caller/target"))
+    );
+    assert!(!target_overwrote);
+
+    let mut policy_override = policy;
+    policy_override.cargo_incremental = Some(false);
+    let mut command = Command::new("/usr/bin/true");
+    let (effective, overwritten) =
+        apply_incremental_environment(&mut command, &policy_override, Some("1"));
+    assert_eq!(effective.as_deref(), Some("0"));
+    assert!(overwritten);
+    Ok(())
+}
+
+#[test]
+fn explicit_cargo_limits_win_under_pressure_and_are_recorded() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.cargo_build_jobs = Some(16);
+    policy.rust_test_threads = Some(8);
+    let mut arguments = [
+        "test".to_owned(),
+        "-j".to_owned(),
+        "4".to_owned(),
+        "--".to_owned(),
+        "--test-threads=4".to_owned(),
+    ];
+
+    let prepared = prepare_build_environment(&policy, &mut arguments, Some("1"), Some("1"), 16);
+
+    assert_eq!(arguments, ["test", "-j", "4", "--", "--test-threads=4"]);
+    assert_eq!(prepared.cargo_build_jobs_env.as_deref(), Some("4"));
+    assert_eq!(prepared.rust_test_threads_env.as_deref(), Some("4"));
+    assert_eq!(prepared.record.cargo_build_jobs, Some(4));
+    assert!(!prepared.record.cargo_build_jobs_clamped);
+    assert_eq!(prepared.record.rust_test_threads, Some(4));
+    assert!(!prepared.record.rust_test_threads_clamped);
+    Ok(())
+}
+
+#[test]
+fn explicit_cargo_env_values_are_clamped_to_policy_maximum() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.cargo_build_jobs = Some(8);
+    policy.rust_test_threads = Some(4);
+    let mut arguments = Vec::new();
+
+    let prepared = prepare_build_environment(&policy, &mut arguments, Some("12"), Some("9"), 8);
+
+    assert_eq!(prepared.cargo_build_jobs_env.as_deref(), Some("8"));
+    assert_eq!(prepared.rust_test_threads_env.as_deref(), Some("4"));
+    assert_eq!(prepared.record.cargo_build_jobs, Some(8));
+    assert!(prepared.record.cargo_build_jobs_clamped);
+    assert_eq!(prepared.record.rust_test_threads, Some(4));
+    assert!(prepared.record.rust_test_threads_clamped);
+    Ok(())
+}
+
+#[test]
+fn invalid_cargo_job_limits_are_rejected_in_arguments_and_environment() {
+    for arguments in [
+        vec![
+            "cargo".to_owned(),
+            "test".to_owned(),
+            "-j".to_owned(),
+            "-1".to_owned(),
+        ],
+        vec![
+            "cargo".to_owned(),
+            "test".to_owned(),
+            "--jobs=-1".to_owned(),
+        ],
+        vec![
+            "cargo".to_owned(),
+            "test".to_owned(),
+            "-j".to_owned(),
+            "default".to_owned(),
+        ],
+        vec!["cargo".to_owned(), "test".to_owned(), "-j".to_owned()],
+    ] {
+        assert!(validate_parallelism_input(&arguments, None, None).is_err());
+    }
+    assert!(
+        validate_parallelism_input(&["cargo".into(), "test".into()], Some("-1"), None).is_err()
+    );
+    assert!(
+        validate_parallelism_input(&["cargo".into(), "test".into()], Some("default"), None)
+            .is_err()
+    );
+    assert!(validate_parallelism_input(&["cargo".into(), "test".into()], Some("8"), None).is_ok());
+}
+
+#[test]
+fn memory_charge_uses_test_threads_and_non_cargo_environment_is_capped_by_units() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+    policy.memory_budget_bytes = Some(100_000_000_000);
+    policy.cargo_build_jobs = Some(16);
+    policy.rust_test_threads = Some(16);
+    policy.memory_per_job_bytes = 2_500_000_000;
+
+    let cargo_command = [
+        "cargo".into(),
+        "test".into(),
+        "-j4".into(),
+        "--".into(),
+        "--test-threads=8".into(),
+    ];
+    validate_parallelism_input(&cargo_command, None, None)?;
+    let (jobs, threads, parallelism) =
+        resolve_build_parallelism(&policy, &cargo_command, None, None, 1, 1);
+    assert_eq!(jobs, Some(4));
+    assert_eq!(threads, Some(8));
+    assert_eq!(parallelism, 8);
+    assert_eq!(
+        estimate_memory_lease(&policy, "periodic", parallelism)?,
+        20_000_000_000
+    );
+
+    let make_command = ["make".into(), "-j8".into()];
+    let (jobs, threads, parallelism) =
+        resolve_build_parallelism(&policy, &make_command, Some("16"), Some("12"), 1, 1);
+    assert_eq!(jobs, None);
+    assert_eq!(threads, Some(1));
+    assert_eq!(parallelism, 1);
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let mut request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    request.command = make_command.to_vec();
+    request.caller_cargo_build_jobs = Some("16".to_owned());
+    request.caller_rust_test_threads = Some("12".to_owned());
+    request.memory_parallelism = Some(parallelism);
+    request.memory_rust_test_threads = threads;
+    request.memory_cargo_jobs = jobs;
+    let mut arguments = request.command[1..].to_vec();
+    let environment = prepare_request_environment(&policy, &request, &mut arguments, 1);
+    assert_eq!(environment.cargo_build_jobs_env.as_deref(), Some("1"));
+    assert_eq!(environment.rust_test_threads_env.as_deref(), Some("1"));
+    Ok(())
+}
+
+#[test]
+fn named_priority_uses_policy_mapping_and_rejects_unconfigured_classes() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.priority_classes.insert("must-fix".to_owned(), 2);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    assert_eq!(priority_for_class(&store, "must-fix")?, 2);
+    assert!(priority_for_class(&store, "missing").is_err());
+    Ok(())
+}
+
+#[test]
+fn new_requests_use_per_class_memory_cap_overrides_and_default_cap() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.memory_per_job_bytes = 512;
+    policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+    policy.memory_budget_bytes = Some(2_000);
+    policy
+        .memory_per_job_by_class
+        .insert("must-fix".to_owned(), 768);
+    policy.priority_classes.insert("must-fix".to_owned(), 2);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let class_id = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-CLASS",
+        1,
+        2,
+        Some("must-fix"),
+        &["/usr/bin/true".into()],
+    )?;
+    let default_id = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-DEFAULT",
+        1,
+        2,
+        None,
+        &["/usr/bin/true".into()],
+    )?;
+    store.transaction(|state, _| {
+        assert_eq!(state.find(&class_id)?.memory_cap_bytes, Some(768));
+        assert_eq!(state.find(&default_id)?.memory_cap_bytes, Some(512));
+        assert_eq!(state.find(&default_id)?.class, "periodic");
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
+fn lease_accounting_charges_effective_jobs_and_rejects_a_lease_larger_than_budget() -> Result<()> {
+    const GIB: u64 = 1_000_000_000;
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 33, 54 * GIB, 8 * GIB)?;
+    let one_job = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-ONE",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j1".into()],
+    )?;
+    let eight_jobs = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-EIGHT",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j8".into()],
+    )?;
+    let eight_job_lease = store.transaction(|state, _| {
+        assert_eq!(state.find(&one_job)?.memory_cap_bytes, Some(2_500_000_000));
+        assert_eq!(
+            state.find(&eight_jobs)?.memory_cap_bytes,
+            Some(20_000_000_000)
+        );
+        Ok(state.find(&eight_jobs)?.memory_cap_bytes)
+    })?;
+    let launch = lease_command_spec_for_enforcement(
+        LauncherPlatform::Linux,
+        "cargo",
+        &[],
+        eight_job_lease,
+        MemoryEnforcement::SystemdScope,
+    );
+    assert!(
+        launch
+            .arguments
+            .iter()
+            .any(|argument| argument == "MemoryMax=20000000000")
+    );
+    let too_large = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-TOO-LARGE",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j30".into()],
+    );
+    assert!(too_large.is_err_and(|error| error.to_string().contains("exceeds memory budget")));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
+fn start_environment_uses_the_exact_job_count_reserved_by_its_memory_cap() -> Result<()> {
+    const GIB: u64 = 1_000_000_000;
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 16, 54 * GIB, 8 * GIB)?;
+    let high_parallelism = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-JOBS-HIGH",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into()],
+    )?;
+    store.transaction(|state, _| {
+        assert_eq!(state.find(&high_parallelism)?.memory_cargo_jobs, Some(16));
+        assert_eq!(
+            state.find(&high_parallelism)?.memory_cap_bytes,
+            Some(40 * GIB)
+        );
+        Ok(())
+    })?;
+
+    for index in 0..7_u32 {
+        let id = enqueue(
+            &store,
+            "test:team:lead",
+            &format!("TEST-MEMORY-PRESSURE-{index}"),
+            1,
+            0,
+            None,
+            &["/usr/bin/true".into()],
+        )?;
+        let _fence = claim_worker(
+            &store,
+            &id,
+            &ProcessIdentity {
+                pid: u32::MAX - index,
+                started_seconds: 1,
+            },
+        )?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+        store.transaction(|state, _| {
+            let request = state.find_mut(&id)?;
+            request.phase = Phase::Running;
+            request.started_at_ms = Some(now_ms()?);
+            request.started_clock_ms = Some(clock_ms()?);
+            Ok(())
+        })?;
+    }
+    let low_parallelism = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-JOBS-LOW",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into()],
+    )?;
+    let low_request = store.transaction(|state, _| {
+        let request = state.find(&low_parallelism)?.clone();
+        assert_eq!(request.memory_cargo_jobs, Some(2));
+        assert_eq!(request.memory_cap_bytes, Some(5 * GIB));
+        Ok(request)
+    })?;
+    let mut start_policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    start_policy.cargo_build_jobs = Some(16);
+    let mut high_arguments = vec!["build".to_owned()];
+    let high_environment = prepare_request_environment(
+        &start_policy,
+        &store.transaction(|state, _| Ok(state.find(&high_parallelism)?.clone()))?,
+        &mut high_arguments,
+        16,
+    );
+    let mut low_arguments = vec!["build".to_owned()];
+    let low_environment =
+        prepare_request_environment(&start_policy, &low_request, &mut low_arguments, 1);
+    assert_eq!(high_environment.record.cargo_build_jobs, Some(16));
+    assert_eq!(low_environment.record.cargo_build_jobs, Some(2));
+    assert_eq!(
+        u64::from(high_environment.record.cargo_build_jobs.unwrap_or_default()) * 2_500_000_000,
+        40 * GIB
+    );
+    assert_eq!(
+        u64::from(low_environment.record.cargo_build_jobs.unwrap_or_default()) * 2_500_000_000,
+        5 * GIB
+    );
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
+fn memory_budget_admits_exactly_twenty_one_one_job_leases_concurrently() -> Result<()> {
+    use std::sync::{Arc, Barrier};
+
+    const GIB: u64 = 1_000_000_000;
+    let root = tempfile::tempdir()?;
+    let initial = lease_accounted_store(root.path(), 33, 54 * GIB, 8 * GIB)?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&initial.config_path)?)?;
+    policy.sample_file = None;
+    std::fs::write(&initial.config_path, serde_json::to_vec(&policy)?)?;
+    let store = Store::open(&initial.path, &initial.config_path)?;
+    let mut claims = Vec::new();
+    for sequence in 0..33_u32 {
+        let id = enqueue(
+            &store,
+            "test:team:lead",
+            &format!("TEST-MEMORY-{sequence}"),
+            1,
+            0,
+            None,
+            &["cargo".into(), "build".into(), "-j1".into()],
+        )?;
+        let identity = ProcessIdentity {
+            pid: u32::MAX - sequence,
+            started_seconds: 1,
+        };
+        let fence = claim_worker(&store, &id, &identity)?
+            .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+        claims.push((id, fence));
+    }
+
+    let claims = Arc::new(claims);
+    let barrier = Arc::new(Barrier::new(claims.len()));
+    let mut threads = Vec::new();
+    for index in 0..claims.len() {
+        let barrier = barrier.clone();
+        let claims = claims.clone();
+        let path = store.path.clone();
+        let config_path = store.config_path.clone();
+        threads.push(std::thread::spawn(move || -> Result<()> {
+            let store = Store::open(&path, &config_path)?;
+            barrier.wait();
+            let (id, fence) = &claims[index];
+            let _ = admit_worker(&store, id, fence, &AtomicBool::new(false))?;
+            Ok(())
+        }));
+    }
+    for thread in threads {
+        thread
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "concurrent admission thread panicked"))??;
+    }
+    for (id, fence) in claims.iter() {
+        let _ = admit_worker(&store, id, fence, &AtomicBool::new(false))?;
+    }
+    store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        let sample = config.sample(now).ok();
+        let queued_head = state
+            .requests
+            .iter()
+            .find(|request| request.phase == Phase::Queued);
+        let head_reason = queued_head
+            .map(|request| state.admission_reason(&request.id, config, sample.as_ref(), now, clock))
+            .transpose()?;
+        let running = state
+            .requests
+            .iter()
+            .filter(|request| request.phase == Phase::Running)
+            .count();
+        let sum = state
+            .requests
+            .iter()
+            .filter(|request| request.phase == Phase::Running)
+            .map(|request| request.memory_cap_bytes.unwrap_or(0))
+            .sum::<u64>();
+        assert_eq!(
+            running,
+            21,
+            "running={running}, sum={sum}, budget={:?}, capacity={}, used={}, head_reason={head_reason:?}, queued_caps={:?}",
+            config.memory_budget_bytes,
+            config.capacity_units,
+            state.used(),
+            state
+                .requests
+                .iter()
+                .filter(|request| request.phase == Phase::Queued)
+                .map(|request| request.memory_cap_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(sum, 52_500_000_000);
+        assert!(sum <= 54 * GIB);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
+fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Result<()> {
+    const GIB: u64 = 1_000_000_000;
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 3, 5 * GIB, 0)?;
+    let mut requests = Vec::new();
+    let mut fences = Vec::new();
+    for sequence in 0..4_u32 {
+        let id = enqueue(
+            &store,
+            "test:team:lead",
+            &format!("TEST-MEMORY-RELEASE-{sequence}"),
+            1,
+            0,
+            None,
+            &["cargo".into(), "build".into(), "-j1".into()],
+        )?;
+        let fence = claim_worker(
+            &store,
+            &id,
+            &ProcessIdentity {
+                pid: u32::MAX - sequence,
+                started_seconds: 1,
+            },
+        )?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+        requests.push(id);
+        fences.push(fence);
+    }
+    assert!(matches!(
+        admit_worker(&store, &requests[0], &fences[0], &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
+    assert!(matches!(
+        admit_worker(&store, &requests[1], &fences[1], &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
+    assert!(matches!(
+        admit_worker(&store, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+
+    let reopened = Store::open(&store.path, &store.config_path)?;
+    assert!(matches!(
+        admit_worker(&reopened, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+    reopened.transaction(|state, config| {
+        state.find_mut(&requests[0])?.stop = Some(StopReason::Cancelled);
+        state.finish(
+            &requests[0],
+            Completion::default(),
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+    assert!(matches!(
+        admit_worker(&reopened, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
+    assert!(matches!(
+        admit_worker(&reopened, &requests[3], &fences[3], &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+    reopened.transaction(|state, config| {
+        state.finish(
+            &requests[1],
+            Completion {
+                code: Some(0),
+                ..Completion::default()
+            },
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+    assert!(matches!(
+        admit_worker(&reopened, &requests[3], &fences[3], &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn lease_launcher_builds_systemd_argv_without_spawning_a_cgroup() {
+    let spec = lease_command_spec(
+        LauncherPlatform::Linux,
+        "/usr/bin/cargo",
+        &[
+            "test".to_owned(),
+            "-p".to_owned(),
+            "locked-build".to_owned(),
+        ],
+        Some(4_294_967_296),
+    );
+    let actual: Vec<_> = spec
+        .arguments
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(spec.program, "systemd-run");
+    assert_eq!(
+        actual,
+        [
+            "--user",
+            "--scope",
+            "--quiet",
+            "-p",
+            "MemoryMax=4294967296",
+            "-p",
+            "MemorySwapMax=0",
+            "--",
+            "/usr/bin/cargo",
+            "test",
+            "-p",
+            "locked-build"
+        ]
+    );
+}
+
+#[test]
+fn non_linux_lease_launcher_uses_direct_command_for_watchdog_fallback() {
+    let spec = lease_command_spec(
+        LauncherPlatform::Other,
+        "/usr/bin/cargo",
+        &["check".to_owned()],
+        Some(1_024),
+    );
+    assert_eq!(spec.program, "/usr/bin/cargo");
+    assert_eq!(spec.arguments, ["check"]);
+}
+
+#[test]
+fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> Result<()> {
+    let refused = select_memory_enforcement(
+        LauncherPlatform::Linux,
+        Some(4_096),
+        crate::config::OnMissingCgroup::Refuse,
+        |_| false,
+    );
+    assert_eq!(refused, MemoryEnforcement::Refused);
+
+    let (fallback, fallback_spec) = select_lease_launch(
+        LauncherPlatform::Linux,
+        "/usr/bin/true",
+        &[],
+        Some(4_096),
+        crate::config::OnMissingCgroup::RssWatchdog,
+        |_| false,
+    );
+    assert_eq!(fallback, MemoryEnforcement::RssWatchdog);
+    assert_eq!(fallback_spec.program, "/usr/bin/true");
+    assert!(
+        Command::new(fallback_spec.program)
+            .args(fallback_spec.arguments)
+            .status()?
+            .success()
+    );
+    let recorded = LeaseRecord {
+        memory_enforcement: fallback,
+        ..LeaseRecord::default()
+    };
+    assert_eq!(
+        serde_json::to_value(recorded)?["memory_enforcement"],
+        "rss_watchdog"
+    );
+    assert_eq!(cgroup_cap_kill_reason(Some(fallback), false), None);
+    assert_eq!(
+        cgroup_cap_kill_reason(Some(MemoryEnforcement::SystemdScope), true),
+        Some("rss_cap")
+    );
+    assert_eq!(
+        cgroup_cap_kill_reason(Some(MemoryEnforcement::SystemdScope), false),
+        None
+    );
+
+    let scoped = select_memory_enforcement(
+        LauncherPlatform::Linux,
+        Some(4_096),
+        crate::config::OnMissingCgroup::Refuse,
+        |_| true,
+    );
+    assert_eq!(scoped, MemoryEnforcement::SystemdScope);
+    Ok(())
+}
+
+#[test]
+fn systemd_scope_probe_requires_delegated_memory_controller() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let parent = root.path().join("user.slice");
+    let child = parent.join("session.scope");
+    std::fs::create_dir_all(&child)?;
+    std::fs::write(parent.join("cgroup.subtree_control"), "cpu memory\n")?;
+    std::fs::write(child.join("memory.max"), "max\n")?;
+    assert!(memory_controller_delegated_at(
+        root.path(),
+        "user.slice/session.scope"
+    ));
+
+    std::fs::write(parent.join("cgroup.subtree_control"), "cpu\n")?;
+    assert!(!memory_controller_delegated_at(
+        root.path(),
+        "user.slice/session.scope"
+    ));
+    std::fs::write(parent.join("cgroup.subtree_control"), "memory\n")?;
+    std::fs::remove_file(child.join("memory.max"))?;
+    assert!(!memory_controller_delegated_at(
+        root.path(),
+        "user.slice/session.scope"
+    ));
+    assert!(!memory_controller_delegated_at(root.path(), "../escape"));
+    Ok(())
+}
+
+#[test]
+fn supervise_loop_uses_persisted_scope_and_injected_scope_kill() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let stale_request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let mut command = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("kill -KILL $$")
+        .process_group(0)
+        .spawn()?;
+    let command_pid = command.id();
+    let mut outcome = None;
+    for _ in 0..50 {
+        outcome = command.try_wait()?;
+        if outcome.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(outcome.is_some(), "injected command must exit by signal");
+    let watchdog = ProcessIdentity {
+        pid: command_pid,
+        started_seconds: 1,
+    };
+    let worker = ProcessIdentity {
+        pid: u32::MAX - 1,
+        started_seconds: 1,
+    };
+    let fence = claim_worker(&store, &id, &worker)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    store.transaction(|state, _| {
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now_ms()?);
+        request.started_clock_ms = Some(clock_ms()?);
+        request.watchdog = Some(watchdog.clone());
+        request.memory_cap_bytes = Some(1_000_000);
+        request.lease_record = Some(LeaseRecord {
+            memory_enforcement: MemoryEnforcement::SystemdScope,
+            ..LeaseRecord::default()
+        });
+        Ok(())
+    })?;
+    assert!(stale_request.lease_record.is_none());
+    let events = root.path().join("memory.events");
+    std::fs::write(&events, "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n")?;
+    let mut watchdog_child = Command::new("/usr/bin/true").spawn()?;
+    supervise_started_command(
+        &store,
+        &stale_request,
+        &fence,
+        &watchdog,
+        &mut watchdog_child,
+        &AtomicBool::new(false),
+        command,
+        |evidence, _processes, _group| {
+            evidence.observe_file(&events);
+            let _ = std::fs::remove_file(&events);
+        },
+    )?;
+    let finished = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    assert_eq!(finished.reason.as_deref(), Some("rss_cap"));
+    assert_eq!(finished.signal, Some(9));
+    Ok(())
+}
+
+#[test]
+fn hanging_systemd_probe_is_killed_at_its_timeout() {
+    let started = std::time::Instant::now();
+    let available = run_probe_with_timeout(std::time::Duration::from_millis(50), || {
+        Command::new("/bin/sleep").arg("10").spawn()
+    });
+
+    assert!(!available);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    let target_root = root.path().join("targets");
+    policy.target_root = Some(target_root.clone());
+    policy.max_bytes = Some(3);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let target = target_directory(&policy, &request, true)?
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
+    let canonical_root = target_root.canonicalize()?;
+    assert_eq!(target.parent(), Some(canonical_root.as_path()));
+    let mut command = Command::new("/usr/bin/env");
+    command.env_remove("CARGO_TARGET_DIR");
+    apply_target_environment(&mut command, &policy, &request)?;
+    let output = command.output()?;
+    assert!(output.status.success());
+    let expected_target = format!("CARGO_TARGET_DIR={}", target.display());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == expected_target)
+    );
+    std::fs::write(target.join("artifact"), b"four")?;
+    finish_started_request(&store, &id)?;
+
+    cleanup_target(&store, &id)?;
+    assert!(!target.exists());
+    Ok(())
+}
+
+#[test]
+fn target_lifecycle_skips_symlinks_and_size_cleans_oversized_targets() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.target_root = Some(root.path().join("targets"));
+    policy.max_bytes = Some(1);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let target = target_directory(&policy, &request, true)?
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside)?;
+    std::fs::write(outside.join("keep"), b"safe")?;
+    std::os::unix::fs::symlink(&outside, target.join("escape"))?;
+    std::fs::write(target.join("small"), b"data")?;
+    finish_started_request(&store, &id)?;
+
+    cleanup_target(&store, &id)?;
+    assert_eq!(std::fs::read(outside.join("keep"))?, b"safe");
+    assert!(!target.exists());
+    Ok(())
+}
+
+fn finish_started_request(store: &Store, id: &RequestId) -> Result<()> {
+    store.transaction(|state, config| {
+        let now = now_ms()?;
+        let clock = clock_ms()?;
+        let request = state.find_mut(id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now);
+        request.started_clock_ms = Some(clock);
+        state.finish(
+            id,
+            Completion {
+                code: Some(0),
+                ..Completion::default()
+            },
+            config,
+            now,
+            clock,
+        )
+    })
+}
+
+#[test]
+fn target_cleanup_treats_walk_bound_as_oversized_and_removes_symlink_tree() -> Result<()> {
+    const TOO_MANY_ENTRIES: usize = 100_005;
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.target_root = Some(root.path().join("targets"));
+    policy.max_bytes = Some(1);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let id = queued(&store)?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let target = target_directory(&policy, &request, true)?
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside)?;
+    std::fs::write(outside.join("keep"), b"safe")?;
+    std::os::unix::fs::symlink(&outside, target.join("escape"))?;
+    for index in 0..TOO_MANY_ENTRIES {
+        std::fs::write(target.join(format!("artifact-{index}")), [])?;
+    }
+    finish_started_request(&store, &id)?;
+
+    cleanup_target(&store, &id)?;
+    assert!(!target.exists());
+    assert_eq!(std::fs::read(outside.join("keep"))?, b"safe");
     Ok(())
 }
 
@@ -790,8 +1785,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let config_path = root.path().join("policy.json");
-    let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
-    policy.maximum_priority = 5;
+    let policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
     let id = enqueue(
         &store,
@@ -799,6 +1793,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
         "TEST-PRIORITY",
         1,
         3,
+        Some("must-fix"),
         &["/usr/bin/true".into()],
     )?;
     let fence = claim_worker(
@@ -827,7 +1822,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
         )
     })?;
     assert!(metrics(&store)?.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"gate\",outcome=\"ok\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"must-fix\",outcome=\"ok\"} 1"
     ));
     Ok(())
 }
@@ -938,6 +1933,7 @@ fn slow_textfile_export_lock_does_not_hold_the_scheduler_state_lock() -> Result<
                 "TEST-DURING-EXPORT",
                 1,
                 0,
+                None,
                 &["/usr/bin/true".into()],
             );
             let _ = done_sender.send(result);
@@ -1153,13 +2149,13 @@ fn outcome_counters_survive_store_reopen_and_prune() -> Result<()> {
     let output = metrics(&reopened)?;
     assert_eq!(before_prune, metric_outcome_lines(&output));
     assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"cancelled\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"cancelled\"} 1"
     ));
     assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"aborted_thermal\"} 0"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"aborted_thermal\"} 0"
     ));
     assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",priority=\"check\",outcome=\"failed\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"failed\"} 1"
     ));
     Ok(())
 }
