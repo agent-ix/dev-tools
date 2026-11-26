@@ -12,6 +12,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Event, Request, State};
 
 const BUCKETS_SECONDS: [u64; 12] = [1, 5, 10, 30, 60, 120, 300, 600, 1_200, 1_800, 3_600, 7_200];
+const MAX_LANE_LABELS: usize = 64;
 
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
@@ -419,6 +420,44 @@ impl MetricsState {
 
         metric_header(
             &mut output,
+            "ix_build_lane_running",
+            "gauge",
+            "Running build requests by bounded owner lane address.",
+        );
+        let mut lane_counts = BTreeMap::<String, usize>::new();
+        for request in state
+            .requests
+            .iter()
+            .filter(|request| request.phase == crate::model::Phase::Running)
+        {
+            let lane = if is_lane_address(&request.owner) {
+                request.owner.as_str()
+            } else {
+                "other"
+            };
+            *lane_counts.entry(lane.to_owned()).or_default() += 1;
+        }
+        let mut other = 0_usize;
+        let mut emitted_lanes = 0_usize;
+        for (lane, count) in lane_counts {
+            if lane == "other" || emitted_lanes == MAX_LANE_LABELS {
+                other += count;
+            } else {
+                output.push_str(&format!(
+                    "ix_build_lane_running{{host=\"{host}\",lane=\"{}\"}} {count}\n",
+                    escape_label(&lane)
+                ));
+                emitted_lanes += 1;
+            }
+        }
+        if other > 0 {
+            output.push_str(&format!(
+                "ix_build_lane_running{{host=\"{host}\",lane=\"other\"}} {other}\n"
+            ));
+        }
+
+        metric_header(
+            &mut output,
             "ix_build_queue_wait_seconds",
             "histogram",
             "Queue wait duration when a build is admitted.",
@@ -519,6 +558,15 @@ impl MetricsState {
     }
 }
 
+fn is_lane_address(owner: &str) -> bool {
+    let mut segments = owner.split(':');
+    matches!(
+        (segments.next(), segments.next(), segments.next(), segments.next()),
+        (Some(server), Some(workspace), Some(tab), None)
+            if !server.is_empty() && !workspace.is_empty() && !tab.is_empty()
+    )
+}
+
 fn event_sequence(event_id: &str) -> Option<u64> {
     event_id.rsplit_once(":e")?.1.parse().ok()
 }
@@ -607,8 +655,198 @@ mod tests {
         }
     }
 
+    fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
+        Request {
+            id: crate::model::RequestId(format!("store:r{sequence}")),
+            sequence,
+            owner,
+            ticket: "SWM-242".to_owned(),
+            units: 1,
+            priority: 0,
+            enqueued_at_ms: 0,
+            enqueued_clock_ms: 0,
+            started_at_ms: None,
+            started_clock_ms: None,
+            ended_at_ms: None,
+            ended_clock_ms: None,
+            heartbeat_at_ms: None,
+            worker: None,
+            worker_generation: 0,
+            watchdog: None,
+            command_finished: None,
+            phase,
+            stop: None,
+            exit_code: None,
+            signal: None,
+            reason: None,
+            command: Vec::new(),
+            cwd: "/tmp".into(),
+        }
+    }
+
     fn metric_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
         text.lines().find_map(|line| line.strip_prefix(prefix))
+    }
+
+    fn current_build_fixture() -> Result<String> {
+        let requests = vec![
+            request(
+                1,
+                "draco:ix-relay:queued".to_owned(),
+                crate::model::Phase::Queued,
+            ),
+            request(
+                2,
+                "draco:ix-relay:running".to_owned(),
+                crate::model::Phase::Running,
+            ),
+        ];
+        let current = state(requests);
+        current.metrics.exposition(&current, &policy()?, 0, 0)
+    }
+
+    /// Trace: FR-015-AC-1
+    #[test]
+    fn exposition_matches_the_current_build_series_matrix() -> Result<()> {
+        let text = current_build_fixture()?;
+        let names = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .filter_map(|line| line.split_once(' '))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "ix_build_queue_depth",
+                "ix_build_lane_running",
+                "ix_build_queue_wait_seconds",
+                "ix_build_slots_busy",
+                "ix_build_slots_configured",
+                "ix_build_builds_total",
+                "ix_build_admission_blocked_seconds_total",
+            ]
+        );
+        assert!(text.contains("ix_build_queue_depth{host=\"draco\",priority=\"check\"} 1"));
+        assert!(
+            text.contains(
+                "ix_build_lane_running{host=\"draco\",lane=\"draco:ix-relay:running\"} 1"
+            )
+        );
+        for absent in [
+            "ix_build_slots_max",
+            "ix_build_slots_sustainable",
+            "ix_build_pause_seconds_total",
+            "ix_build_paused_orphans",
+            "ix_build_probe_defect",
+            "ix_build_agent_processes",
+            "ix_build_agent_rss_bytes",
+            "ix_build_test_runs_total",
+            "ix_build_target_dir_bytes",
+            "ix_build_target_dir_slots",
+            "ix_build_probe_value",
+            "ix_build_probe_unavailable",
+        ] {
+            assert!(!text.contains(absent), "unexpected series family {absent}");
+        }
+        for absent_reason in ["swap", "compressor", "operator"] {
+            assert!(
+                !text.contains(&format!("reason=\"{absent_reason}\"")),
+                "unsupported reason {absent_reason} must be absent"
+            );
+        }
+        Ok(())
+    }
+
+    /// Trace: FR-015-AC-1
+    #[test]
+    #[ignore = "external validation lane; set IX_BUILD_PROMTOOL to promtool"]
+    fn promtool_accepts_the_current_build_series_fixture() -> Result<()> {
+        let promtool = std::env::var_os("IX_BUILD_PROMTOOL")
+            .ok_or_else(|| Error::new(ErrorCode::Configuration, "IX_BUILD_PROMTOOL is required"))?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("metrics.prom");
+        fs::write(&path, current_build_fixture()?)?;
+        let output = std::process::Command::new(promtool)
+            .arg("check")
+            .arg("metrics")
+            .stdin(std::process::Stdio::from(fs::File::open(&path)?))
+            .output()?;
+        assert!(
+            output.status.success(),
+            "promtool check metrics failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    /// Trace: FR-015-AC-6
+    #[test]
+    fn lane_running_caps_addresses_at_64_and_sums_the_rest_under_other() -> Result<()> {
+        let requests = (0..70)
+            .map(|index| {
+                request(
+                    index + 1,
+                    format!("draco:ix-relay:lane-{index:02}"),
+                    crate::model::Phase::Running,
+                )
+            })
+            .collect();
+        let current = state(requests);
+        let text = current.metrics.exposition(&current, &policy()?, 0, 0)?;
+        let lane_lines = text
+            .lines()
+            .filter(|line| line.starts_with("ix_build_lane_running{"))
+            .collect::<Vec<_>>();
+        assert_eq!(lane_lines.len(), 65);
+        assert_eq!(
+            lane_lines
+                .iter()
+                .filter(|line| line.contains("lane=\"other\""))
+                .count(),
+            1
+        );
+        assert!(
+            lane_lines
+                .iter()
+                .any(|line| { *line == "ix_build_lane_running{host=\"draco\",lane=\"other\"} 6" })
+        );
+        assert!(lane_lines.iter().all(|line| {
+            !line.contains("lane-64")
+                && !line.contains("lane-65")
+                && !line.contains("lane-66")
+                && !line.contains("lane-67")
+                && !line.contains("lane-68")
+                && !line.contains("lane-69")
+        }));
+        Ok(())
+    }
+
+    /// Trace: FR-015-AC-5
+    #[test]
+    #[ignore = "named performance benchmark lane; run with --release --ignored"]
+    fn exposition_for_10_000_retained_requests_is_under_200ms() -> Result<()> {
+        let requests = (0..10_000)
+            .map(|index| {
+                request(
+                    index + 1,
+                    format!("draco:ix-relay:lane-{}", index % 70),
+                    crate::model::Phase::Queued,
+                )
+            })
+            .collect();
+        let current = state(requests);
+        let config = policy()?;
+        let started = std::time::Instant::now();
+        let text = current.metrics.exposition(&current, &config, 0, 0)?;
+        let elapsed = started.elapsed();
+        eprintln!("10,000-request exposition took {elapsed:?}");
+        assert!(text.contains("ix_build_queue_depth{host=\"draco\",priority=\"check\"} 10000"));
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "10,000-request exposition took {elapsed:?}"
+        );
+        Ok(())
     }
 
     /// Trace: FR-015-AC-8

@@ -143,6 +143,47 @@ pub struct HostSample {
     pub load_one: f64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlockReason {
+    Probe,
+    HostLoad,
+    TargetDisk,
+    Memory,
+    Swap,
+    Compressor,
+    Operator,
+}
+
+impl BlockReason {
+    const PRECEDENCE: [Self; 7] = [
+        Self::Probe,
+        Self::HostLoad,
+        Self::TargetDisk,
+        Self::Memory,
+        Self::Swap,
+        Self::Compressor,
+        Self::Operator,
+    ];
+
+    fn select(reasons: &[Self]) -> Option<Self> {
+        Self::PRECEDENCE
+            .into_iter()
+            .find(|candidate| reasons.contains(candidate))
+    }
+
+    fn admission_reason(self) -> &'static str {
+        match self {
+            Self::Probe => "host_sample_invalid_or_stale",
+            Self::HostLoad => "host_load",
+            Self::TargetDisk => "disk_reserve",
+            Self::Memory => "memory_reserve",
+            Self::Swap => "swap_reserve",
+            Self::Compressor => "compressor_reserve",
+            Self::Operator => "operator_hold",
+        }
+    }
+}
+
 impl HostSample {
     pub(crate) fn block_reason(
         &self,
@@ -151,26 +192,98 @@ impl HostSample {
         leased: u32,
         requested: u32,
     ) -> Option<&'static str> {
-        if self.host != config.host
+        let sample_is_invalid = self.host != config.host
             || self.observed_at_ms > now
-            || now.saturating_sub(self.observed_at_ms) > config.sample_max_age_ms
-        {
-            return Some("host_sample_invalid_or_stale");
+            || now.saturating_sub(self.observed_at_ms) > config.sample_max_age_ms;
+        let mut reasons = Vec::with_capacity(4);
+        if sample_is_invalid {
+            reasons.push(BlockReason::Probe);
+        } else {
+            if !self.load_one.is_finite()
+                || self.load_one < 0.0
+                || self.load_one >= config.maximum_load
+            {
+                reasons.push(BlockReason::HostLoad);
+            }
+            if self.disk_available_bytes < config.disk_reserve_bytes {
+                reasons.push(BlockReason::TargetDisk);
+            }
+            let needed = u64::from(leased)
+                .saturating_add(u64::from(requested))
+                .saturating_mul(config.memory_per_unit_bytes)
+                .saturating_add(config.memory_reserve_bytes);
+            if self.memory_available_bytes < needed {
+                reasons.push(BlockReason::Memory);
+            }
         }
-        if !self.load_one.is_finite() || self.load_one < 0.0 || self.load_one >= config.maximum_load
-        {
-            return Some("host_load");
+        BlockReason::select(&reasons).map(BlockReason::admission_reason)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Result<Config> {
+        Ok(serde_json::from_str(include_str!(
+            "../policy.example.json"
+        ))?)
+    }
+
+    /// Trace: FR-015-AC-11
+    #[test]
+    fn admission_reason_uses_documented_precedence_for_available_probes() -> Result<()> {
+        let mut policy = config()?;
+        policy.memory_reserve_bytes = 1_000;
+        policy.disk_reserve_bytes = 1_000;
+
+        let mut sample = HostSample {
+            host: policy.host.clone(),
+            observed_at_ms: 100,
+            memory_available_bytes: 0,
+            disk_available_bytes: 0,
+            load_one: f64::MAX,
+        };
+        sample.host = "different-host".to_owned();
+        assert_eq!(
+            sample.block_reason(&policy, 100, 0, 1),
+            Some("host_sample_invalid_or_stale")
+        );
+
+        sample.host.clone_from(&policy.host);
+        assert_eq!(sample.block_reason(&policy, 100, 0, 1), Some("host_load"));
+
+        sample.load_one = 0.0;
+        assert_eq!(
+            sample.block_reason(&policy, 100, 0, 1),
+            Some("disk_reserve")
+        );
+
+        sample.disk_available_bytes = 1_000;
+        assert_eq!(
+            sample.block_reason(&policy, 100, 0, 1),
+            Some("memory_reserve")
+        );
+        Ok(())
+    }
+
+    /// Trace: FR-015-AC-11
+    #[test]
+    fn all_seven_block_reasons_have_the_documented_precedence() {
+        let candidates = [
+            BlockReason::Operator,
+            BlockReason::Compressor,
+            BlockReason::Swap,
+            BlockReason::Memory,
+            BlockReason::TargetDisk,
+            BlockReason::HostLoad,
+            BlockReason::Probe,
+        ];
+        for (index, expected) in BlockReason::PRECEDENCE.into_iter().enumerate() {
+            assert_eq!(
+                BlockReason::select(&candidates[..=6 - index]),
+                Some(expected)
+            );
         }
-        if self.disk_available_bytes < config.disk_reserve_bytes {
-            return Some("disk_reserve");
-        }
-        let needed = u64::from(leased)
-            .saturating_add(u64::from(requested))
-            .saturating_mul(config.memory_per_unit_bytes)
-            .saturating_add(config.memory_reserve_bytes);
-        if self.memory_available_bytes < needed {
-            return Some("memory_reserve");
-        }
-        None
     }
 }

@@ -859,6 +859,55 @@ fn concurrent_textfile_exports_are_serialized_and_leave_a_complete_document() ->
     Ok(())
 }
 
+/// Trace: FR-015-AC-5
+#[test]
+fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let fence = claim_worker(
+        &store,
+        &id,
+        &ProcessIdentity {
+            pid: u32::MAX - 1,
+            started_seconds: 1,
+        },
+    )?
+    .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    let barrier = std::sync::Barrier::new(2);
+    let (scrape_sender, scrape_receiver) = std::sync::mpsc::channel();
+    let (admit_sender, admit_receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| -> Result<()> {
+        let scraper = scope.spawn(|| {
+            barrier.wait();
+            let result = metrics(&store);
+            let _ = scrape_sender.send(result);
+        });
+        let admitting = scope.spawn(|| {
+            barrier.wait();
+            let result = admit_worker(&store, &id, &fence, &AtomicBool::new(false));
+            let _ = admit_sender.send(result);
+        });
+        let scrape = scrape_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|error| Error::new(ErrorCode::State, error.to_string()))??;
+        let admitted = admit_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|error| Error::new(ErrorCode::State, error.to_string()))??;
+        scraper
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "metrics scrape thread panicked"))?;
+        admitting
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "admission thread panicked"))?;
+        assert!(scrape.contains("# TYPE ix_build_queue_depth gauge"));
+        assert!(scrape.contains("ix_build_slots_busy{host=\"your-build-host\"}"));
+        assert!(matches!(admitted, Admission::Granted(_)));
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// Trace: FR-015-AC-1
 #[test]
 fn slow_textfile_export_lock_does_not_hold_the_scheduler_state_lock() -> Result<()> {
