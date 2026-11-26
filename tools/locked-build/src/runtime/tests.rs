@@ -1361,7 +1361,7 @@ fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Resu
     ));
     reopened.transaction_with_clock(
         || Ok((clock.now_ms, clock.clock_ms)),
-        |state, config| {
+        |state, config, _, _| {
             state.find_mut(&requests[0])?.stop = Some(StopReason::Cancelled);
             state.finish(
                 &requests[0],
@@ -1382,7 +1382,7 @@ fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Resu
     ));
     reopened.transaction_with_clock(
         || Ok((clock.now_ms, clock.clock_ms)),
-        |state, config| {
+        |state, config, _, _| {
             state.finish(
                 &requests[1],
                 Completion {
@@ -1948,10 +1948,10 @@ fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
             let _ = admit_sender.send(result);
         });
         let scrape = scrape_receiver
-            .recv()
+            .recv_timeout(Duration::from_secs(30))
             .map_err(|error| Error::new(ErrorCode::State, error.to_string()))??;
         let admitted = admit_receiver
-            .recv()
+            .recv_timeout(Duration::from_secs(30))
             .map_err(|error| Error::new(ErrorCode::State, error.to_string()))??;
         scraper
             .join()

@@ -60,14 +60,14 @@ fn scenario(command_members: u32) -> Result<()> {
     let clock = crate::runtime::clock_ms()?;
     store.transaction_with_clock(
         || Ok((now, clock)),
-        |state, _| {
+        |state, _, _, _| {
             let request = state.find_mut(&id)?;
             request.worker = Some(worker.clone());
             request.worker_generation = 1;
             request.watchdog = Some(watchdog.clone());
             request.phase = Phase::Running;
-            request.started_at_ms = Some(now_ms()?);
-            request.started_clock_ms = Some(clock_ms()?);
+            request.started_at_ms = Some(now);
+            request.started_clock_ms = Some(clock);
             Ok(())
         },
     )?;
@@ -86,7 +86,7 @@ fn scenario(command_members: u32) -> Result<()> {
         |_| Ok(false),
     )?;
     let occupied =
-        store.transaction_with_clock(|| Ok((now, clock)), |state, _| Ok(state.used()))?;
+        store.transaction_with_clock(|| Ok((now, clock)), |state, _, _, _| Ok(state.used()))?;
     assert_eq!(
         occupied, 1,
         "a missed live command released occupied capacity"
@@ -123,7 +123,7 @@ fn scenario(command_members: u32) -> Result<()> {
     assert!(matches!(after_exit, Decision::Done));
     store.transaction_with_clock(
         || Ok((now, clock)),
-        |state, _| {
+        |state, _, _, _| {
             assert_eq!(state.used(), 0);
             Ok(())
         },

@@ -74,14 +74,14 @@ impl Store {
     ) -> Result<T> {
         self.transaction_with_clock(
             || Ok((crate::runtime::now_ms()?, crate::runtime::clock_ms()?)),
-            operation,
+            |state, config, _, _| operation(state, config),
         )
     }
 
     pub(crate) fn transaction_with_clock<T>(
         &self,
         mut read_clock: impl FnMut() -> Result<(u64, u64)>,
-        operation: impl FnOnce(&mut State, &Config) -> Result<T>,
+        operation: impl FnOnce(&mut State, &Config, u64, u64) -> Result<T>,
     ) -> Result<T> {
         self.reject_link("lock")?;
         let lock = OpenOptions::new()
@@ -166,7 +166,8 @@ impl Store {
         state.validate(&config)?;
         let before = serde_json::to_vec(&state)?;
         let previous_pruned = state.pruned_events;
-        let output = operation(&mut state, &config)?;
+        let (operation_now, operation_clock) = read_clock()?;
+        let output = operation(&mut state, &config, operation_now, operation_clock)?;
         state
             .metrics
             .reconcile_events(&state.events, state.next_event)?;
