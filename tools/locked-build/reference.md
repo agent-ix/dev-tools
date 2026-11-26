@@ -7,16 +7,15 @@ A host policy is a JSON document defining build admission and supervision limits
 
 ## Fields
 
-All fields are required except `sample_file`, `cargo_build_jobs`,
-`rust_test_threads`, `cargo_incremental`, `target_root`, `trim_after_ms`, and
-`max_bytes`, `priority_classes`, `real_cargo`, `memory_admission`,
-`memory_budget_bytes`, `memory_cap_bytes`, `memory_cap_by_class`, and
-`on_missing_cgroup`; unknown fields are rejected. `lease_accounted` requires a
+Every policy field has a serde default; unknown fields are rejected. A small
+policy can set only `host`, `capacity_units`, and `maximum_units`. `lease_accounted` requires a
 positive `memory_budget_bytes` and `memory_cap_bytes` no greater than that
 budget. `memory_per_unit_bytes` and `memory_reserve_bytes` are required only in
 `live_available` mode.
 Relative filesystem paths resolve from the policy file's directory.
-The polling interval cannot exceed the hold deadline or termination grace.
+On first use, locked-build measures the host and writes a conservative policy.
+Use `locked-build policy show` to print it or `locked-build policy init --force`
+to regenerate it.
 
 | Field | Meaning |
 |---|---|
@@ -33,22 +32,16 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `disk_reserve_bytes` | Minimum free bytes for admission. |
 | `disk_path` | Directory selecting the measured filesystem. |
 | `maximum_load` | New admission requires load strictly below this value. |
-| `maximum_priority` | Largest accepted base priority. |
 | `aging_ms` | Positive priority aging interval. |
 | `hold_ms` | Positive running command deadline. |
 | `termination_grace_ms` | SIGTERM grace before forced cleanup. |
-| `sample_max_age_ms` | Maximum host sample age. |
-| `heartbeat_max_age_ms` | Age marking supervisor evidence suspect. |
-| `poll_ms` | Positive supervisor observation cadence. |
-| `maximum_requests` | Retained request limit; explicit pruning frees space. |
 | `sample_file` | Host-agent sample path, or null for local measurements. |
 | `cargo_build_jobs` | Optional maximum Cargo jobs at one active leased unit. At spawn, divide by the total active leased units and clamp to at least one. |
 | `rust_test_threads` | Optional `RUST_TEST_THREADS` value set for each leased command. |
 | `cargo_incremental` | Optional incremental compilation setting; true sets `CARGO_INCREMENTAL=1`, false sets it to `0`. |
 | `target_root` | Optional root for owner-specific `CARGO_TARGET_DIR` directories. Relative paths resolve from the policy file. |
-| `trim_after_ms` | Optional idle age since the owner's last lease ended, after which its target directory is deleted. |
 | `max_bytes` | Optional target size limit; the target directory is deleted when it exceeds this many bytes at lease end. |
-| `priority_classes` | Optional mapping of `must-fix`, `point`, `block`, and `periodic` to numeric priorities no greater than `maximum_priority`. |
+| `priority_classes` | Mapping of `must-fix`, `point`, `block`, and `periodic` to numeric priorities. The largest value sets the accepted priority limit. |
 | `real_cargo` | Optional Cargo executable path used when this binary is invoked with `argv[0]` basename `cargo`. Relative paths resolve from the policy file. |
 
 Explicit command-line `-j`/`--jobs` and `--test-threads` values, and explicit
@@ -60,14 +53,12 @@ leased units include the command being started. The formula is
 `max(1, floor(configured_cargo_build_jobs / active_leased_units))`; for example,
 a policy value of 8 with 3 active units sets `CARGO_BUILD_JOBS=2`.
 When target lifecycle is enabled, each owner receives one directory under
-`target_root`. Cleanup runs after the owner's last active lease, and is skipped
-unless the age or size limit is exceeded. Symlink entries are skipped and never
-followed. Inspection uses a bounded iterative walk; reaching the entry limit
-skips size-based cleanup, while age-based cleanup can still remove the whole
-target directory.
-`run --class NAME` looks up `NAME` in `priority_classes`; omitting both class and
-numeric priority records class `periodic` and uses the configured periodic priority
-when present. Class and numeric priority options cannot be used together. Metrics
+`target_root`. After the owner's final active lease, cleanup removes the whole
+directory when its measured size exceeds `max_bytes`. Symlink entries are skipped
+and never followed. Reaching the bounded walk's entry limit marks the target
+oversized and removes the whole directory.
+`run --class NAME` looks up `NAME` in `priority_classes`; omitting class records
+class `periodic` and uses its configured priority, or zero when absent. Metrics
 use a `class` label with `must-fix`, `point`, `block`, or `periodic`.
 
 Scheduler commands and the PATH shim read policy from `--config`, then

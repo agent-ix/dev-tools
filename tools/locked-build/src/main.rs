@@ -13,6 +13,7 @@ mod store;
 mod watchdog;
 
 use std::ffi::{OsStr, OsString};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -27,10 +28,7 @@ const DEFAULT_CARGO_OWNER: &str = "cargo-shim";
 const DEFAULT_CARGO_TICKET: &str = "MANUAL";
 
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Fair persistent build admission; host policy is required"
-)]
+#[command(version, about = "Fair persistent build admission for shared hosts")]
 struct Cli {
     #[arg(long, global = true)]
     state: Option<PathBuf>,
@@ -47,14 +45,12 @@ enum Action {
     /// Enqueue once, supervise the command, and return its exact outcome.
     Run {
         #[arg(long)]
-        owner: String,
+        owner: Option<String>,
         #[arg(long)]
-        ticket: String,
+        ticket: Option<String>,
         #[arg(long, default_value_t = 1)]
         units: u32,
-        #[arg(long, conflicts_with = "class")]
-        priority: Option<u32>,
-        #[arg(long, conflicts_with = "priority")]
+        #[arg(long)]
         class: Option<String>,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
@@ -77,12 +73,28 @@ enum Action {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Show or initialize the effective host policy.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyAction,
+    },
     #[command(hide = true)]
     Worker { request: String },
     #[command(hide = true)]
     Watchdog { request: String, generation: u64 },
     #[command(hide = true)]
     Parking,
+}
+
+#[derive(Subcommand)]
+enum PolicyAction {
+    /// Print the effective host policy as JSON.
+    Show,
+    /// Write a measured default policy; use --force to replace an existing file.
+    Init {
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn execute(cli: Cli) -> Result<i32> {
@@ -113,6 +125,23 @@ fn execute(cli: Cli) -> Result<i32> {
     let (state, config) = resolve_paths(cli.state.as_deref(), cli.config.as_deref(), |name| {
         std::env::var_os(name).map(PathBuf::from)
     })?;
+    if let Action::Policy { command } = &cli.command {
+        match command {
+            PolicyAction::Show => {
+                ensure_policy(&config, false)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&crate::config::Config::read(&config)?)?
+                );
+                return Ok(0);
+            }
+            PolicyAction::Init { force } => {
+                ensure_policy(&config, *force)?;
+                return Ok(0);
+            }
+        }
+    }
+    ensure_policy(&config, false)?;
     let store = if matches!(&cli.command, Action::Metrics { .. }) {
         store::Store::open_existing(&state, &config)?
     } else {
@@ -125,18 +154,13 @@ fn execute(cli: Cli) -> Result<i32> {
             owner,
             ticket,
             units,
-            priority,
             class,
             command,
         } => {
+            let owner = owner.unwrap_or_else(default_owner);
+            let ticket = ticket.unwrap_or_else(default_ticket);
             let class_name = class.as_deref().unwrap_or("periodic");
-            let priority = if class.is_some() {
-                runtime::priority_for_class(&store, class_name)?
-            } else if let Some(priority) = priority {
-                priority
-            } else {
-                runtime::priority_for_class(&store, class_name)?
-            };
+            let priority = runtime::priority_for_class(&store, class_name)?;
             let id = runtime::enqueue(
                 &store,
                 &owner,
@@ -178,6 +202,9 @@ fn execute(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Action::Sample { .. } => unreachable!("sample handled before opening scheduler state"),
+        Action::Policy { .. } => {
+            unreachable!("policy commands handled before opening scheduler state")
+        }
         Action::Worker { request } => {
             runtime::worker(&store, &RequestId(request))?;
             Ok(0)
@@ -221,6 +248,115 @@ fn resolve_paths(
             .join("locked-build/policy.json")
     });
     Ok((state, config))
+}
+
+fn ensure_policy(path: &std::path::Path, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        crate::config::Config::read(path)?;
+        return Ok(());
+    }
+    let policy = crate::config::Config::measured_default()?;
+    let parent = path.parent().ok_or_else(|| {
+        crate::error::Error::new(
+            crate::error::ErrorCode::Configuration,
+            "policy path has no parent",
+        )
+    })?;
+    let parent = if parent.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent
+    };
+    match std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+    {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let bytes = serde_json::to_vec_pretty(&policy)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = options.mode(0o600).open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists && !force {
+            crate::error::Error::new(
+                crate::error::ErrorCode::Configuration,
+                "policy was created concurrently; existing file was preserved",
+            )
+        } else {
+            error.into()
+        }
+    })?;
+    use std::io::Write;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    eprintln!("Wrote default policy to {}", path.display());
+    Ok(())
+}
+
+fn default_owner() -> String {
+    if let Some(owner) = std::env::var_os("LOCKED_BUILD_OWNER") {
+        return owner.to_string_lossy().into_owned();
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned());
+    let host = sysinfo::System::host_name().unwrap_or_else(|| "localhost".to_owned());
+    let cwd = std::env::current_dir().ok();
+    let directory = cwd
+        .as_deref()
+        .and_then(std::path::Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "workspace".to_owned());
+    format!("{user}@{host}:{directory}")
+}
+
+fn default_ticket() -> String {
+    if let Some(ticket) = std::env::var_os("LOCKED_BUILD_TICKET") {
+        return ticket.to_string_lossy().into_owned();
+    }
+    let branch = Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    branch
+        .as_deref()
+        .and_then(ticket_from_branch)
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+fn ticket_from_branch(branch: &str) -> Option<String> {
+    let bytes = branch.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        if !bytes[start].is_ascii_alphabetic() {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_alphabetic() {
+            end += 1;
+        }
+        if end < bytes.len() && bytes[end] == b'-' {
+            let digits = end + 1;
+            let mut stop = digits;
+            while stop < bytes.len() && bytes[stop].is_ascii_digit() {
+                stop += 1;
+            }
+            if stop > digits {
+                return Some(branch[start..stop].to_ascii_uppercase());
+            }
+        }
+        start = end.max(start + 1);
+    }
+    None
 }
 
 fn is_cargo_invocation(arguments: &[OsString]) -> bool {
@@ -296,7 +432,7 @@ fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
             "real_cargo is not configured",
         )
     })?;
-    let class = std::env::var("LOCKED_BUILD_CLASS").unwrap_or_else(|_| DEFAULT_CARGO_CLASS.into());
+    let class = cargo_shim_class(|name| std::env::var(name).ok());
     let owner = std::env::var("LOCKED_BUILD_OWNER").unwrap_or_else(|_| DEFAULT_CARGO_OWNER.into());
     let ticket =
         std::env::var("LOCKED_BUILD_TICKET").unwrap_or_else(|_| DEFAULT_CARGO_TICKET.into());
@@ -312,6 +448,10 @@ fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
     })?;
     let error = command.exec();
     Err(error.into())
+}
+
+fn cargo_shim_class(read_env: impl FnOnce(&str) -> Option<String>) -> String {
+    read_env("LOCKED_BUILD_CLASS").unwrap_or_else(|| DEFAULT_CARGO_CLASS.to_owned())
 }
 
 fn main() {
@@ -341,14 +481,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_accepts_class_and_rejects_class_with_numeric_priority() {
+    fn run_accepts_named_class_without_owner_or_ticket_flags() {
         let parsed = Cli::try_parse_from([
             "locked-build",
             "run",
-            "--owner",
-            "draco:team:code",
-            "--ticket",
-            "TEAM-1",
             "--class",
             "must-fix",
             "--",
@@ -356,25 +492,31 @@ mod tests {
             "test",
         ]);
         assert!(
-            matches!(parsed, Ok(Cli { command: Action::Run { class: Some(class), priority: None, .. }, .. }) if class == "must-fix")
+            matches!(parsed, Ok(Cli { command: Action::Run { owner: None, ticket: None, class: Some(class), .. }, .. }) if class == "must-fix")
         );
+    }
 
-        let conflict = Cli::try_parse_from([
-            "locked-build",
-            "run",
-            "--owner",
-            "draco:team:code",
-            "--ticket",
-            "TEAM-1",
-            "--priority",
-            "1",
-            "--class",
-            "point",
-            "--",
-            "cargo",
-            "test",
-        ]);
-        assert!(conflict.is_err());
+    #[test]
+    fn class_defaults_are_distinct_for_direct_run_and_cargo_shim() {
+        assert_eq!(cargo_shim_class(|_| None), "point");
+        assert_eq!(cargo_shim_class(|_| Some("block".to_owned())), "block");
+        let direct_run = Cli::try_parse_from(["locked-build", "run", "--", "true"]);
+        assert!(matches!(
+            direct_run,
+            Ok(Cli {
+                command: Action::Run { class: None, .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn ticket_is_derived_from_a_ticket_branch_prefix() {
+        assert_eq!(
+            ticket_from_branch("tooling/qsl-3541-w1-2").as_deref(),
+            Some("QSL-3541")
+        );
+        assert_eq!(ticket_from_branch("feature/no-ticket"), None);
     }
 
     #[test]
@@ -470,22 +612,14 @@ mod tests {
     /// Trace: FR-011-AC-7
     #[test]
     fn absent_run_class_defaults_to_periodic() {
-        let parsed = Cli::try_parse_from([
-            "locked-build",
-            "run",
-            "--owner",
-            "owner",
-            "--ticket",
-            "T-1",
-            "--",
-            "true",
-        ]);
+        let parsed = Cli::try_parse_from(["locked-build", "run", "--", "true"]);
         assert!(matches!(
             parsed,
             Ok(Cli {
                 command: Action::Run {
                     class: None,
-                    priority: None,
+                    owner: None,
+                    ticket: None,
                     ..
                 },
                 ..

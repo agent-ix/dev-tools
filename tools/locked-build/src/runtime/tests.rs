@@ -240,7 +240,6 @@ fn host_blocked_accumulator_survives_late_polls_recovery_and_interrupts() -> Res
     let config_path = root.path().join("policy.json");
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     policy.memory_reserve_bytes = 2_000_000;
-    policy.poll_ms = 5;
     std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
     let first = queued(&store)?;
     let second = queued(&store)?;
@@ -364,7 +363,6 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
     let config_path = root.path().join("policy.json");
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     policy.memory_reserve_bytes = 2_000_000;
-    policy.poll_ms = 5;
     std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
     let id = queued(&store)?;
     let (mut child, identity) = live_worker_process(&id)?;
@@ -374,7 +372,9 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
         admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
         Admission::Waiting(_)
     ));
-    std::thread::sleep(Duration::from_millis(30));
+    std::thread::sleep(Duration::from_millis(
+        2 * crate::config::POLL_INTERVAL_MS + 50,
+    ));
     stop_child_group(&mut child)?;
 
     let expired = metrics(&store)?;
@@ -656,41 +656,14 @@ fn metric_value<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
 fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()> {
     let root = tempfile::tempdir()?;
     let config = root.path().join("policy.json");
-    std::fs::write(
-        &config,
-        serde_json::to_vec(&Config {
-            host: "host".to_owned(),
-            capacity_units: 1,
-            maximum_units: 1,
-            memory_per_unit_bytes: 1,
-            memory_reserve_bytes: 0,
-            disk_reserve_bytes: 0,
-            disk_path: root.path().to_owned(),
-            maximum_load: 1.0,
-            maximum_priority: 2,
-            aging_ms: 1,
-            hold_ms: 1,
-            termination_grace_ms: 1,
-            sample_max_age_ms: 1,
-            heartbeat_max_age_ms: 2,
-            poll_ms: 1,
-            maximum_requests: 1,
-            sample_file: None,
-            cargo_build_jobs: None,
-            rust_test_threads: None,
-            cargo_incremental: None,
-            target_root: None,
-            trim_after_ms: None,
-            max_bytes: None,
-            priority_classes: std::collections::BTreeMap::new(),
-            real_cargo: None,
-            memory_admission: crate::config::MemoryAdmissionMode::LiveAvailable,
-            memory_budget_bytes: None,
-            memory_cap_bytes: None,
-            memory_cap_by_class: std::collections::BTreeMap::new(),
-            on_missing_cgroup: crate::config::OnMissingCgroup::RssWatchdog,
-        })?,
-    )?;
+    let policy = Config {
+        host: "host".to_owned(),
+        disk_path: root.path().to_owned(),
+        memory_admission: crate::config::MemoryAdmissionMode::LiveAvailable,
+        memory_per_unit_bytes: 1,
+        ..Config::default()
+    };
+    std::fs::write(&config, serde_json::to_vec(&policy)?)?;
     let missing = root.path().join("not-created");
     assert!(Store::open_existing(&missing, &config).is_err());
     assert!(!missing.exists());
@@ -1006,6 +979,63 @@ fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> R
 }
 
 #[test]
+fn supervise_completion_uses_persisted_scope_and_final_injected_oom_result() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let stale_request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let worker = ProcessIdentity {
+        pid: u32::MAX - 1,
+        started_seconds: 1,
+    };
+    let fence = claim_worker(&store, &id, &worker)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+    store.transaction(|state, _| {
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now_ms()?);
+        request.started_clock_ms = Some(clock_ms()?);
+        request.lease_record = Some(LeaseRecord {
+            memory_enforcement: MemoryEnforcement::SystemdScope,
+            ..LeaseRecord::default()
+        });
+        Ok(())
+    })?;
+    assert!(stale_request.lease_record.is_none());
+    let enforcement = persisted_memory_enforcement(&store, &id)?;
+    assert_eq!(enforcement, Some(MemoryEnforcement::SystemdScope));
+
+    let mut evidence = CgroupOomEvidence::default();
+    let events = root.path().join("memory.events");
+    std::fs::write(&events, "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n")?;
+    evidence.observe_file(&events);
+    std::fs::remove_file(&events)?;
+    evidence.read_known_files();
+    assert!(
+        evidence.detected(),
+        "final scope result survives scope removal"
+    );
+    store.transaction(|state, config| {
+        finish_supervised_command(
+            state,
+            config,
+            &id,
+            &fence,
+            2_000_000,
+            Completion {
+                code: None,
+                signal: Some(9),
+                reason: cgroup_cap_kill_reason(enforcement, evidence.detected()),
+            },
+        )
+    })?;
+    let finished = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    assert_eq!(finished.reason.as_deref(), Some("rss_cap"));
+    assert_eq!(finished.signal, Some(9));
+    Ok(())
+}
+
+#[test]
 fn hanging_systemd_probe_is_killed_at_its_timeout() {
     let started = std::time::Instant::now();
     let available = run_probe_with_timeout(std::time::Duration::from_millis(50), || {
@@ -1052,38 +1082,12 @@ fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Re
 }
 
 #[test]
-fn target_lifecycle_deletes_targets_past_the_idle_age_limit() -> Result<()> {
+fn target_lifecycle_skips_symlinks_and_size_cleans_oversized_targets() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
     policy.target_root = Some(root.path().join("targets"));
-    policy.trim_after_ms = Some(60_000);
-    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
-
-    let id = queued(&store)?;
-    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
-    let target = target_directory(&policy, &request, true)?
-        .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
-    let artifact = target.join("artifact");
-    let file = std::fs::File::create(&artifact)?;
-    file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))?;
-    finish_started_request(&store, &id)?;
-
-    cleanup_target(&store, &id)?;
-    assert!(
-        target.exists(),
-        "recent lease end must override old artifact mtime"
-    );
-    Ok(())
-}
-
-#[test]
-fn target_lifecycle_skips_symlinks_and_age_cleans_oversized_trees() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let store = store(root.path())?;
-    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
-    policy.target_root = Some(root.path().join("targets"));
-    policy.trim_after_ms = Some(0);
+    policy.max_bytes = Some(1);
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
@@ -1125,13 +1129,13 @@ fn finish_started_request(store: &Store, id: &RequestId) -> Result<()> {
 }
 
 #[test]
-fn target_cleanup_bounds_large_walk_and_age_removes_symlink_tree() -> Result<()> {
+fn target_cleanup_treats_walk_bound_as_oversized_and_removes_symlink_tree() -> Result<()> {
     const TOO_MANY_ENTRIES: usize = 100_005;
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
     policy.target_root = Some(root.path().join("targets"));
-    policy.trim_after_ms = Some(0);
+    policy.max_bytes = Some(1);
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
@@ -1278,8 +1282,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let config_path = root.path().join("policy.json");
-    let mut policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
-    policy.maximum_priority = 5;
+    let policy: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
     std::fs::write(&config_path, serde_json::to_vec(&policy)?)?;
     let id = enqueue(
         &store,
@@ -1287,7 +1290,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
         "TEST-PRIORITY",
         1,
         3,
-        None,
+        Some("must-fix"),
         &["/usr/bin/true".into()],
     )?;
     let fence = claim_worker(
@@ -1316,7 +1319,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
         )
     })?;
     assert!(metrics(&store)?.contains(
-        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"ok\"} 1"
+        "ix_build_builds_total{host=\"your-build-host\",class=\"must-fix\",outcome=\"ok\"} 1"
     ));
     Ok(())
 }

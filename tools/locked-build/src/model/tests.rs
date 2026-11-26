@@ -4,38 +4,22 @@
 use super::*;
 
 pub(crate) fn policy() -> Config {
-    Config {
-        host: "test-host".into(),
-        capacity_units: 2,
-        maximum_units: 4,
-        memory_per_unit_bytes: 100,
-        memory_reserve_bytes: 100,
-        disk_reserve_bytes: 100,
-        disk_path: PathBuf::from("/"),
-        maximum_load: 10.0,
-        maximum_priority: 2,
-        aging_ms: 100,
-        hold_ms: 1000,
-        termination_grace_ms: 100,
-        sample_max_age_ms: 100,
-        heartbeat_max_age_ms: 100,
-        poll_ms: 10,
-        maximum_requests: 100,
-        sample_file: None,
-        cargo_build_jobs: None,
-        rust_test_threads: None,
-        cargo_incremental: None,
-        target_root: None,
-        trim_after_ms: None,
-        max_bytes: None,
-        priority_classes: std::collections::BTreeMap::new(),
-        real_cargo: None,
-        memory_admission: crate::config::MemoryAdmissionMode::LiveAvailable,
-        memory_budget_bytes: None,
-        memory_cap_bytes: None,
-        memory_cap_by_class: std::collections::BTreeMap::new(),
-        on_missing_cgroup: crate::config::OnMissingCgroup::RssWatchdog,
-    }
+    let mut config = Config::default();
+    config.host = "test-host".into();
+    config.capacity_units = 2;
+    config.maximum_units = 4;
+    config.memory_per_unit_bytes = 100;
+    config.memory_reserve_bytes = 100;
+    config.disk_reserve_bytes = 100;
+    config.disk_path = PathBuf::from("/");
+    config.maximum_load = 10.0;
+    config.aging_ms = 100;
+    config.hold_ms = 1000;
+    config.termination_grace_ms = 100;
+    config.memory_admission = crate::config::MemoryAdmissionMode::LiveAvailable;
+    config.memory_budget_bytes = None;
+    config.memory_cap_bytes = None;
+    config
 }
 
 fn sample() -> HostSample {
@@ -242,9 +226,15 @@ fn missing_stale_wrong_host_and_resource_pressure_refuse_admission() -> Result<(
         Some("host_sample_unavailable")
     );
     let mut input = sample();
-    input.observed_at_ms = 399;
+    input.observed_at_ms = 0;
     assert_eq!(
-        state.admission_reason(&id, &config, Some(&input), 500, 0)?,
+        state.admission_reason(
+            &id,
+            &config,
+            Some(&input),
+            crate::config::SAMPLE_MAX_AGE_MS + 1,
+            0
+        )?,
         Some("host_sample_invalid_or_stale")
     );
     input = sample();

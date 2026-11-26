@@ -9,6 +9,11 @@ use sysinfo::{Disks, System};
 
 use crate::error::{Error, ErrorCode, Result};
 
+pub(crate) const MAX_REQUESTS: usize = 100_000;
+pub(crate) const SAMPLE_MAX_AGE_MS: u64 = 5_000;
+pub(crate) const HEARTBEAT_MAX_AGE_MS: u64 = 10_000;
+pub(crate) const POLL_INTERVAL_MS: u64 = 250;
+
 /// Policy for admitting build leases against host memory.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +38,7 @@ pub(crate) enum OnMissingCgroup {
 
 /// Admission policy. Every capacity and limit is explicitly configured.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Stable host label attached to telemetry.
     pub host: String,
@@ -42,10 +47,8 @@ pub struct Config {
     /// Maximum feasible request size, independent of temporary shrink.
     pub maximum_units: u32,
     /// Memory budget charged for each resource unit.
-    #[serde(default)]
     pub memory_per_unit_bytes: u64,
     /// Free memory kept outside build leases.
-    #[serde(default)]
     pub memory_reserve_bytes: u64,
     /// Filesystem space kept outside build leases.
     pub disk_reserve_bytes: u64,
@@ -53,22 +56,12 @@ pub struct Config {
     pub disk_path: PathBuf,
     /// Maximum observed one-minute host load for new admission.
     pub maximum_load: f64,
-    /// Largest accepted base priority.
-    pub maximum_priority: u32,
     /// Priority aging step; reservation starts after (P+1) steps.
     pub aging_ms: u64,
     /// Maximum wall duration of any running command.
     pub hold_ms: u64,
     /// Grace after SIGTERM before SIGKILL.
     pub termination_grace_ms: u64,
-    /// Maximum accepted resource sample age.
-    pub sample_max_age_ms: u64,
-    /// Supervisor heartbeat age after which a lease is reported suspect.
-    pub heartbeat_max_age_ms: u64,
-    /// Polling cadence, not a fairness or admission limit.
-    pub poll_ms: u64,
-    /// Bounded retained requests; terminal requests can be pruned explicitly.
-    pub maximum_requests: usize,
     /// Optional host-agent JSON measurement; absent uses local live telemetry.
     pub sample_file: Option<PathBuf>,
     /// Maximum cargo jobs for an otherwise idle host, divided by active leased units.
@@ -83,14 +76,10 @@ pub struct Config {
     /// Root under which owner-specific Cargo target directories are created.
     #[serde(default)]
     pub target_root: Option<PathBuf>,
-    /// Delete an idle target directory after this many milliseconds.
-    #[serde(default)]
-    pub trim_after_ms: Option<u64>,
     /// Delete a target directory when its measured size exceeds this limit.
     #[serde(default)]
     pub max_bytes: Option<u64>,
     /// Named priority classes and their numeric scheduler priorities.
-    #[serde(default)]
     pub priority_classes: BTreeMap<String, u32>,
     /// Real Cargo executable used by the optional PATH shim.
     #[serde(default)]
@@ -99,10 +88,8 @@ pub struct Config {
     #[serde(default)]
     pub memory_admission: MemoryAdmissionMode,
     /// Total build memory budget for `lease_accounted` admission.
-    #[serde(default)]
     pub memory_budget_bytes: Option<u64>,
     /// Default enforced memory cap for a lease, if configured.
-    #[serde(default)]
     pub memory_cap_bytes: Option<u64>,
     /// Per-class memory-cap overrides.
     #[serde(default)]
@@ -112,7 +99,94 @@ pub struct Config {
     pub on_missing_cgroup: OnMissingCgroup,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        let priority_classes = BTreeMap::from([
+            ("must-fix".to_owned(), 3),
+            ("point".to_owned(), 2),
+            ("block".to_owned(), 1),
+            ("periodic".to_owned(), 0),
+        ]);
+        Self {
+            host: "localhost".to_owned(),
+            capacity_units: 1,
+            maximum_units: 1,
+            memory_per_unit_bytes: 0,
+            memory_reserve_bytes: 0,
+            disk_reserve_bytes: 0,
+            disk_path: PathBuf::from("."),
+            maximum_load: 8.0,
+            aging_ms: 60_000,
+            hold_ms: 1_800_000,
+            termination_grace_ms: 10_000,
+            sample_file: None,
+            cargo_build_jobs: None,
+            rust_test_threads: None,
+            cargo_incremental: None,
+            target_root: None,
+            max_bytes: None,
+            priority_classes,
+            real_cargo: None,
+            memory_admission: MemoryAdmissionMode::LeaseAccounted,
+            memory_budget_bytes: Some(2 * 1024 * 1024 * 1024),
+            memory_cap_bytes: Some(1024 * 1024 * 1024),
+            memory_cap_by_class: BTreeMap::new(),
+            on_missing_cgroup: OnMissingCgroup::RssWatchdog,
+        }
+    }
+}
+
 impl Config {
+    #[allow(clippy::field_reassign_with_default)]
+    pub(crate) fn measured_default() -> Result<Self> {
+        let mut config = Self::default();
+        config.host = System::host_name().unwrap_or_else(|| "localhost".to_owned());
+        let cores = std::thread::available_parallelism()
+            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        let cores = u32::try_from(cores.get()).map_err(|_| {
+            Error::new(
+                ErrorCode::Configuration,
+                "host core count exceeds policy range",
+            )
+        })?;
+        let cores = cores.max(1);
+        config.capacity_units = cores;
+        config.maximum_units = cores;
+        config.maximum_load = f64::from(cores) * 2.0;
+        let mut system = System::new_all();
+        system.refresh_memory();
+        let total_memory = system.total_memory();
+        if total_memory == 0 {
+            return Err(Error::new(
+                ErrorCode::Configuration,
+                "cannot measure host memory for `memory_budget_bytes`",
+            ));
+        }
+        let memory_reserve = total_memory / 4;
+        let memory_budget = total_memory.saturating_sub(memory_reserve);
+        config.memory_reserve_bytes = memory_reserve;
+        config.memory_budget_bytes = Some(memory_budget);
+        config.memory_cap_bytes = Some((memory_budget / u64::from(cores)).max(1));
+
+        let disk_path = std::env::current_dir()?.canonicalize()?;
+        let disks = Disks::new_with_refreshed_list();
+        let disk = disks
+            .list()
+            .iter()
+            .filter(|disk| disk_path.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().components().count())
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Configuration,
+                    "cannot measure disk free space for `disk_reserve_bytes`",
+                )
+            })?;
+        config.disk_path = disk_path;
+        config.disk_reserve_bytes = disk.available_space() / 10;
+        config.validate()?;
+        Ok(config)
+    }
+
     pub(crate) fn read(path: &Path) -> Result<Self> {
         let mut config: Self = serde_json::from_reader(std::fs::File::open(path)?)
             .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
@@ -142,66 +216,125 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        let valid = !self.host.is_empty()
-            && self.host.len() <= 128
-            && self.capacity_units <= self.maximum_units
-            && self.maximum_units > 0
-            && (self.memory_admission == MemoryAdmissionMode::LeaseAccounted
-                || self.memory_per_unit_bytes > 0)
-            && self.maximum_load.is_finite()
-            && self.maximum_load > 0.0
-            && self.aging_ms > 0
-            && self.hold_ms > 0
-            && self.termination_grace_ms > 0
-            && self.sample_max_age_ms > 0
-            && self.heartbeat_max_age_ms > self.poll_ms
-            && self.poll_ms > 0
-            && self.poll_ms <= self.hold_ms
-            && self.poll_ms <= self.termination_grace_ms
-            && std::time::Instant::now()
-                .checked_add(std::time::Duration::from_millis(self.termination_grace_ms))
-                .is_some()
-            && self.maximum_requests > 0
-            && self.maximum_requests <= 100_000
-            && self.cargo_build_jobs.is_none_or(|jobs| jobs > 0)
-            && self.rust_test_threads.is_none_or(|threads| threads > 0)
-            && (self.trim_after_ms.is_none() && self.max_bytes.is_none()
-                || self.target_root.is_some())
-            && self.priority_classes.iter().all(|(name, priority)| {
-                matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic")
-                    && *priority <= self.maximum_priority
-            })
-            && self.memory_cap_bytes.is_none_or(|cap| cap > 0)
-            && self.memory_cap_by_class.iter().all(|(name, cap)| {
-                matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic") && *cap > 0
-            })
-            && (match self.memory_admission {
-                MemoryAdmissionMode::LiveAvailable => true,
-                MemoryAdmissionMode::LeaseAccounted => {
-                    self.memory_budget_bytes.is_some_and(|budget| budget > 0)
-                        && self.memory_cap_bytes.is_some_and(|cap| {
-                            cap > 0 && self.memory_budget_bytes.is_some_and(|budget| cap <= budget)
-                        })
-                        && self.memory_cap_by_class.values().all(|cap| {
-                            self.memory_budget_bytes
-                                .is_some_and(|budget| *cap <= budget)
-                        })
-                }
-            })
-            && (self.memory_admission == MemoryAdmissionMode::LeaseAccounted
-                || u64::from(self.maximum_units)
-                    .checked_mul(self.memory_per_unit_bytes)
-                    .is_some())
-            && (u64::from(self.maximum_priority) + 1)
-                .checked_mul(self.aging_ms)
-                .is_some();
-        if !valid {
-            return Err(Error::new(
+        let invalid = |field: &str, detail: &str| {
+            Error::new(
                 ErrorCode::Configuration,
-                "invalid host policy or limit",
+                format!("invalid policy field `{field}`: {detail}"),
+            )
+        };
+        if self.host.is_empty() || self.host.len() > 128 {
+            return Err(invalid("host", "must contain 1 to 128 characters"));
+        }
+        if self.maximum_units == 0 || self.capacity_units > self.maximum_units {
+            return Err(invalid(
+                "maximum_units",
+                "must be positive and at least capacity_units",
             ));
         }
+        if !self.maximum_load.is_finite() || self.maximum_load <= 0.0 {
+            return Err(invalid("maximum_load", "must be finite and positive"));
+        }
+        if self.aging_ms == 0
+            || (u64::from(self.max_priority()) + 1)
+                .checked_mul(self.aging_ms)
+                .is_none()
+        {
+            return Err(invalid(
+                "aging_ms",
+                "must be positive and fit the priority range",
+            ));
+        }
+        if self.hold_ms == 0 {
+            return Err(invalid("hold_ms", "must be positive"));
+        }
+        if self.termination_grace_ms == 0
+            || std::time::Instant::now()
+                .checked_add(std::time::Duration::from_millis(self.termination_grace_ms))
+                .is_none()
+        {
+            return Err(invalid(
+                "termination_grace_ms",
+                "must be positive and representable",
+            ));
+        }
+        if self.cargo_build_jobs.is_some_and(|jobs| jobs == 0) {
+            return Err(invalid("cargo_build_jobs", "must be positive when set"));
+        }
+        if self.rust_test_threads.is_some_and(|threads| threads == 0) {
+            return Err(invalid("rust_test_threads", "must be positive when set"));
+        }
+        if self.max_bytes.is_some() && self.target_root.is_none() {
+            return Err(invalid("target_root", "is required when max_bytes is set"));
+        }
+        if self
+            .priority_classes
+            .iter()
+            .any(|(name, _)| !matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic"))
+        {
+            return Err(invalid("priority_classes", "contains an unknown class"));
+        }
+        if self.memory_cap_bytes.is_some_and(|cap| cap == 0) {
+            return Err(invalid("memory_cap_bytes", "must be positive when set"));
+        }
+        if self.memory_cap_by_class.iter().any(|(name, cap)| {
+            !matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic") || *cap == 0
+        }) {
+            return Err(invalid(
+                "memory_cap_by_class",
+                "contains an unknown class or zero cap",
+            ));
+        }
+        match self.memory_admission {
+            MemoryAdmissionMode::LiveAvailable => {
+                if self.memory_per_unit_bytes == 0 {
+                    return Err(invalid(
+                        "memory_per_unit_bytes",
+                        "must be positive in live_available mode",
+                    ));
+                }
+                if u64::from(self.maximum_units)
+                    .checked_mul(self.memory_per_unit_bytes)
+                    .is_none()
+                {
+                    return Err(invalid(
+                        "memory_per_unit_bytes",
+                        "overflows the maximum unit budget",
+                    ));
+                }
+            }
+            MemoryAdmissionMode::LeaseAccounted => {
+                let budget = self.memory_budget_bytes.unwrap_or_default();
+                if budget == 0 {
+                    return Err(invalid(
+                        "memory_budget_bytes",
+                        "must be positive in lease_accounted mode",
+                    ));
+                }
+                let Some(cap) = self.memory_cap_bytes.filter(|cap| *cap > 0) else {
+                    return Err(invalid(
+                        "memory_cap_bytes",
+                        "is required in lease_accounted mode",
+                    ));
+                };
+                if cap > budget {
+                    return Err(invalid(
+                        "memory_cap_bytes",
+                        "cannot exceed memory_budget_bytes",
+                    ));
+                }
+                if self.memory_cap_by_class.values().any(|cap| *cap > budget) {
+                    return Err(invalid(
+                        "memory_cap_by_class",
+                        "a cap exceeds memory_budget_bytes",
+                    ));
+                }
+            }
+        }
         Ok(())
+    }
+
+    pub(crate) fn max_priority(&self) -> u32 {
+        self.priority_classes.values().copied().max().unwrap_or(0)
     }
 
     pub(crate) fn sample(&self, now: u64) -> Result<HostSample> {
@@ -298,7 +431,7 @@ impl HostSample {
     ) -> Option<&'static str> {
         let sample_is_invalid = self.host != config.host
             || self.observed_at_ms > now
-            || now.saturating_sub(self.observed_at_ms) > config.sample_max_age_ms;
+            || now.saturating_sub(self.observed_at_ms) > SAMPLE_MAX_AGE_MS;
         let mut reasons = Vec::with_capacity(4);
         if sample_is_invalid {
             reasons.push(BlockReason::Probe);
@@ -348,6 +481,16 @@ mod tests {
 
         assert_eq!(config.memory_admission, MemoryAdmissionMode::LeaseAccounted);
         Ok(())
+    }
+
+    #[test]
+    fn three_field_policy_uses_defaults_and_validates() -> Result<()> {
+        let config: Config =
+            serde_json::from_str(r#"{"host":"build-host","capacity_units":1,"maximum_units":1}"#)?;
+        assert_eq!(config.memory_admission, MemoryAdmissionMode::LeaseAccounted);
+        assert_eq!(config.on_missing_cgroup, OnMissingCgroup::RssWatchdog);
+        assert_eq!(config.priority_classes.get("periodic"), Some(&0));
+        config.validate()
     }
 
     #[test]

@@ -50,7 +50,7 @@ pub(crate) fn launch(
                 && processes.role_identity(watchdog, id, "watchdog", watchdog.pid)
                     == IdentityState::Matching
             {
-                return Ok((Some(watchdog.clone()), config.poll_ms));
+                return Ok((Some(watchdog.clone()), crate::config::POLL_INTERVAL_MS));
             }
             if request.started_clock_ms.is_some_and(|started| {
                 clock_ms().is_ok_and(|now| now.saturating_sub(started) >= config.hold_ms)
@@ -61,7 +61,7 @@ pub(crate) fn launch(
                     "watchdog startup exceeded hold deadline",
                 ));
             }
-            Ok((None, config.poll_ms))
+            Ok((None, crate::config::POLL_INTERVAL_MS))
         })?;
         if let Some(identity) = ready.0 {
             return Ok((identity, child));
@@ -204,7 +204,7 @@ fn observe(
             stop: request.stop.is_some() || request.command_finished.is_some(),
             memory_cap_exceeded: request.stop == Some(StopReason::MemoryCap),
             grace_ms: config.termination_grace_ms,
-            poll_ms: config.poll_ms,
+            poll_ms: crate::config::POLL_INTERVAL_MS,
         })
     })
 }
@@ -341,7 +341,7 @@ fn terminate_group(
         if started.elapsed() >= Duration::from_millis(policy.termination_grace_ms) {
             processes.signal_member_owned(watchdog, id, "watchdog", group, Signal::SIGKILL)?;
         }
-        std::thread::sleep(Duration::from_millis(policy.poll_ms));
+        std::thread::sleep(Duration::from_millis(crate::config::POLL_INTERVAL_MS));
     }
 }
 

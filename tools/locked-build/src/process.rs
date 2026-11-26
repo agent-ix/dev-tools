@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Process identity and conservative recovery of isolated supervisor groups.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::{Pid, getpgid};
@@ -185,26 +186,31 @@ impl Processes {
             .map_err(|error| Error::new(ErrorCode::Io, format!("group signal failed: {error}")))
     }
 
-    pub(crate) fn group_oom_kill_count(&self, group: u32) -> Option<u64> {
+    pub(crate) fn group_memory_events_files(&self, group: u32) -> BTreeSet<PathBuf> {
         if !self.complete {
-            return None;
+            return BTreeSet::new();
         }
         self.rows
             .iter()
             .filter(|(_, row)| row.group == Some(group) && !row.zombie)
-            .filter_map(|(pid, _)| cgroup_oom_kill_count(*pid))
-            .max()
+            .filter_map(|(pid, _)| cgroup_memory_events_file(*pid))
+            .collect()
     }
 }
 
-fn cgroup_oom_kill_count(pid: u32) -> Option<u64> {
+fn cgroup_memory_events_file(pid: u32) -> Option<PathBuf> {
     let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
     let relative = membership
         .lines()
         .find_map(|line| line.strip_prefix("0::"))?;
-    let path = std::path::Path::new("/sys/fs/cgroup")
-        .join(relative.trim_start_matches('/'))
-        .join("memory.events");
+    Some(
+        std::path::Path::new("/sys/fs/cgroup")
+            .join(relative.trim_start_matches('/'))
+            .join("memory.events"),
+    )
+}
+
+pub(crate) fn oom_kill_count_from_file(path: &std::path::Path) -> Option<u64> {
     let events = std::fs::read_to_string(path).ok()?;
     parse_oom_kill_count(&events)
 }

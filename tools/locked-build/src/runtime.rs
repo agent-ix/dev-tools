@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::config::HostSample;
+use crate::config::{Config, HostSample};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{
     CommandOutcome, Completion, Event, LeaseRecord, MemoryEnforcement, Phase, Request, RequestId,
@@ -73,13 +73,13 @@ pub(crate) fn enqueue(
     let now = now_ms()?;
     let clock = clock_ms()?;
     store.transaction(|state, config| {
-        if units == 0 || units > config.maximum_units || priority > config.maximum_priority {
+        if units == 0 || units > config.maximum_units || priority > config.max_priority() {
             return Err(Error::new(
                 ErrorCode::Request,
                 "units or priority outside configured bounds",
             ));
         }
-        if state.requests.len() >= config.maximum_requests {
+        if state.requests.len() >= crate::config::MAX_REQUESTS {
             return Err(Error::new(
                 ErrorCode::State,
                 "retained request limit reached; prune terminal requests",
@@ -382,7 +382,7 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
                     suspect: request.phase == Phase::Running
                         && (identity != Some(IdentityState::Matching)
                             || request.heartbeat_at_ms.is_none_or(|heartbeat| {
-                                now.saturating_sub(heartbeat) > config.heartbeat_max_age_ms
+                                now.saturating_sub(heartbeat) > crate::config::HEARTBEAT_MAX_AGE_MS
                             })),
                     reason: request.reason.clone(),
                     exit_code: request.exit_code,
@@ -466,7 +466,7 @@ pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Re
         for missing in recover(store)? {
             workers.push(spawn_worker(store, &missing)?);
         }
-        let result = store.transaction(|state, config| {
+        let result = store.transaction(|state, _config| {
             let request = state.find(id)?;
             let code = match request.phase {
                 Phase::Queued | Phase::Running => None,
@@ -481,7 +481,7 @@ pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Re
                         .unwrap_or(1),
                 ),
             };
-            Ok((code, config.poll_ms))
+            Ok((code, crate::config::POLL_INTERVAL_MS))
         })?;
         if let Some(code) = result.0 {
             return Ok(code);
@@ -568,7 +568,7 @@ fn admit_worker(
         let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
         state.metrics.observe_block(blocked, now, clock)?;
         if reason.is_some() {
-            return Ok(Admission::Waiting(config.poll_ms));
+            return Ok(Admission::Waiting(crate::config::POLL_INTERVAL_MS));
         }
         let admitted = {
             let request = state.find_mut(id)?;
@@ -654,19 +654,14 @@ fn supervise(
             return Ok(());
         }
     };
-    let mut cgroup_oom_kill_observed = false;
+    let enforcement = persisted_memory_enforcement(store, &request.id)?;
+    let mut cgroup_oom_evidence = CgroupOomEvidence::default();
     let mut status = None;
     loop {
         // A dead watchdog remains a group member until its parent reaps it.
         watchdog_child.try_wait()?;
-        if request
-            .lease_record
-            .as_ref()
-            .is_some_and(|record| record.memory_enforcement == MemoryEnforcement::SystemdScope)
-        {
-            cgroup_oom_kill_observed |= Processes::read()
-                .group_oom_kill_count(watchdog.pid)
-                .is_some_and(|count| count > 0);
+        if enforcement == Some(MemoryEnforcement::SystemdScope) {
+            cgroup_oom_evidence.observe_group(&Processes::read(), watchdog.pid);
         }
         if status.is_none() {
             status = child.try_wait()?;
@@ -707,7 +702,10 @@ fn supervise(
             if let Some(outcome) = status
                 && group_absent(watchdog.pid)
             {
-                finish_owned(
+                if enforcement == Some(MemoryEnforcement::SystemdScope) {
+                    cgroup_oom_evidence.observe_group(&Processes::read(), watchdog.pid);
+                }
+                finish_supervised_command(
                     state,
                     config,
                     &request.id,
@@ -716,24 +714,42 @@ fn supervise(
                     Completion {
                         code: outcome.code(),
                         signal: outcome.signal(),
-                        reason: cgroup_cap_kill_reason(
-                            request
-                                .lease_record
-                                .as_ref()
-                                .map(|record| record.memory_enforcement),
-                            cgroup_oom_kill_observed,
-                        ),
+                        reason: cgroup_cap_kill_reason(enforcement, cgroup_oom_evidence.detected()),
                     },
                 )?;
                 return Ok(None);
             }
-            Ok(Some(config.poll_ms))
+            Ok(Some(crate::config::POLL_INTERVAL_MS))
         })?;
         let Some(poll_ms) = policy else {
             return Ok(());
         };
         std::thread::sleep(Duration::from_millis(poll_ms));
     }
+}
+
+fn persisted_memory_enforcement(
+    store: &Store,
+    id: &RequestId,
+) -> Result<Option<MemoryEnforcement>> {
+    store.transaction(|state, _| {
+        Ok(state
+            .find(id)?
+            .lease_record
+            .as_ref()
+            .map(|record| record.memory_enforcement))
+    })
+}
+
+fn finish_supervised_command(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    fence: &WorkerFence,
+    group: u32,
+    completion: Completion,
+) -> Result<()> {
+    finish_owned(state, config, id, fence, group, completion)
 }
 
 fn start_command(
@@ -1007,6 +1023,36 @@ fn cgroup_cap_kill_reason(
     oom_kill_observed: bool,
 ) -> Option<&'static str> {
     (enforcement == Some(MemoryEnforcement::SystemdScope) && oom_kill_observed).then_some("rss_cap")
+}
+
+#[derive(Default)]
+struct CgroupOomEvidence {
+    event_files: std::collections::BTreeSet<std::path::PathBuf>,
+    detected: bool,
+}
+
+impl CgroupOomEvidence {
+    fn observe_group(&mut self, processes: &Processes, group: u32) {
+        self.event_files
+            .extend(processes.group_memory_events_files(group));
+        self.read_known_files();
+    }
+
+    #[cfg(test)]
+    fn observe_file(&mut self, path: &std::path::Path) {
+        self.event_files.insert(path.to_owned());
+        self.read_known_files();
+    }
+
+    fn read_known_files(&mut self) {
+        self.detected |= self.event_files.iter().any(|path| {
+            crate::process::oom_kill_count_from_file(path).is_some_and(|count| count > 0)
+        });
+    }
+
+    fn detected(&self) -> bool {
+        self.detected
+    }
 }
 
 struct PreparedBuildEnvironment {
@@ -1301,22 +1347,12 @@ fn cleanup_target(store: &Store, id: &RequestId) -> Result<()> {
         let Some(target) = target_directory(config, request, false)? else {
             return Ok(None);
         };
-        if config.trim_after_ms.is_none() && config.max_bytes.is_none() {
+        if config.max_bytes.is_none() {
             return Ok(None);
         }
-        let last_lease_end_ms = state
-            .requests
-            .iter()
-            .filter(|candidate| {
-                candidate.owner == request.owner && candidate.started_at_ms.is_some()
-            })
-            .filter_map(|candidate| candidate.ended_at_ms)
-            .max();
         Ok(Some(TargetCleanupPlan {
             owner: request.owner.clone(),
             target,
-            last_lease_end_ms,
-            trim_after_ms: config.trim_after_ms,
             max_bytes: config.max_bytes,
         }))
     })?;
@@ -1326,14 +1362,9 @@ fn cleanup_target(store: &Store, id: &RequestId) -> Result<()> {
     let Some(inspection) = inspect_target_tree(&plan.target)? else {
         return Ok(());
     };
-    let now = now_ms()?;
-    let too_old = plan.trim_after_ms.is_some_and(|limit| {
-        plan.last_lease_end_ms
-            .is_some_and(|ended| now.saturating_sub(ended) >= limit)
-    });
     let too_large =
-        !inspection.bound_reached && plan.max_bytes.is_some_and(|limit| inspection.bytes > limit);
-    if !too_old && !too_large {
+        inspection.bound_reached || plan.max_bytes.is_some_and(|limit| inspection.bytes > limit);
+    if !too_large {
         return Ok(());
     }
 
@@ -1377,8 +1408,6 @@ fn cleanup_target(store: &Store, id: &RequestId) -> Result<()> {
 struct TargetCleanupPlan {
     owner: String,
     target: std::path::PathBuf,
-    last_lease_end_ms: Option<u64>,
-    trim_after_ms: Option<u64>,
     max_bytes: Option<u64>,
 }
 

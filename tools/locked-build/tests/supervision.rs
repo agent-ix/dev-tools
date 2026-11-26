@@ -41,10 +41,9 @@ impl Harness {
             serde_json::to_vec(&json!({
                 "host": "fixture-host", "capacity_units": capacity, "maximum_units": 4,
                 "memory_per_unit_bytes": 100, "memory_reserve_bytes": 100, "disk_reserve_bytes": 100,
-                "disk_path": root.path(), "maximum_load": 100.0, "maximum_priority": 2,
+                "disk_path": root.path(), "maximum_load": 100.0,
                 "aging_ms": 1000, "hold_ms": hold_ms, "termination_grace_ms": 200,
-                "sample_max_age_ms": 60000, "heartbeat_max_age_ms": 10000, "poll_ms": 10,
-                "maximum_requests": 100, "sample_file": sample,
+                "sample_file": sample,
                 "memory_admission": "live_available", "memory_budget_bytes": null,
                 "memory_cap_bytes": null, "memory_cap_by_class": {},
                 "on_missing_cgroup": "rss_watchdog",

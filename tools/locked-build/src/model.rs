@@ -225,10 +225,10 @@ pub struct Event {
 }
 
 impl State {
-    pub(crate) fn validate(&self, config: &Config) -> Result<()> {
+    pub(crate) fn validate(&self, _config: &Config) -> Result<()> {
         if self.store_id.len() != 32
             || !self.store_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || self.requests.len() > config.maximum_requests
+            || self.requests.len() > crate::config::MAX_REQUESTS
             || self.next_event == 0
         {
             return Err(Error::new(
@@ -373,8 +373,7 @@ impl State {
                     && request.stop.is_none()
             })
         };
-        let reservation_ms =
-            (u64::from(config.maximum_priority) + 1).saturating_mul(config.aging_ms);
+        let reservation_ms = (u64::from(config.max_priority()) + 1).saturating_mul(config.aging_ms);
         if let Some(reserved) = feasible()
             .filter(|request| clock.saturating_sub(request.enqueued_clock_ms) >= reservation_ms)
             .min_by_key(|request| request.sequence)
