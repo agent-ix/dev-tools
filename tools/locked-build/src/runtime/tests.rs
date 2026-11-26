@@ -1210,11 +1210,30 @@ fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> R
 }
 
 #[test]
-fn supervise_completion_uses_persisted_scope_and_final_injected_oom_result() -> Result<()> {
+fn supervise_loop_uses_persisted_scope_and_injected_scope_kill() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let id = queued(&store)?;
     let stale_request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let mut command = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("kill -KILL $$")
+        .process_group(0)
+        .spawn()?;
+    let command_pid = command.id();
+    let mut outcome = None;
+    for _ in 0..50 {
+        outcome = command.try_wait()?;
+        if outcome.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(outcome.is_some(), "injected command must exit by signal");
+    let watchdog = ProcessIdentity {
+        pid: command_pid,
+        started_seconds: 1,
+    };
     let worker = ProcessIdentity {
         pid: u32::MAX - 1,
         started_seconds: 1,
@@ -1226,6 +1245,8 @@ fn supervise_completion_uses_persisted_scope_and_final_injected_oom_result() -> 
         request.phase = Phase::Running;
         request.started_at_ms = Some(now_ms()?);
         request.started_clock_ms = Some(clock_ms()?);
+        request.watchdog = Some(watchdog.clone());
+        request.memory_cap_bytes = Some(1_000_000);
         request.lease_record = Some(LeaseRecord {
             memory_enforcement: MemoryEnforcement::SystemdScope,
             ..LeaseRecord::default()
@@ -1233,33 +1254,22 @@ fn supervise_completion_uses_persisted_scope_and_final_injected_oom_result() -> 
         Ok(())
     })?;
     assert!(stale_request.lease_record.is_none());
-    let enforcement = persisted_memory_enforcement(&store, &id)?;
-    assert_eq!(enforcement, Some(MemoryEnforcement::SystemdScope));
-
-    let mut evidence = CgroupOomEvidence::default();
     let events = root.path().join("memory.events");
     std::fs::write(&events, "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n")?;
-    evidence.observe_file(&events);
-    std::fs::remove_file(&events)?;
-    evidence.read_known_files();
-    assert!(
-        evidence.detected(),
-        "final scope result survives scope removal"
-    );
-    store.transaction(|state, config| {
-        finish_supervised_command(
-            state,
-            config,
-            &id,
-            &fence,
-            2_000_000,
-            Completion {
-                code: None,
-                signal: Some(9),
-                reason: cgroup_cap_kill_reason(enforcement, evidence.detected()),
-            },
-        )
-    })?;
+    let mut watchdog_child = Command::new("/usr/bin/true").spawn()?;
+    supervise_started_command(
+        &store,
+        &stale_request,
+        &fence,
+        &watchdog,
+        &mut watchdog_child,
+        &AtomicBool::new(false),
+        command,
+        |evidence, _processes, _group| {
+            evidence.observe_file(&events);
+            let _ = std::fs::remove_file(&events);
+        },
+    )?;
     let finished = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     assert_eq!(finished.reason.as_deref(), Some("rss_cap"));
     assert_eq!(finished.signal, Some(9));

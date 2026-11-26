@@ -707,7 +707,7 @@ fn supervise(
     watchdog_child: &mut Child,
     interrupted: &AtomicBool,
 ) -> Result<()> {
-    let mut child = match start_command(store, request, fence, watchdog)? {
+    let child = match start_command(store, request, fence, watchdog)? {
         CommandStart::Started(child) => child,
         CommandStart::Refused => {
             store.transaction(|state, config| {
@@ -725,6 +725,29 @@ fn supervise(
             return Ok(());
         }
     };
+    supervise_started_command(
+        store,
+        request,
+        fence,
+        watchdog,
+        watchdog_child,
+        interrupted,
+        child,
+        |evidence, processes, group| evidence.observe_group(processes, group),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn supervise_started_command(
+    store: &Store,
+    request: &Request,
+    fence: &WorkerFence,
+    watchdog: &crate::model::ProcessIdentity,
+    watchdog_child: &mut Child,
+    interrupted: &AtomicBool,
+    mut child: Child,
+    mut observe_oom: impl FnMut(&mut CgroupOomEvidence, &Processes, u32),
+) -> Result<()> {
     let enforcement = persisted_memory_enforcement(store, &request.id)?;
     let mut cgroup_oom_evidence = CgroupOomEvidence::default();
     let mut status = None;
@@ -732,7 +755,7 @@ fn supervise(
         // A dead watchdog remains a group member until its parent reaps it.
         watchdog_child.try_wait()?;
         if enforcement == Some(MemoryEnforcement::SystemdScope) {
-            cgroup_oom_evidence.observe_group(&Processes::read(), watchdog.pid);
+            observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
         }
         if status.is_none() {
             status = child.try_wait()?;
@@ -774,7 +797,7 @@ fn supervise(
                 && group_absent(watchdog.pid)
             {
                 if enforcement == Some(MemoryEnforcement::SystemdScope) {
-                    cgroup_oom_evidence.observe_group(&Processes::read(), watchdog.pid);
+                    observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
                 }
                 finish_supervised_command(
                     state,
