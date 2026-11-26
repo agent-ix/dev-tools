@@ -40,6 +40,11 @@ locked-build cancel REQUEST-ID
 not started. `running` means the request holds a lease and its command has
 started. Status includes the request id needed by `cancel`.
 
+In the default `lease_accounted` mode, Cargo leases charge the resolved `-j`
+count times 2.5 GB per job. Non-Cargo commands charge their requested units.
+The scheduler admits a command only while the sum of running leases stays
+within the measured memory budget.
+
 If memory enforcement kills a command for exceeding its cap, status reports
 `rss_cap`. A required systemd scope that cannot start with
 `on_missing_cgroup=refuse` reports `memory_cap_unavailable` and does not launch

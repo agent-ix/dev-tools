@@ -8,10 +8,11 @@ A host policy is a JSON document defining build admission and supervision limits
 ## Fields
 
 Every policy field has a serde default; unknown fields are rejected. A small
-policy can set only `host`, `capacity_units`, and `maximum_units`. `lease_accounted` requires a
-positive `memory_budget_bytes` and `memory_cap_bytes` no greater than that
-budget. `memory_per_unit_bytes` and `memory_reserve_bytes` are required only in
-`live_available` mode.
+policy can set only `host`, `capacity_units`, and `maximum_units`. `lease_accounted`
+requires a positive `memory_budget_bytes` and `memory_per_job_bytes`. It charges
+each request by its resolved Cargo job count times the per-job estimate;
+non-Cargo commands use requested units. `memory_per_unit_bytes` and
+`memory_reserve_bytes` are required only in `live_available` mode.
 Relative filesystem paths resolve from the policy file's directory.
 On first use, locked-build measures the host and writes a conservative policy.
 Use `locked-build policy show` to print it or `locked-build policy init --force`
@@ -24,10 +25,11 @@ to regenerate it.
 | `maximum_units` | Largest feasible request; temporary shrink preserves queue age. |
 | `memory_per_unit_bytes` | RAM budget charged per requested unit in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_reserve_bytes` | RAM retained outside build leases in `live_available` mode; optional in `lease_accounted` mode. |
-| `memory_admission` | `lease_accounted` (default) charges fixed lease caps against `memory_budget_bytes` and does not read live available memory; `live_available` compares `MemAvailable` with lease-unit charges. |
-| `memory_budget_bytes` | Total concurrent lease-cap budget required by `lease_accounted` admission. |
-| `memory_cap_bytes` | Default cap for each lease. It is required by `lease_accounted`; Linux uses a systemd scope when available and the RSS watchdog otherwise. |
-| `memory_cap_by_class` | Optional per-class cap overrides for `must-fix`, `point`, `block`, or `periodic`. |
+| `memory_admission` | `lease_accounted` (default) sums fixed leases against `memory_budget_bytes` without reading live available memory; `live_available` compares `MemAvailable` with lease-unit charges. |
+| `memory_budget_bytes` | Total memory available to concurrent leases in `lease_accounted` mode. |
+| `memory_per_job_bytes` | Default memory estimate per effective Cargo job or non-Cargo unit; generated policies use 2.5 GB. |
+| `memory_per_job_by_class` | Optional per-class per-job estimates, bounded by the class cap when one is configured. |
+| `memory_cap_by_class` | Optional maximum total lease size for each named class. |
 | `on_missing_cgroup` | `rss_watchdog` (default) enforces a configured cap with process-group RSS when a systemd scope is unavailable; `refuse` fails the lease without running the command. |
 | `disk_reserve_bytes` | Minimum free bytes for admission. |
 | `disk_path` | Directory selecting the measured filesystem. |
@@ -73,10 +75,12 @@ to `point`, `cargo-shim`, and `MANUAL`. A leased command receives
 `LOCKED_BUILD_LEASE=1`; when a shim invocation sees that marker, it execs
 `real_cargo` directly to avoid queue recursion.
 
-In `lease_accounted` mode, admission requires the sum of active lease caps plus
-the requested lease cap to be at most `memory_budget_bytes`; a zero live
-`memory_available_bytes` value does not block the request. Linux starts capped
-commands as `systemd-run --user --scope --quiet -p MemoryMax=<cap>
+In `lease_accounted` mode, admission requires the sum of active leases plus
+the new request to be at most `memory_budget_bytes`; requests larger than the
+whole budget fail at enqueue. The systemd `MemoryMax` and RSS fallback cap equal
+the computed lease size. A zero live `memory_available_bytes` value does not
+block the request. Linux starts capped commands as
+`systemd-run --user --scope --quiet -p MemoryMax=<cap>
 -p MemorySwapMax=0 -- <command>`. On macOS, where systemd-run is unavailable,
 the watchdog samples process-group RSS and kills a group that exceeds its cap.
 Cap-triggered termination is counted as `rss_cap`.

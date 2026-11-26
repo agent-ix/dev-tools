@@ -311,17 +311,12 @@ impl State {
             .fold(0_u32, |sum, request| sum.saturating_add(request.units))
     }
 
-    fn memory_used(&self, config: &Config) -> u64 {
+    fn memory_used(&self, _config: &Config) -> u64 {
         self.requests
             .iter()
             .filter(|request| request.phase == Phase::Running)
             .fold(0_u64, |sum, request| {
-                sum.saturating_add(
-                    request
-                        .memory_cap_bytes
-                        .or(config.memory_cap_bytes)
-                        .unwrap_or(0),
-                )
+                sum.saturating_add(request.memory_cap_bytes.unwrap_or(0))
             })
     }
 
@@ -422,10 +417,7 @@ impl State {
         }
         if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
             let budget = config.memory_budget_bytes.unwrap_or(0);
-            let cap = request
-                .memory_cap_bytes
-                .or(config.memory_cap_bytes)
-                .unwrap_or(0);
+            let cap = request.memory_cap_bytes.unwrap_or(0);
             if self.memory_used(config).saturating_add(cap) > budget {
                 return Ok(Some("memory_budget"));
             }

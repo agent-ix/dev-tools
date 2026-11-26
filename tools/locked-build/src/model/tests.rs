@@ -18,7 +18,6 @@ pub(crate) fn policy() -> Config {
     config.termination_grace_ms = 100;
     config.memory_admission = crate::config::MemoryAdmissionMode::LiveAvailable;
     config.memory_budget_bytes = None;
-    config.memory_cap_bytes = None;
     config
 }
 
@@ -263,7 +262,6 @@ fn lease_accounted_admission_uses_caps_without_reading_available_memory() -> Res
     let mut config = policy();
     config.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
     config.memory_budget_bytes = Some(1_000);
-    config.memory_cap_bytes = Some(400);
 
     let mut running = request(1, 0, 1, 0);
     running.phase = Phase::Running;

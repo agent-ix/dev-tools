@@ -17,7 +17,6 @@ fn store(root: &Path) -> Result<Store> {
     policy.maximum_load = 1_000_000.0;
     policy.memory_admission = crate::config::MemoryAdmissionMode::LiveAvailable;
     policy.memory_budget_bytes = None;
-    policy.memory_cap_bytes = None;
     policy.memory_cap_by_class.clear();
     let sample_path = root.join("sample.json");
     let sample = crate::config::HostSample {
@@ -32,6 +31,21 @@ fn store(root: &Path) -> Result<Store> {
     let path = root.join("policy.json");
     std::fs::write(&path, serde_json::to_vec(&policy)?)?;
     Store::open(&root.join("queue"), &path)
+}
+
+fn lease_accounted_store(root: &Path, capacity: u32, budget: u64) -> Result<Store> {
+    let initial = store(root)?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&initial.config_path)?)?;
+    policy.capacity_units = capacity;
+    policy.maximum_units = capacity;
+    policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+    policy.memory_budget_bytes = Some(budget);
+    policy.memory_per_job_bytes = 2_500_000_000;
+    policy.memory_per_job_by_class.clear();
+    policy.memory_cap_by_class.clear();
+    policy.cargo_build_jobs = Some(capacity);
+    std::fs::write(&initial.config_path, serde_json::to_vec(&policy)?)?;
+    Store::open(&initial.path, &initial.config_path)
 }
 
 fn queued(store: &Store) -> Result<RequestId> {
@@ -841,9 +855,11 @@ fn new_requests_use_per_class_memory_cap_overrides_and_default_cap() -> Result<(
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
-    policy.memory_cap_bytes = Some(512);
+    policy.memory_per_job_bytes = 512;
+    policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+    policy.memory_budget_bytes = Some(2_000);
     policy
-        .memory_cap_by_class
+        .memory_per_job_by_class
         .insert("must-fix".to_owned(), 768);
     policy.priority_classes.insert("must-fix".to_owned(), 2);
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
@@ -872,6 +888,221 @@ fn new_requests_use_per_class_memory_cap_overrides_and_default_cap() -> Result<(
         assert_eq!(state.find(&default_id)?.class, "periodic");
         Ok(())
     })?;
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
+fn lease_accounting_charges_effective_jobs_and_rejects_a_lease_larger_than_budget() -> Result<()> {
+    const GIB: u64 = 1_000_000_000;
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 33, 54 * GIB)?;
+    let one_job = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-ONE",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j1".into()],
+    )?;
+    let eight_jobs = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-EIGHT",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j8".into()],
+    )?;
+    let eight_job_lease = store.transaction(|state, _| {
+        assert_eq!(state.find(&one_job)?.memory_cap_bytes, Some(2_500_000_000));
+        assert_eq!(
+            state.find(&eight_jobs)?.memory_cap_bytes,
+            Some(20_000_000_000)
+        );
+        Ok(state.find(&eight_jobs)?.memory_cap_bytes)
+    })?;
+    let launch = lease_command_spec_for_enforcement(
+        LauncherPlatform::Linux,
+        "cargo",
+        &[],
+        eight_job_lease,
+        MemoryEnforcement::SystemdScope,
+    );
+    assert!(
+        launch
+            .arguments
+            .iter()
+            .any(|argument| argument == "MemoryMax=20000000000")
+    );
+    let too_large = enqueue(
+        &store,
+        "test:team:lead",
+        "TEST-MEMORY-TOO-LARGE",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j30".into()],
+    );
+    assert!(too_large.is_err_and(|error| error.to_string().contains("exceeds memory budget")));
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
+fn memory_budget_admits_exactly_twenty_one_one_job_leases_concurrently() -> Result<()> {
+    use std::sync::{Arc, Barrier};
+
+    const GIB: u64 = 1_000_000_000;
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 33, 54 * GIB)?;
+    let mut claims = Vec::new();
+    for sequence in 0..33_u32 {
+        let id = enqueue(
+            &store,
+            "test:team:lead",
+            &format!("TEST-MEMORY-{sequence}"),
+            1,
+            0,
+            None,
+            &["cargo".into(), "build".into(), "-j1".into()],
+        )?;
+        let identity = ProcessIdentity {
+            pid: u32::MAX - sequence,
+            started_seconds: 1,
+        };
+        let fence = claim_worker(&store, &id, &identity)?
+            .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+        claims.push((id, fence));
+    }
+
+    let claims = Arc::new(claims);
+    let barrier = Arc::new(Barrier::new(claims.len()));
+    let mut threads = Vec::new();
+    for index in 0..claims.len() {
+        let barrier = barrier.clone();
+        let claims = claims.clone();
+        let path = store.path.clone();
+        let config_path = store.config_path.clone();
+        threads.push(std::thread::spawn(move || -> Result<()> {
+            let store = Store::open(&path, &config_path)?;
+            barrier.wait();
+            let (id, fence) = &claims[index];
+            let _ = admit_worker(&store, id, fence, &AtomicBool::new(false))?;
+            Ok(())
+        }));
+    }
+    for thread in threads {
+        thread
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "concurrent admission thread panicked"))??;
+    }
+    for (id, fence) in claims.iter() {
+        let _ = admit_worker(&store, id, fence, &AtomicBool::new(false))?;
+    }
+    store.transaction(|state, _| {
+        let running = state
+            .requests
+            .iter()
+            .filter(|request| request.phase == Phase::Running)
+            .count();
+        let sum = state
+            .requests
+            .iter()
+            .filter(|request| request.phase == Phase::Running)
+            .map(|request| request.memory_cap_bytes.unwrap_or(0))
+            .sum::<u64>();
+        assert_eq!(running, 21);
+        assert_eq!(sum, 52_500_000_000);
+        assert!(sum <= 54 * GIB);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Trace: FR-015-AC-8
+#[test]
+fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Result<()> {
+    const GIB: u64 = 1_000_000_000;
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 3, 5 * GIB)?;
+    let mut requests = Vec::new();
+    let mut fences = Vec::new();
+    for sequence in 0..4_u32 {
+        let id = enqueue(
+            &store,
+            "test:team:lead",
+            &format!("TEST-MEMORY-RELEASE-{sequence}"),
+            1,
+            0,
+            None,
+            &["cargo".into(), "build".into(), "-j1".into()],
+        )?;
+        let fence = claim_worker(
+            &store,
+            &id,
+            &ProcessIdentity {
+                pid: u32::MAX - sequence,
+                started_seconds: 1,
+            },
+        )?
+        .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
+        requests.push(id);
+        fences.push(fence);
+    }
+    assert!(matches!(
+        admit_worker(&store, &requests[0], &fences[0], &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
+    assert!(matches!(
+        admit_worker(&store, &requests[1], &fences[1], &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
+    assert!(matches!(
+        admit_worker(&store, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+
+    let reopened = Store::open(&store.path, &store.config_path)?;
+    assert!(matches!(
+        admit_worker(&reopened, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+    reopened.transaction(|state, config| {
+        state.find_mut(&requests[0])?.stop = Some(StopReason::Cancelled);
+        state.finish(
+            &requests[0],
+            Completion::default(),
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+    assert!(matches!(
+        admit_worker(&reopened, &requests[2], &fences[2], &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
+    assert!(matches!(
+        admit_worker(&reopened, &requests[3], &fences[3], &AtomicBool::new(false))?,
+        Admission::Waiting(_)
+    ));
+    reopened.transaction(|state, config| {
+        state.finish(
+            &requests[1],
+            Completion {
+                code: Some(0),
+                ..Completion::default()
+            },
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+    assert!(matches!(
+        admit_worker(&reopened, &requests[3], &fences[3], &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
     Ok(())
 }
 

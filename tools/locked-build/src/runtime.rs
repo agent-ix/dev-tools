@@ -90,6 +90,20 @@ pub(crate) fn enqueue(
             .checked_add(1)
             .ok_or_else(|| Error::new(ErrorCode::State, "request sequence exhausted"))?;
         let id = RequestId(format!("{}:r{sequence}", state.store_id));
+        let class_name = class.unwrap_or("periodic");
+        let memory_cap_bytes =
+            if config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted {
+                Some(estimate_memory_lease(
+                    config,
+                    class_name,
+                    units,
+                    command,
+                    caller_cargo_build_jobs.as_deref(),
+                    state.used().saturating_add(units),
+                )?)
+            } else {
+                None
+            };
         state.requests.push(Request {
             id: id.clone(),
             sequence,
@@ -97,10 +111,8 @@ pub(crate) fn enqueue(
             ticket: ticket.to_owned(),
             units,
             priority,
-            class: class.unwrap_or("periodic").to_owned(),
-            memory_cap_bytes: class
-                .and_then(|name| config.memory_cap_by_class.get(name).copied())
-                .or(config.memory_cap_bytes),
+            class: class_name.to_owned(),
+            memory_cap_bytes,
             caller_cargo_build_jobs,
             caller_rust_test_threads,
             caller_cargo_incremental,
@@ -128,6 +140,64 @@ pub(crate) fn enqueue(
         state.event(&id, config, now, clock)?;
         Ok(id)
     })
+}
+
+fn estimate_memory_lease(
+    config: &crate::config::Config,
+    class: &str,
+    units: u32,
+    command: &[String],
+    caller_cargo_build_jobs: Option<&str>,
+    active_units: u32,
+) -> Result<u64> {
+    let is_cargo = command
+        .first()
+        .and_then(|program| std::path::Path::new(program).file_name())
+        .is_some_and(|name| name == "cargo");
+    let jobs = if is_cargo {
+        let mut arguments = command.get(1..).unwrap_or_default().to_vec();
+        prepare_build_environment(
+            config,
+            &mut arguments,
+            caller_cargo_build_jobs,
+            None,
+            active_units,
+        )
+        .record
+        .cargo_build_jobs
+        .unwrap_or(units)
+    } else {
+        units
+    };
+    let per_job = config
+        .memory_per_job_by_class
+        .get(class)
+        .copied()
+        .unwrap_or(config.memory_per_job_bytes);
+    let lease_bytes = u64::from(jobs).checked_mul(per_job).ok_or_else(|| {
+        Error::new(
+            ErrorCode::Request,
+            "requested memory lease size overflows the supported range",
+        )
+    })?;
+    if config
+        .memory_cap_by_class
+        .get(class)
+        .is_some_and(|cap| lease_bytes > *cap)
+    {
+        return Err(Error::new(
+            ErrorCode::Request,
+            format!("requested memory lease {lease_bytes} exceeds class `{class}` memory cap"),
+        ));
+    }
+    let budget = config.memory_budget_bytes.unwrap_or(0);
+    if lease_bytes > budget {
+        return Err(Error::new(
+            ErrorCode::Request,
+            format!("requested memory lease {lease_bytes} exceeds memory budget {budget}"),
+        ));
+    }
+    Ok(lease_bytes)
 }
 
 pub(crate) fn priority_for_class(store: &Store, class: &str) -> Result<u32> {
@@ -490,6 +560,7 @@ pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Re
     }
 }
 
+#[derive(Clone)]
 struct WorkerFence {
     identity: crate::model::ProcessIdentity,
     generation: u64,
@@ -769,10 +840,7 @@ fn start_command(
                 "command group ownership unavailable",
             ));
         }
-        Ok((
-            config.clone(),
-            request.memory_cap_bytes.or(config.memory_cap_bytes),
-        ))
+        Ok((config.clone(), request.memory_cap_bytes))
     })?;
     let (mut enforcement, _probe_launch_spec) = select_lease_launch(
         LauncherPlatform::current(),
@@ -822,7 +890,7 @@ fn start_command(
             request.caller_rust_test_threads.as_deref(),
             active_units,
         );
-        let memory_cap = request.memory_cap_bytes.or(config.memory_cap_bytes);
+        let memory_cap = request.memory_cap_bytes;
         let mut lease_record = environment.record;
         lease_record.memory_enforcement = enforcement;
         if enforcement == MemoryEnforcement::Refused {
@@ -1086,7 +1154,8 @@ fn prepare_build_environment(
             let scaled = (maximum_jobs / pressure_units).max(1);
             (Some(scaled.to_string()), Some(scaled), false)
         } else {
-            (None, None, false)
+            let jobs = active_units.max(1);
+            (Some(jobs.to_string()), Some(jobs), false)
         };
 
     let (rust_test_threads_env, rust_test_threads, rust_test_threads_clamped) =

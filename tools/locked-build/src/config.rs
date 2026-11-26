@@ -89,9 +89,12 @@ pub struct Config {
     pub memory_admission: MemoryAdmissionMode,
     /// Total build memory budget for `lease_accounted` admission.
     pub memory_budget_bytes: Option<u64>,
-    /// Default enforced memory cap for a lease, if configured.
-    pub memory_cap_bytes: Option<u64>,
-    /// Per-class memory-cap overrides.
+    /// Estimated memory used by one Cargo job or resource unit.
+    pub memory_per_job_bytes: u64,
+    /// Per-class per-job memory estimates.
+    #[serde(default)]
+    pub memory_per_job_by_class: BTreeMap<String, u64>,
+    /// Maximum lease size accepted for each class.
     #[serde(default)]
     pub memory_cap_by_class: BTreeMap<String, u64>,
     /// Action when a Linux systemd scope is unavailable.
@@ -128,8 +131,9 @@ impl Default for Config {
             priority_classes,
             real_cargo: None,
             memory_admission: MemoryAdmissionMode::LeaseAccounted,
-            memory_budget_bytes: Some(2 * 1024 * 1024 * 1024),
-            memory_cap_bytes: Some(1024 * 1024 * 1024),
+            memory_budget_bytes: Some(16 * 1024 * 1024 * 1024),
+            memory_per_job_bytes: 2_500_000_000,
+            memory_per_job_by_class: BTreeMap::new(),
             memory_cap_by_class: BTreeMap::new(),
             on_missing_cgroup: OnMissingCgroup::RssWatchdog,
         }
@@ -166,7 +170,8 @@ impl Config {
         let memory_budget = total_memory.saturating_sub(memory_reserve);
         config.memory_reserve_bytes = memory_reserve;
         config.memory_budget_bytes = Some(memory_budget);
-        config.memory_cap_bytes = Some((memory_budget / u64::from(cores)).max(1));
+        let safe_jobs = (memory_budget / config.memory_per_job_bytes).max(1);
+        config.cargo_build_jobs = Some(cores.min(u32::try_from(safe_jobs).unwrap_or(u32::MAX)));
 
         let disk_path = std::env::current_dir()?.canonicalize()?;
         let disks = Disks::new_with_refreshed_list();
@@ -273,8 +278,25 @@ impl Config {
         {
             return Err(invalid("priority_classes", "contains an unknown class"));
         }
-        if self.memory_cap_bytes.is_some_and(|cap| cap == 0) {
-            return Err(invalid("memory_cap_bytes", "must be positive when set"));
+        if self.memory_per_job_bytes == 0 {
+            return Err(invalid("memory_per_job_bytes", "must be positive"));
+        }
+        if self
+            .memory_per_job_by_class
+            .iter()
+            .any(|(class, estimate)| {
+                !matches!(class.as_str(), "must-fix" | "point" | "block" | "periodic")
+                    || *estimate == 0
+                    || self
+                        .memory_cap_by_class
+                        .get(class)
+                        .is_some_and(|class_cap| *estimate > *class_cap)
+            })
+        {
+            return Err(invalid(
+                "memory_per_job_by_class",
+                "estimates must be positive and no larger than the class memory cap",
+            ));
         }
         if self.memory_cap_by_class.iter().any(|(name, cap)| {
             !matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic") || *cap == 0
@@ -308,18 +330,6 @@ impl Config {
                     return Err(invalid(
                         "memory_budget_bytes",
                         "must be positive in lease_accounted mode",
-                    ));
-                }
-                let Some(cap) = self.memory_cap_bytes.filter(|cap| *cap > 0) else {
-                    return Err(invalid(
-                        "memory_cap_bytes",
-                        "is required in lease_accounted mode",
-                    ));
-                };
-                if cap > budget {
-                    return Err(invalid(
-                        "memory_cap_bytes",
-                        "cannot exceed memory_budget_bytes",
                     ));
                 }
                 if self.memory_cap_by_class.values().any(|cap| *cap > budget) {
@@ -499,7 +509,7 @@ mod tests {
 
         assert_eq!(config.memory_admission, MemoryAdmissionMode::LeaseAccounted);
         assert_eq!(config.memory_budget_bytes, Some(17_179_869_184));
-        assert_eq!(config.memory_cap_bytes, Some(4_294_967_296));
+        assert_eq!(config.memory_per_job_bytes, 2_500_000_000);
         config.validate()
     }
 
