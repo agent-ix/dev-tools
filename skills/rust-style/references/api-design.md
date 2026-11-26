@@ -1,6 +1,6 @@
 # API design
 
-Read this when defining a public API, cross-crate interface, domain type,
+Read this when defining a public API, cross-crate interface, any new interface type, domain type,
 constructor, trait, or documented module surface. In application code, use the
 same principles without introducing abstraction solely for future callers.
 
