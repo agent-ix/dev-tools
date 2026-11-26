@@ -60,6 +60,13 @@ the PR's comparison of those results.
   its defining crate, but public exposure without a justified use or contract
   is a finding. Compare doc comments with implementation: a promise the code
   does not fulfill is a separate finding. Apply [API design](../rust-style/references/api-design.md).
+- **Shared types:** For every new or changed type that crosses a boundary,
+  check that no existing type covers it, that the writer and reader of a format
+  use the same declared type, that a value used by two formats lives once, that
+  a derived field has one function, and that the PR lists what was searched and
+  where the other side is. A duplicate type or a hand-written mirror struct is
+  a finding (Medium; High when the two copies already disagree and a wrong
+  result is reachable). Apply [shared interface types](../rust-style/references/api-design.md#shared-interface-types).
 - **Implementation:** Find unfinished behavior, no-op trait methods, placeholder
   returns, debug output, and `todo!()` or `unimplemented!()` on a live path. A
   `TODO` comment is a finding when work required by this change remains undone;

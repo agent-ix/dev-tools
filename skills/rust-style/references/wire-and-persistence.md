@@ -71,3 +71,11 @@ let count = i32::try_from(len).unwrap_or(i32::MAX); // Only when clamping is the
 let budget = i128::from(used) + i128::from(requested);
 let stored = i64::try_from(budget).unwrap_or(i64::MAX);
 ```
+
+## One type per format
+
+The writer and the strict reader of a format are the same declared type (see
+[Shared interface types](api-design.md#shared-interface-types)). Never keep a
+second struct, `json!` branch, or member walker for the other side. A rule that
+only the reader enforces belongs in the shared type or its constructor, so the
+writer cannot produce what the reader refuses.
