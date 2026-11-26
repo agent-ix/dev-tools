@@ -8,6 +8,7 @@
   "memory_budget_bytes": null,
   "memory_cap_bytes": null,
   "memory_cap_by_class": {},
+  "on_missing_cgroup": "rss_watchdog",
   "disk_reserve_bytes": 21474836480,
   "disk_path": "/",
   "maximum_load": 8.0,

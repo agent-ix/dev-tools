@@ -89,10 +89,12 @@ Freed units accumulate for that request, including when it needs several units.
 An occupied host cannot make a feasible large request ineligible for reservation.
 
 When configured, lease policy sets `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`, and
-`CARGO_INCREMENTAL` for the command. Cargo jobs are pressure-scaled as
-`max(1, floor(configured_cargo_build_jobs / active_leased_units))`; active leased
-units include the command being started. See [the policy reference](reference.md)
-for optional fields and examples.
+`CARGO_INCREMENTAL` for the command. Explicit Cargo `-j`/`--jobs`, Rust
+`--test-threads`, and caller environment values take precedence and are clamped
+only to the configured maximum. Pressure scaling applies only when the caller
+did not set a value. Each request report includes the effective limits and
+whether either value was clamped. See [the policy reference](reference.md) for
+optional fields and examples.
 
 Use `--class must-fix`, `--class point`, `--class block`, or `--class periodic`
 to use the configured named priorities. Numeric `--priority` remains available;
@@ -118,6 +120,12 @@ reads live available memory. Per-class caps override the default cap. Linux
 applies caps through a transient systemd scope with swap disabled, while the
 macOS watchdog enforces the same cap from process-group RSS. A cap kill is
 reported under the existing `rss_cap` outcome.
+
+On Linux, the `on_missing_cgroup` policy controls what happens if a capped
+systemd scope cannot be started: `rss_watchdog` (the default) enforces the cap
+from process-group RSS, while `refuse` marks the lease failed without running
+the command. The request report records `systemd_scope`, `rss_watchdog`, or
+`refused` for the chosen enforcement path.
 
 Capacity shrink preserves running commands and reports overcommit.
 New admission waits until current capacity and resource reserves permit it.

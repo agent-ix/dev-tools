@@ -672,6 +672,7 @@ fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()>
             memory_budget_bytes: None,
             memory_cap_bytes: None,
             memory_cap_by_class: std::collections::BTreeMap::new(),
+            on_missing_cgroup: crate::config::OnMissingCgroup::RssWatchdog,
         })?,
     )?;
     let missing = root.path().join("not-created");
@@ -693,7 +694,15 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
         .env_remove("RUST_TEST_THREADS")
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("LOCKED_BUILD_LEASE");
-    apply_build_environment(&mut command, &policy, 2);
+    let mut arguments = Vec::new();
+    let prepared = prepare_build_environment(&policy, &mut arguments, None, None, 2);
+    if let Some(value) = prepared.cargo_build_jobs_env {
+        command.env("CARGO_BUILD_JOBS", value);
+    }
+    if let Some(value) = prepared.rust_test_threads_env {
+        command.env("RUST_TEST_THREADS", value);
+    }
+    apply_incremental_environment(&mut command, &policy);
     let output = command.output()?;
     assert!(output.status.success());
     let environment = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -716,6 +725,51 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
             "RUST_TEST_THREADS=3"
         ]
     );
+    assert_eq!(prepared.record.cargo_build_jobs, Some(4));
+    assert_eq!(prepared.record.rust_test_threads, Some(3));
+    Ok(())
+}
+
+#[test]
+fn explicit_cargo_limits_win_under_pressure_and_are_recorded() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.cargo_build_jobs = Some(16);
+    policy.rust_test_threads = Some(8);
+    let mut arguments = [
+        "test".to_owned(),
+        "-j".to_owned(),
+        "4".to_owned(),
+        "--".to_owned(),
+        "--test-threads=4".to_owned(),
+    ];
+
+    let prepared = prepare_build_environment(&policy, &mut arguments, Some("1"), Some("1"), 16);
+
+    assert_eq!(arguments, ["test", "-j", "4", "--", "--test-threads=4"]);
+    assert_eq!(prepared.cargo_build_jobs_env.as_deref(), Some("4"));
+    assert_eq!(prepared.rust_test_threads_env.as_deref(), Some("4"));
+    assert_eq!(prepared.record.cargo_build_jobs, Some(4));
+    assert!(!prepared.record.cargo_build_jobs_clamped);
+    assert_eq!(prepared.record.rust_test_threads, Some(4));
+    assert!(!prepared.record.rust_test_threads_clamped);
+    Ok(())
+}
+
+#[test]
+fn explicit_cargo_env_values_are_clamped_to_policy_maximum() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.cargo_build_jobs = Some(8);
+    policy.rust_test_threads = Some(4);
+    let mut arguments = Vec::new();
+
+    let prepared = prepare_build_environment(&policy, &mut arguments, Some("12"), Some("9"), 8);
+
+    assert_eq!(prepared.cargo_build_jobs_env.as_deref(), Some("8"));
+    assert_eq!(prepared.rust_test_threads_env.as_deref(), Some("4"));
+    assert_eq!(prepared.record.cargo_build_jobs, Some(8));
+    assert!(prepared.record.cargo_build_jobs_clamped);
+    assert_eq!(prepared.record.rust_test_threads, Some(4));
+    assert!(prepared.record.rust_test_threads_clamped);
     Ok(())
 }
 
@@ -817,6 +871,42 @@ fn non_linux_lease_launcher_uses_direct_command_for_watchdog_fallback() {
     );
     assert_eq!(spec.program, "/usr/bin/cargo");
     assert_eq!(spec.arguments, ["check"]);
+}
+
+#[test]
+fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> Result<()> {
+    let refused = select_memory_enforcement(
+        LauncherPlatform::Linux,
+        Some(4_096),
+        crate::config::OnMissingCgroup::Refuse,
+        |_| false,
+    );
+    assert_eq!(refused, MemoryEnforcement::Refused);
+
+    let fallback = select_memory_enforcement(
+        LauncherPlatform::Linux,
+        Some(4_096),
+        crate::config::OnMissingCgroup::RssWatchdog,
+        |_| false,
+    );
+    assert_eq!(fallback, MemoryEnforcement::RssWatchdog);
+    let recorded = LeaseRecord {
+        memory_enforcement: fallback,
+        ..LeaseRecord::default()
+    };
+    assert_eq!(
+        serde_json::to_value(recorded)?["memory_enforcement"],
+        "rss_watchdog"
+    );
+
+    let scoped = select_memory_enforcement(
+        LauncherPlatform::Linux,
+        Some(4_096),
+        crate::config::OnMissingCgroup::Refuse,
+        |_| true,
+    );
+    assert_eq!(scoped, MemoryEnforcement::SystemdScope);
+    Ok(())
 }
 
 #[test]

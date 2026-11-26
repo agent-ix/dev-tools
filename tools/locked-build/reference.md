@@ -10,7 +10,8 @@ A host policy is a JSON document defining build admission and supervision limits
 All fields are required except `sample_file`, `cargo_build_jobs`,
 `rust_test_threads`, `cargo_incremental`, `target_root`, `trim_after_ms`, and
 `max_bytes`, `priority_classes`, `real_cargo`, `memory_budget_bytes`,
-`memory_cap_bytes`, and `memory_cap_by_class`; unknown fields are rejected.
+`memory_cap_bytes`, `memory_cap_by_class`, and `on_missing_cgroup`; unknown
+fields are rejected.
 Relative filesystem paths resolve from the policy file's directory.
 The polling interval cannot exceed the hold deadline or termination grace.
 
@@ -25,6 +26,7 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `memory_budget_bytes` | Total concurrent lease-cap budget required by `lease_accounted` admission. |
 | `memory_cap_bytes` | Optional default cap for each lease. On Linux it is enforced with a systemd scope; on macOS the process-group RSS watchdog enforces it. |
 | `memory_cap_by_class` | Optional per-class cap overrides for `must-fix`, `point`, `block`, or `periodic`. |
+| `on_missing_cgroup` | `rss_watchdog` (default) enforces a configured cap with process-group RSS when a systemd scope is unavailable; `refuse` fails the lease without running the command. |
 | `disk_reserve_bytes` | Minimum free bytes for admission. |
 | `disk_path` | Directory selecting the measured filesystem. |
 | `maximum_load` | New admission requires load strictly below this value. |
@@ -46,10 +48,14 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `priority_classes` | Optional mapping of `must-fix`, `point`, `block`, and `periodic` to numeric priorities no greater than `maximum_priority`. |
 | `real_cargo` | Optional Cargo executable path used when this binary is invoked with `argv[0]` basename `cargo`. Relative paths resolve from the policy file. |
 
-Unset environment policy values leave their inherited variables unchanged. For
-`cargo_build_jobs`, active leased units include the command being started. The
-formula is `max(1, floor(configured_cargo_build_jobs / active_leased_units))`;
-for example, a policy value of 8 with 3 active units sets `CARGO_BUILD_JOBS=2`.
+Explicit command-line `-j`/`--jobs` and `--test-threads` values, and explicit
+`CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` environment values, take precedence
+over policy defaults. Values above the configured policy maximum are clamped;
+the request report records the effective values and clamp flags. Pressure
+scaling applies only when the caller leaves `CARGO_BUILD_JOBS` unset. Active
+leased units include the command being started. The formula is
+`max(1, floor(configured_cargo_build_jobs / active_leased_units))`; for example,
+a policy value of 8 with 3 active units sets `CARGO_BUILD_JOBS=2`.
 When target lifecycle is enabled, each owner receives one directory under
 `target_root`. Cleanup runs after the owner's last active lease, and is skipped
 unless the age or size limit is exceeded. Symlinks in the target tree are
@@ -74,6 +80,8 @@ commands as `systemd-run --user --scope --quiet -p MemoryMax=<cap>
 -p MemorySwapMax=0 -- <command>`. On macOS, where systemd-run is unavailable,
 the watchdog samples process-group RSS and kills a group that exceeds its cap.
 Cap-triggered termination is counted as `rss_cap`.
+The request report records whether the selected enforcement was `systemd_scope`,
+`rss_watchdog`, or `refused`.
 
 Resource observations use available RAM, available filesystem bytes, and one-minute load.
 An external sample includes exactly these fields:

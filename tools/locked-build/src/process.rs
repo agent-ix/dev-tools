@@ -26,7 +26,6 @@ pub(crate) struct Processes {
 struct Row {
     start: u64,
     group: Option<u32>,
-    #[cfg(not(target_os = "linux"))]
     memory_bytes: u64,
     arguments: Vec<String>,
     zombie: bool,
@@ -62,7 +61,6 @@ impl Processes {
                     Row {
                         start: process.start_time(),
                         group,
-                        #[cfg(not(target_os = "linux"))]
                         memory_bytes: process.memory(),
                         arguments: process
                             .cmd()
@@ -134,6 +132,10 @@ impl Processes {
         })
     }
 
+    pub(crate) fn can_sample_memory(&self) -> bool {
+        self.complete
+    }
+
     pub(crate) fn group_has_live_members(&self, group: u32, excluding: Option<u32>) -> bool {
         self.group_has_live_members_excluding(group, excluding.as_slice())
     }
@@ -149,7 +151,6 @@ impl Processes {
         })
     }
 
-    #[cfg(not(target_os = "linux"))]
     pub(crate) fn group_memory_bytes(&self, group: u32, excluding: &[u32]) -> Option<u64> {
         self.complete.then(|| {
             self.rows
@@ -219,7 +220,6 @@ mod tests {
                 Row {
                     start: 100,
                     group: Some(77),
-                    #[cfg(not(target_os = "linux"))]
                     memory_bytes: 4_096,
                     arguments: vec!["unrelated".into()],
                     zombie: false,
@@ -241,7 +241,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[test]
     fn rss_fallback_sums_only_live_group_members_and_excludes_watchdog() {
         let processes = Processes {

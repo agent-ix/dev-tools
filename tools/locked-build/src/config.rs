@@ -20,6 +20,17 @@ pub(crate) enum MemoryAdmissionMode {
     LeaseAccounted,
 }
 
+/// Action to take when a Linux user systemd scope cannot be started.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OnMissingCgroup {
+    /// Fail the lease without starting its command.
+    Refuse,
+    /// Enforce the configured cap with the process-group RSS watchdog.
+    #[default]
+    RssWatchdog,
+}
+
 /// Admission policy. Every capacity and limit is explicitly configured.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +105,9 @@ pub struct Config {
     /// Per-class memory-cap overrides.
     #[serde(default)]
     pub memory_cap_by_class: BTreeMap<String, u64>,
+    /// Action when a Linux systemd scope is unavailable.
+    #[serde(default)]
+    pub on_missing_cgroup: OnMissingCgroup,
 }
 
 impl Config {

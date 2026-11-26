@@ -34,6 +34,7 @@ pub(crate) fn policy() -> Config {
         memory_budget_bytes: None,
         memory_cap_bytes: None,
         memory_cap_by_class: std::collections::BTreeMap::new(),
+        on_missing_cgroup: crate::config::OnMissingCgroup::RssWatchdog,
     }
 }
 
@@ -56,6 +57,9 @@ fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
         units,
         priority,
         memory_cap_bytes: None,
+        caller_cargo_build_jobs: None,
+        caller_rust_test_threads: None,
+        lease_record: None,
         enqueued_at_ms: time,
         enqueued_clock_ms: time,
         started_at_ms: None,

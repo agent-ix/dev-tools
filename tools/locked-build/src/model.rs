@@ -67,6 +67,37 @@ pub(crate) struct CommandOutcome {
     pub signal: Option<i32>,
 }
 
+/// Effective build limits and memory enforcement selected for a running lease.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseRecord {
+    /// Effective Cargo jobs, when numeric and known.
+    pub cargo_build_jobs: Option<u32>,
+    /// True when an explicit Cargo jobs value was clamped to policy maximum.
+    pub cargo_build_jobs_clamped: bool,
+    /// Effective Rust test threads, when numeric and known.
+    pub rust_test_threads: Option<u32>,
+    /// True when an explicit Rust test thread value was clamped to policy maximum.
+    pub rust_test_threads_clamped: bool,
+    /// Memory enforcement applied to the command.
+    pub memory_enforcement: MemoryEnforcement,
+}
+
+/// Memory enforcement mechanism selected when the command starts.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEnforcement {
+    /// No cap was configured for this lease.
+    #[default]
+    NotConfigured,
+    /// A transient Linux systemd scope enforces the cap.
+    SystemdScope,
+    /// The watchdog samples process-group RSS and enforces the cap.
+    RssWatchdog,
+    /// The command was refused because no scope was available and policy requires one.
+    Refused,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
@@ -79,6 +110,15 @@ pub(crate) struct Request {
     /// Memory limit reserved for this lease when policy configures one.
     #[serde(default)]
     pub memory_cap_bytes: Option<u64>,
+    /// Caller-supplied build env values captured when the lease was queued.
+    #[serde(default)]
+    pub caller_cargo_build_jobs: Option<String>,
+    /// Caller-supplied test-thread env value captured when the lease was queued.
+    #[serde(default)]
+    pub caller_rust_test_threads: Option<String>,
+    /// Effective per-lease settings, populated when its command starts.
+    #[serde(default)]
+    pub lease_record: Option<LeaseRecord>,
     pub enqueued_at_ms: u64,
     pub enqueued_clock_ms: u64,
     pub started_at_ms: Option<u64>,
@@ -180,6 +220,14 @@ impl State {
                 || request.id.0 != format!("{}:r{}", self.store_id, request.sequence)
                 || request.units == 0
                 || request.memory_cap_bytes.is_some_and(|cap| cap == 0)
+                || request
+                    .caller_cargo_build_jobs
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 64)
+                || request
+                    .caller_rust_test_threads
+                    .as_ref()
+                    .is_some_and(|value| value.len() > 64)
                 || request.command.is_empty()
                 || request.command.len() > 256
                 || request

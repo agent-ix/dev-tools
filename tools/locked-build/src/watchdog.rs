@@ -11,7 +11,7 @@ use nix::unistd::{Pid, setpgid};
 
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{Completion, Phase, ProcessIdentity, RequestId, StopReason};
+use crate::model::{Completion, MemoryEnforcement, Phase, ProcessIdentity, RequestId, StopReason};
 use crate::process::{IdentityState, Processes, group_absent};
 use crate::runtime::{clock_ms, now_ms};
 use crate::store::Store;
@@ -153,16 +153,24 @@ fn observe(
         {
             request.stop = Some(StopReason::TimedOut);
         }
-        #[cfg(not(target_os = "linux"))]
-        if request.stop.is_none() {
-            let memory_cap = request.memory_cap_bytes.or(config.memory_cap_bytes);
-            if memory_cap.is_some_and(|cap| {
-                processes
-                    .group_memory_bytes(watchdog.pid, &[watchdog.pid])
-                    .is_some_and(|used| used > cap)
-            }) {
-                request.stop = Some(StopReason::MemoryCap);
-            }
+        if request.stop.is_none()
+            && request
+                .lease_record
+                .as_ref()
+                .and_then(|record| {
+                    rss_fallback_cap(
+                        record.memory_enforcement,
+                        request.memory_cap_bytes,
+                        config.memory_cap_bytes,
+                    )
+                })
+                .is_some_and(|cap| {
+                    processes
+                        .group_memory_bytes(watchdog.pid, &[watchdog.pid])
+                        .is_some_and(|used| used > cap)
+                })
+        {
+            request.stop = Some(StopReason::MemoryCap);
         }
         let worker_state = processes.identity(worker, id);
         let worker_lost = matches!(
@@ -199,6 +207,16 @@ fn observe(
             poll_ms: config.poll_ms,
         })
     })
+}
+
+fn rss_fallback_cap(
+    enforcement: MemoryEnforcement,
+    request_cap: Option<u64>,
+    policy_cap: Option<u64>,
+) -> Option<u64> {
+    (enforcement == MemoryEnforcement::RssWatchdog)
+        .then(|| request_cap.or(policy_cap))
+        .flatten()
 }
 
 fn enforce(

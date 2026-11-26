@@ -16,7 +16,10 @@ use serde::Serialize;
 
 use crate::config::HostSample;
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::{CommandOutcome, Completion, Event, Phase, Request, RequestId, StopReason};
+use crate::model::{
+    CommandOutcome, Completion, Event, LeaseRecord, MemoryEnforcement, Phase, Request, RequestId,
+    StopReason,
+};
 use crate::process::{IdentityState, Processes, group_absent};
 use crate::store::Store;
 
@@ -63,6 +66,8 @@ pub(crate) fn enqueue(
         ));
     }
     let cwd = std::env::current_dir()?;
+    let caller_cargo_build_jobs = std::env::var("CARGO_BUILD_JOBS").ok();
+    let caller_rust_test_threads = std::env::var("RUST_TEST_THREADS").ok();
     let now = now_ms()?;
     let clock = clock_ms()?;
     store.transaction(|state, config| {
@@ -93,6 +98,9 @@ pub(crate) fn enqueue(
             memory_cap_bytes: class
                 .and_then(|name| config.memory_cap_by_class.get(name).copied())
                 .or(config.memory_cap_bytes),
+            caller_cargo_build_jobs,
+            caller_rust_test_threads,
+            lease_record: None,
             enqueued_at_ms: now,
             enqueued_clock_ms: clock,
             started_at_ms: None,
@@ -219,6 +227,8 @@ pub struct RequestReport {
     pub exit_code: Option<i32>,
     /// Signal terminating the direct child when observed.
     pub signal: Option<i32>,
+    /// Effective settings and memory enforcement selected for this lease.
+    pub lease_record: Option<LeaseRecord>,
 }
 
 pub(crate) fn recover(store: &Store) -> Result<Vec<RequestId>> {
@@ -368,6 +378,7 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
                     reason: request.reason.clone(),
                     exit_code: request.exit_code,
                     signal: request.signal,
+                    lease_record: request.lease_record.clone(),
                 }
             })
             .collect();
@@ -616,7 +627,24 @@ fn supervise(
     watchdog_child: &mut Child,
     interrupted: &AtomicBool,
 ) -> Result<()> {
-    let mut child = start_command(store, request, fence, watchdog)?;
+    let mut child = match start_command(store, request, fence, watchdog)? {
+        CommandStart::Started(child) => child,
+        CommandStart::Refused => {
+            store.transaction(|state, config| {
+                state.finish(
+                    &request.id,
+                    Completion {
+                        reason: Some("memory_cap_unavailable"),
+                        ..Completion::default()
+                    },
+                    config,
+                    now_ms()?,
+                    clock_ms()?,
+                )
+            })?;
+            return Ok(());
+        }
+    };
     let mut status = None;
     loop {
         // A dead watchdog remains a group member until its parent reaps it.
@@ -693,7 +721,7 @@ fn start_command(
     request: &Request,
     fence: &WorkerFence,
     watchdog: &crate::model::ProcessIdentity,
-) -> Result<Child> {
+) -> Result<CommandStart> {
     store.transaction(|state, config| {
         fence.require_running(state.find(&request.id)?)?;
         if state.find(&request.id)?.watchdog.as_ref() != Some(watchdog)
@@ -719,21 +747,55 @@ fn start_command(
             .fold(0_u32, |total, candidate| {
                 total.saturating_add(candidate.units)
             });
-        let launch_spec = lease_command_spec(
-            LauncherPlatform::current(),
-            program,
-            &request.command[1..],
-            request.memory_cap_bytes.or(config.memory_cap_bytes),
+        let mut arguments = request.command[1..].to_vec();
+        let environment = prepare_build_environment(
+            config,
+            &mut arguments,
+            request.caller_cargo_build_jobs.as_deref(),
+            request.caller_rust_test_threads.as_deref(),
+            active_units,
         );
+        let memory_cap = request.memory_cap_bytes.or(config.memory_cap_bytes);
+        let mut enforcement = select_memory_enforcement(
+            LauncherPlatform::current(),
+            memory_cap,
+            config.on_missing_cgroup,
+            systemd_scope_available,
+        );
+        if enforcement == MemoryEnforcement::RssWatchdog && !Processes::read().can_sample_memory() {
+            enforcement = MemoryEnforcement::Refused;
+        }
+        let mut lease_record = environment.record;
+        lease_record.memory_enforcement = enforcement;
+        state.find_mut(&request.id)?.lease_record = Some(lease_record);
+        if enforcement == MemoryEnforcement::Refused {
+            return Ok(CommandStart::Refused);
+        }
+        let launch_spec =
+            lease_command_spec(LauncherPlatform::current(), program, &arguments, memory_cap);
         let mut command = Command::new(launch_spec.program);
         command
             .args(launch_spec.arguments)
             .current_dir(&request.cwd)
             .process_group(group);
-        apply_build_environment(&mut command, config, active_units);
+        if let Some(value) = environment.cargo_build_jobs_env {
+            command.env("CARGO_BUILD_JOBS", value);
+        }
+        if let Some(value) = environment.rust_test_threads_env {
+            command.env("RUST_TEST_THREADS", value);
+        }
+        apply_incremental_environment(&mut command, config);
         apply_target_environment(&mut command, config, request)?;
-        command.spawn().map_err(Into::into)
+        command
+            .spawn()
+            .map(CommandStart::Started)
+            .map_err(Into::into)
     })
+}
+
+enum CommandStart {
+    Started(Child),
+    Refused,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -793,21 +855,197 @@ fn lease_command_spec(
     }
 }
 
-fn apply_build_environment(
-    command: &mut Command,
+fn systemd_scope_available(memory_cap_bytes: u64) -> bool {
+    let spec = lease_command_spec(
+        LauncherPlatform::Linux,
+        "/usr/bin/true",
+        &[],
+        Some(memory_cap_bytes),
+    );
+    Command::new(spec.program)
+        .args(spec.arguments)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn select_memory_enforcement(
+    platform: LauncherPlatform,
+    memory_cap_bytes: Option<u64>,
+    on_missing: crate::config::OnMissingCgroup,
+    mut systemd_scope_probe: impl FnMut(u64) -> bool,
+) -> MemoryEnforcement {
+    let Some(memory_cap_bytes) = memory_cap_bytes else {
+        return MemoryEnforcement::NotConfigured;
+    };
+    if platform == LauncherPlatform::Linux && systemd_scope_probe(memory_cap_bytes) {
+        return MemoryEnforcement::SystemdScope;
+    }
+    match on_missing {
+        crate::config::OnMissingCgroup::Refuse => MemoryEnforcement::Refused,
+        crate::config::OnMissingCgroup::RssWatchdog => MemoryEnforcement::RssWatchdog,
+    }
+}
+
+struct PreparedBuildEnvironment {
+    cargo_build_jobs_env: Option<String>,
+    rust_test_threads_env: Option<String>,
+    record: LeaseRecord,
+}
+
+fn prepare_build_environment(
     config: &crate::config::Config,
+    arguments: &mut [String],
+    caller_cargo_build_jobs: Option<&str>,
+    caller_rust_test_threads: Option<&str>,
     active_units: u32,
-) {
-    if let Some(maximum_jobs) = config.cargo_build_jobs {
-        let pressure_units = active_units.max(1);
-        command.env(
-            "CARGO_BUILD_JOBS",
-            (maximum_jobs / pressure_units).max(1).to_string(),
-        );
+) -> PreparedBuildEnvironment {
+    let cargo_cli = clamp_argument(arguments, &["-j", "--jobs"], false, config.cargo_build_jobs);
+    let rust_cli = clamp_argument(
+        arguments,
+        &["--test-threads"],
+        true,
+        config.rust_test_threads,
+    );
+
+    let (cargo_build_jobs_env, cargo_build_jobs, cargo_build_jobs_clamped) =
+        if let Some(value) = cargo_cli {
+            (
+                value.value.map(|v| v.to_string()),
+                value.value.and_then(to_u32),
+                value.clamped,
+            )
+        } else if let Some(value) = caller_cargo_build_jobs {
+            let (effective, numeric, clamped) = clamp_env_value(value, config.cargo_build_jobs);
+            (Some(effective), numeric, clamped)
+        } else if let Some(maximum_jobs) = config.cargo_build_jobs {
+            let pressure_units = active_units.max(1);
+            let scaled = (maximum_jobs / pressure_units).max(1);
+            (Some(scaled.to_string()), Some(scaled), false)
+        } else {
+            (None, None, false)
+        };
+
+    let (rust_test_threads_env, rust_test_threads, rust_test_threads_clamped) =
+        if let Some(value) = rust_cli {
+            (
+                value.value.map(|v| v.to_string()),
+                value.value.and_then(to_u32),
+                value.clamped,
+            )
+        } else if let Some(value) = caller_rust_test_threads {
+            let (effective, numeric, clamped) = clamp_env_value(value, config.rust_test_threads);
+            (Some(effective), numeric, clamped)
+        } else if let Some(threads) = config.rust_test_threads {
+            (Some(threads.to_string()), Some(threads), false)
+        } else {
+            (None, None, false)
+        };
+
+    PreparedBuildEnvironment {
+        cargo_build_jobs_env,
+        rust_test_threads_env,
+        record: LeaseRecord {
+            cargo_build_jobs,
+            cargo_build_jobs_clamped,
+            rust_test_threads,
+            rust_test_threads_clamped,
+            memory_enforcement: MemoryEnforcement::NotConfigured,
+        },
     }
-    if let Some(threads) = config.rust_test_threads {
-        command.env("RUST_TEST_THREADS", threads.to_string());
+}
+
+struct ArgumentLimit {
+    value: Option<u64>,
+    clamped: bool,
+}
+
+fn clamp_argument(
+    arguments: &mut [String],
+    options: &[&str],
+    after_separator: bool,
+    maximum: Option<u32>,
+) -> Option<ArgumentLimit> {
+    let separator = arguments.iter().position(|argument| argument == "--");
+    let (start, end) = if after_separator {
+        (separator?.saturating_add(1), arguments.len())
+    } else {
+        (0, separator.unwrap_or(arguments.len()))
+    };
+    for index in start..end {
+        for option in options {
+            if arguments[index] == *option {
+                return Some(clamp_separate_argument(arguments, index, maximum));
+            }
+            if let Some(raw) = arguments[index].strip_prefix(&format!("{option}=")) {
+                let parsed = raw.parse::<u64>().ok();
+                let clamped =
+                    parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+                if clamped {
+                    arguments[index] = format!("{option}={}", maximum.unwrap_or_default());
+                }
+                return Some(ArgumentLimit {
+                    value: parsed
+                        .map(|value| maximum.map_or(value, |max| value.min(u64::from(max)))),
+                    clamped,
+                });
+            }
+            if *option == "-j"
+                && let Some(raw) = arguments[index].strip_prefix("-j")
+                && !raw.is_empty()
+            {
+                let raw = raw.strip_prefix('=').unwrap_or(raw);
+                let parsed = raw.parse::<u64>().ok();
+                let clamped =
+                    parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+                if clamped {
+                    arguments[index] = format!("-j{}", maximum.unwrap_or_default());
+                }
+                return Some(ArgumentLimit {
+                    value: parsed
+                        .map(|value| maximum.map_or(value, |max| value.min(u64::from(max)))),
+                    clamped,
+                });
+            }
+        }
     }
+    None
+}
+
+fn clamp_separate_argument(
+    arguments: &mut [String],
+    index: usize,
+    maximum: Option<u32>,
+) -> ArgumentLimit {
+    let Some(next) = arguments.get(index + 1) else {
+        return ArgumentLimit {
+            value: None,
+            clamped: false,
+        };
+    };
+    let parsed = next.parse::<u64>().ok();
+    let clamped = parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+    if clamped {
+        arguments[index + 1] = maximum.unwrap_or_default().to_string();
+    }
+    ArgumentLimit {
+        value: parsed.map(|value| maximum.map_or(value, |max| value.min(u64::from(max)))),
+        clamped,
+    }
+}
+
+fn clamp_env_value(value: &str, maximum: Option<u32>) -> (String, Option<u32>, bool) {
+    let parsed = value.parse::<u64>().ok();
+    let clamped = parsed.is_some_and(|value| maximum.is_some_and(|max| value > u64::from(max)));
+    let effective = parsed.map(|value| maximum.map_or(value, |max| value.min(u64::from(max))));
+    let output = effective.map_or_else(|| value.to_owned(), |value| value.to_string());
+    (output, effective.and_then(to_u32), clamped)
+}
+
+fn to_u32(value: u64) -> Option<u32> {
+    u32::try_from(value).ok()
+}
+
+fn apply_incremental_environment(command: &mut Command, config: &crate::config::Config) {
     if let Some(incremental) = config.cargo_incremental {
         command.env("CARGO_INCREMENTAL", if incremental { "1" } else { "0" });
     }

@@ -7,6 +7,22 @@ use std::process::Child;
 
 use super::*;
 
+#[test]
+fn only_rss_watchdog_enforcement_uses_the_process_rss_cap() {
+    assert_eq!(
+        rss_fallback_cap(MemoryEnforcement::RssWatchdog, Some(100), Some(200)),
+        Some(100)
+    );
+    assert_eq!(
+        rss_fallback_cap(MemoryEnforcement::RssWatchdog, None, Some(200)),
+        Some(200)
+    );
+    assert_eq!(
+        rss_fallback_cap(MemoryEnforcement::SystemdScope, Some(100), Some(200)),
+        None
+    );
+}
+
 fn fixture(mode: &str, root: &Path) -> Result<Command> {
     let mut command = Command::new(std::env::current_exe()?);
     command
