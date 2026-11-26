@@ -474,9 +474,8 @@ mod tests {
         let home = root.path().join("home");
         std::fs::create_dir_all(&home)?;
         let current_exe = std::env::current_exe()?;
-        let search_path = std::env::var_os("PATH");
 
-        install_tools_with_measurement(&home, &current_exe, search_path.as_deref(), || {
+        install_tools_with_measurement(&home, &current_exe, None, || {
             let mut config: Config =
                 serde_json::from_str(include_str!("../policy.example.json"))
                     .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
@@ -511,7 +510,7 @@ mod tests {
             std::fs::metadata(&record)?.modified()?,
             std::fs::metadata(home.join(".zshrc"))?.modified()?,
         ];
-        install_tools_with_measurement(&home, &current_exe, search_path.as_deref(), || {
+        install_tools_with_measurement(&home, &current_exe, None, || {
             Err(Error::new(
                 ErrorCode::State,
                 "existing policy should prevent another measurement",
