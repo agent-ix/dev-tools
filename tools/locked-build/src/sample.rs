@@ -1316,7 +1316,7 @@ mod tests {
                     "kind": "terra_wrapper_fdinfo",
                     "proc_root": root.path().join("missing-proc"),
                     "owner_uid": 1000,
-                    "wrapper_path": "/home/peter/dev/worktrees/locked-build.sh",
+                    "wrapper_path": "/home/builder/dev/worktrees/locked-build.sh",
                     "lane_paths": lane_paths
                 }
             }))?,
@@ -1440,7 +1440,7 @@ mod tests {
     #[test]
     fn terra_counts_admitted_paths_but_not_queued_or_unrelated_wrappers() -> TestResult {
         let root = tempfile::tempdir()?;
-        let wrapper = PathBuf::from("/home/peter/dev/worktrees/locked-build.sh");
+        let wrapper = PathBuf::from("/home/builder/dev/worktrees/locked-build.sh");
         let lane_one = PathBuf::from("/tmp/quire-heavy-check.lane1.lock");
         let lane_two = PathBuf::from("/tmp/quire-heavy-check.lane2.lock");
         let lane_three = PathBuf::from("/tmp/quire-heavy-check.lane3.lock");
@@ -1451,7 +1451,7 @@ mod tests {
             101,
             300,
             'S',
-            &["bash", "/home/peter/dev/worktrees/locked-build.sh", "build"],
+            &["bash", "/home/builder/dev/worktrees/locked-build.sh", "build"],
         )?;
         fs::write(
             process.join("fdinfo/4"),
@@ -1470,7 +1470,7 @@ mod tests {
             101,
             301,
             'S',
-            &["bash", "/home/peter/dev/worktrees/locked-build.sh", "test"],
+            &["bash", "/home/builder/dev/worktrees/locked-build.sh", "test"],
         )?;
         fs::write(
             inherited.join("fdinfo/6"),
@@ -1484,7 +1484,7 @@ mod tests {
             103,
             302,
             'S',
-            &["bash", "/home/peter/dev/worktrees/locked-build.sh", "build"],
+            &["bash", "/home/builder/dev/worktrees/locked-build.sh", "build"],
         )?;
         fs::write(queued.join("fdinfo/7"), "pos:\t0\nflags:\t0100002\n")?;
         std::os::unix::fs::symlink(&lane_three, queued.join("fd/7"))?;
@@ -1495,7 +1495,7 @@ mod tests {
             104,
             303,
             'S',
-            &["bash", "/home/peter/dev/worktrees/other.sh", "build"],
+            &["bash", "/home/builder/dev/worktrees/other.sh", "build"],
         )?;
         fs::write(
             unrelated.join("fdinfo/8"),
@@ -1527,10 +1527,10 @@ mod tests {
     #[test]
     fn titan_controller_and_lane_sources_deduplicate_same_live_process() -> TestResult {
         let root = tempfile::tempdir()?;
-        let prefix = PathBuf::from("/home/peter/dev/worktrees/arch-test-target-");
-        let lane = PathBuf::from("/home/peter/dev/worktrees/arch-test-target-unseen-repo.lock");
+        let prefix = PathBuf::from("/home/builder/dev/worktrees/arch-test-target-");
+        let lane = PathBuf::from("/home/builder/dev/worktrees/arch-test-target-unseen-repo.lock");
         let another_lane =
-            PathBuf::from("/home/peter/dev/worktrees/arch-test-target-unseen-repo-2.lock");
+            PathBuf::from("/home/builder/dev/worktrees/arch-test-target-unseen-repo-2.lock");
         let process = proc_entry(root.path(), 201, 1, 201, 901, 'S', &[])?;
         fs::write(
             process.join("fdinfo/9"),
@@ -1550,7 +1550,7 @@ mod tests {
         std::os::unix::fs::symlink(&lane, inherited.join("fd/11"))?;
         let unadmitted = proc_entry(root.path(), 303, 1, 303, 903, 'S', &[])?;
         let independent_lane =
-            PathBuf::from("/home/peter/dev/worktrees/arch-test-target-another-repo-4.lock");
+            PathBuf::from("/home/builder/dev/worktrees/arch-test-target-another-repo-4.lock");
         fs::write(
             unadmitted.join("fdinfo/12"),
             "lock:\t1: FLOCK ADVISORY WRITE 303 00:33:458 END\n",
@@ -1712,7 +1712,7 @@ mod tests {
             busy_source: BusySource::TerraWrapperFdinfo {
                 proc_root: root.path().join("missing-proc"),
                 owner_uid: 1000,
-                wrapper_path: PathBuf::from("/home/peter/dev/worktrees/locked-build.sh"),
+                wrapper_path: PathBuf::from("/home/builder/dev/worktrees/locked-build.sh"),
                 lane_paths: (1..=12)
                     .map(|lane| PathBuf::from(format!("/tmp/lane{lane}.lock")))
                     .collect(),
