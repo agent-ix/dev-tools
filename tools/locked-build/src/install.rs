@@ -259,6 +259,7 @@ fn resolve_tool_executable(
 fn copy_file_if_changed(source: &Path, destination: &Path) -> Result<()> {
     let source_contents = std::fs::read(source)?;
     if std::fs::read(destination).ok().as_deref() == Some(source_contents.as_slice()) {
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
         return Ok(());
     }
     let temporary = destination.with_extension("tmp");
@@ -268,6 +269,7 @@ fn copy_file_if_changed(source: &Path, destination: &Path) -> Result<()> {
     output.write_all(&source_contents)?;
     output.sync_all()?;
     std::fs::rename(temporary, destination)?;
+    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -423,6 +425,27 @@ mod tests {
         copy_file_if_changed(&source, &destination)?;
         assert_eq!(std::fs::metadata(&destination)?.modified()?, first);
         assert_eq!(std::fs::read(destination)?, b"binary bytes");
+        Ok(())
+    }
+
+    #[test]
+    fn installed_binary_copy_repairs_executable_mode_without_rewriting_contents() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let destination = root.path().join("bin/locked-build");
+        std::fs::write(&source, b"binary bytes")?;
+        std::fs::create_dir_all(destination.parent().ok_or_else(|| {
+            Error::new(ErrorCode::Configuration, "binary destination has no parent")
+        })?)?;
+        std::fs::write(&destination, b"binary bytes")?;
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o644))?;
+        let first_modified = std::fs::metadata(&destination)?.modified()?;
+
+        copy_file_if_changed(&source, &destination)?;
+
+        let metadata = std::fs::metadata(&destination)?;
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
+        assert_eq!(metadata.modified()?, first_modified);
         Ok(())
     }
 
