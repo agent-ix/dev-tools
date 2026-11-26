@@ -6,6 +6,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -43,9 +44,10 @@ enum BusySource {
     MacosLockfChildren {
         lock_paths: Vec<PathBuf>,
     },
-    LinuxFdinfoLockPaths {
+    TerraWrapperFdinfo {
         proc_root: PathBuf,
         owner_uid: u32,
+        wrapper_path: PathBuf,
         lane_paths: Vec<PathBuf>,
     },
     TitanControllerJobsAndArchLocks {
@@ -156,7 +158,7 @@ impl SamplerConfig {
         let source_matches = matches!(
             (&self.host[..], &self.busy_source),
             ("draco", BusySource::MacosLockfChildren { .. })
-                | ("terra", BusySource::LinuxFdinfoLockPaths { .. })
+                | ("terra", BusySource::TerraWrapperFdinfo { .. })
                 | ("titan", BusySource::TitanControllerJobsAndArchLocks { .. })
                 | ("luna", BusySource::CargoProcessTrees { .. })
         );
@@ -170,12 +172,14 @@ impl SamplerConfig {
             BusySource::MacosLockfChildren { lock_paths } => {
                 validate_path_list(lock_paths, 6, "Draco lock paths")?;
             }
-            BusySource::LinuxFdinfoLockPaths {
+            BusySource::TerraWrapperFdinfo {
                 proc_root,
+                wrapper_path,
                 lane_paths,
                 ..
             } => {
                 validate_absolute(proc_root, "proc_root")?;
+                validate_absolute(wrapper_path, "Terra wrapper path")?;
                 validate_path_list(lane_paths, 12, "Terra lane paths")?;
             }
             BusySource::TitanControllerJobsAndArchLocks {
@@ -386,7 +390,7 @@ fn metric<T: std::fmt::Display>(
 fn busy_source_name(source: &BusySource) -> &'static str {
     match source {
         BusySource::MacosLockfChildren { .. } => "process_table",
-        BusySource::LinuxFdinfoLockPaths { .. } => "lock_ownership",
+        BusySource::TerraWrapperFdinfo { .. } => "wrapper_lane_ownership",
         BusySource::TitanControllerJobsAndArchLocks { .. } => "controller_and_arch_locks",
         BusySource::CargoProcessTrees { .. } => "cargo_processes",
     }
@@ -450,11 +454,12 @@ fn directory_bytes(path: &Path) -> std::result::Result<u64, String> {
 fn busy_count(source: &BusySource) -> std::result::Result<u64, String> {
     match source {
         BusySource::MacosLockfChildren { lock_paths } => macos_lockf_busy(lock_paths),
-        BusySource::LinuxFdinfoLockPaths {
+        BusySource::TerraWrapperFdinfo {
             proc_root,
             owner_uid,
+            wrapper_path,
             lane_paths,
-        } => fdinfo_lock_holders(proc_root, *owner_uid, lane_paths),
+        } => terra_wrapper_busy(proc_root, *owner_uid, wrapper_path, lane_paths),
         BusySource::TitanControllerJobsAndArchLocks {
             proc_root,
             owner_uid,
@@ -810,16 +815,153 @@ fn cargo_subcommand<'a>(arguments: &'a [OsString], command_name: &str) -> Option
     None
 }
 
-fn fdinfo_lock_holders(
+fn terra_wrapper_busy(
     proc_root: &Path,
     owner_uid: u32,
+    wrapper_path: &Path,
     lock_paths: &[PathBuf],
 ) -> std::result::Result<u64, String> {
-    let processes = process_table(proc_root, owner_uid, false)?;
-    let lanes = fdinfo_lock_holder_groups(proc_root, &processes, |target| {
-        lock_paths.iter().any(|path| path == target)
-    })?;
+    let lanes = terra_wrapper_lock_paths(proc_root, owner_uid, wrapper_path, lock_paths)?;
     u64::try_from(lanes.len()).map_err(|_| "lock lane count overflow".into())
+}
+
+fn terra_wrapper_lock_paths(
+    proc_root: &Path,
+    owner_uid: u32,
+    wrapper_path: &Path,
+    lock_paths: &[PathBuf],
+) -> std::result::Result<BTreeSet<PathBuf>, String> {
+    let lane_paths = lock_paths.iter().collect::<BTreeSet<_>>();
+    let entries = fs::read_dir(proc_root)
+        .map_err(|error| format!("process table enumeration failed: {}", error.kind()))?;
+    let mut pids_seen = 0_usize;
+    let mut total_source_bytes = 0_usize;
+    let mut total_fd_entries = 0_usize;
+    let mut total_fdinfo_entries = 0_usize;
+    let mut total_fdinfo_bytes = 0_usize;
+    let mut active_lanes = BTreeSet::new();
+
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("process table enumeration failed: {}", error.kind()))?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        pids_seen += 1;
+        if pids_seen > PROCESS_LIMIT {
+            return Err("process table entry limit exceeded".into());
+        }
+
+        let process_dir = proc_root.join(pid.to_string());
+        let metadata = match fs::metadata(&process_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("process metadata read failed: {}", error.kind())),
+        };
+        if !metadata.is_dir() || metadata.uid() != owner_uid {
+            continue;
+        }
+
+        let stat_path = process_dir.join("stat");
+        let stat = match read_bounded(&stat_path, 16_384) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("process stat read failed: {}", error.kind())),
+        };
+        add_process_bytes(&mut total_source_bytes, stat.len())?;
+        if !proc_stat_comm_is(&stat, b"bash")? {
+            continue;
+        }
+        let (_, _, _, state) = parse_proc_stat(&stat)?;
+        if state == 'Z' {
+            continue;
+        }
+
+        let cmdline = match read_bounded(&process_dir.join("cmdline"), 65_536) {
+            Ok(cmdline) => cmdline,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("wrapper cmdline read failed: {}", error.kind())),
+        };
+        add_process_bytes(&mut total_source_bytes, cmdline.len())?;
+        let arguments = cmdline
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+            .map(|argument| OsString::from_vec(argument.to_vec()))
+            .collect::<Vec<_>>();
+        if arguments.is_empty() {
+            return Err("bash cmdline is empty during wrapper enumeration".into());
+        }
+        if !arguments
+            .get(1)
+            .is_some_and(|argument| argument == wrapper_path.as_os_str())
+        {
+            continue;
+        }
+
+        let fd_dir = process_dir.join("fd");
+        let entries = match fs::read_dir(&fd_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("wrapper fd enumeration failed: {}", error.kind())),
+        };
+        let mut process_fd_entries = 0_usize;
+        for fd_entry in entries {
+            let fd_entry = fd_entry
+                .map_err(|error| format!("wrapper fd enumeration failed: {}", error.kind()))?;
+            process_fd_entries += 1;
+            total_fd_entries += 1;
+            if process_fd_entries > FD_LIMIT_PER_PROCESS || total_fd_entries > FDINFO_ENTRY_LIMIT {
+                return Err("wrapper fd entry limit exceeded".into());
+            }
+            let fd_name = fd_entry.file_name();
+            let descriptor_target = match fs::read_link(fd_entry.path()) {
+                Ok(target) => target,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!("wrapper fd target read failed: {}", error.kind()));
+                }
+            };
+            if !lane_paths.contains(&descriptor_target) {
+                continue;
+            }
+            let fdinfo_path = process_dir.join("fdinfo").join(fd_name);
+            let fdinfo = match read_bounded(&fdinfo_path, 16_384) {
+                Ok(fdinfo) => fdinfo,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!("wrapper fdinfo read failed: {}", error.kind()));
+                }
+            };
+            total_fdinfo_entries += 1;
+            total_fdinfo_bytes = total_fdinfo_bytes
+                .checked_add(fdinfo.len())
+                .ok_or_else(|| "wrapper fdinfo byte count overflow".to_owned())?;
+            check_fdinfo_bounds(total_fdinfo_entries, total_fdinfo_bytes)?;
+            if has_flock_write_lock(&fdinfo) {
+                active_lanes.insert(descriptor_target);
+            }
+        }
+    }
+    Ok(active_lanes)
+}
+
+fn proc_stat_comm_is(stat: &[u8], expected: &[u8]) -> std::result::Result<bool, String> {
+    let start = stat
+        .iter()
+        .position(|byte| *byte == b'(')
+        .ok_or_else(|| "process stat has no command start".to_owned())?;
+    let end = stat
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .ok_or_else(|| "process stat has no command terminator".to_owned())?;
+    if end <= start {
+        return Err("process stat command field is malformed".into());
+    }
+    Ok(&stat[start + 1..end] == expected)
 }
 
 fn fdinfo_lock_holder_groups(
@@ -1171,9 +1313,10 @@ mod tests {
                 "host": "terra",
                 "capacity_units": 12,
                 "busy_source": {
-                    "kind": "linux_fdinfo_lock_paths",
+                    "kind": "terra_wrapper_fdinfo",
                     "proc_root": root.path().join("missing-proc"),
                     "owner_uid": 1000,
+                    "wrapper_path": "/home/peter/dev/worktrees/locked-build.sh",
                     "lane_paths": lane_paths
                 }
             }))?,
@@ -1222,9 +1365,14 @@ mod tests {
             stat_fields.push("0".into());
         }
         stat_fields.push(start_time.to_string());
+        let comm = arguments
+            .first()
+            .and_then(|argument| Path::new(argument).file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "test-process".into());
         fs::write(
             path.join("stat"),
-            format!("{pid} (test process) {}\n", stat_fields.join(" ")),
+            format!("{pid} ({comm}) {}\n", stat_fields.join(" ")),
         )?;
         let mut cmdline = Vec::new();
         for argument in arguments {
@@ -1290,11 +1438,21 @@ mod tests {
 
     /// Trace: FR-015-AC-15
     #[test]
-    fn fdinfo_counts_distinct_lane_paths_across_inherited_descriptors() -> TestResult {
+    fn terra_counts_admitted_paths_but_not_queued_or_unrelated_wrappers() -> TestResult {
         let root = tempfile::tempdir()?;
-        let lane_one = PathBuf::from("/tmp/nonexistent-lane-one.lock");
-        let lane_two = PathBuf::from("/tmp/nonexistent-lane-two.lock");
-        let process = proc_entry(root.path(), 101, 1, 101, 300, 'S', &[])?;
+        let wrapper = PathBuf::from("/home/peter/dev/worktrees/locked-build.sh");
+        let lane_one = PathBuf::from("/tmp/quire-heavy-check.lane1.lock");
+        let lane_two = PathBuf::from("/tmp/quire-heavy-check.lane2.lock");
+        let lane_three = PathBuf::from("/tmp/quire-heavy-check.lane3.lock");
+        let process = proc_entry(
+            root.path(),
+            101,
+            1,
+            101,
+            300,
+            'S',
+            &["bash", "/home/peter/dev/worktrees/locked-build.sh", "build"],
+        )?;
         fs::write(
             process.join("fdinfo/4"),
             "pos:\t0\nflags:\t0100002\nlock:\t1: FLOCK ADVISORY WRITE 101 00:33:123 END\n",
@@ -1305,16 +1463,62 @@ mod tests {
         )?;
         std::os::unix::fs::symlink(&lane_one, process.join("fd/4"))?;
         std::os::unix::fs::symlink(&lane_two, process.join("fd/5"))?;
-        let inherited = proc_entry(root.path(), 102, 101, 101, 301, 'S', &[])?;
+        let inherited = proc_entry(
+            root.path(),
+            102,
+            101,
+            101,
+            301,
+            'S',
+            &["bash", "/home/peter/dev/worktrees/locked-build.sh", "test"],
+        )?;
         fs::write(
             inherited.join("fdinfo/6"),
             "pos:\t0\nflags:\t0100002\nlock:\t1: FLOCK ADVISORY WRITE 102 00:33:123 END\n",
         )?;
         std::os::unix::fs::symlink(&lane_one, inherited.join("fd/6"))?;
+        let queued = proc_entry(
+            root.path(),
+            103,
+            1,
+            103,
+            302,
+            'S',
+            &["bash", "/home/peter/dev/worktrees/locked-build.sh", "build"],
+        )?;
+        fs::write(queued.join("fdinfo/7"), "pos:\t0\nflags:\t0100002\n")?;
+        std::os::unix::fs::symlink(&lane_three, queued.join("fd/7"))?;
+        let unrelated = proc_entry(
+            root.path(),
+            104,
+            1,
+            104,
+            303,
+            'S',
+            &["bash", "/home/peter/dev/worktrees/other.sh", "build"],
+        )?;
+        fs::write(
+            unrelated.join("fdinfo/8"),
+            "pos:\t0\nflags:\t0100002\nlock:\t1: FLOCK ADVISORY WRITE 104 00:33:125 END\n",
+        )?;
+        std::os::unix::fs::symlink(&lane_three, unrelated.join("fd/8"))?;
 
-        assert_eq!(
-            fdinfo_lock_holders(root.path(), 1000, &[lane_one, lane_two])?,
-            2
+        let owner_uid = fs::metadata(root.path())?.uid();
+        let active = terra_wrapper_lock_paths(
+            root.path(),
+            owner_uid,
+            &wrapper,
+            &[lane_one.clone(), lane_two.clone(), lane_three.clone()],
+        )?;
+        assert_eq!(active, BTreeSet::from([lane_one, lane_two]));
+        assert!(
+            terra_wrapper_lock_paths(
+                root.path(),
+                owner_uid.wrapping_add(1),
+                &wrapper,
+                &[lane_three],
+            )?
+            .is_empty()
         );
         Ok(())
     }
@@ -1505,9 +1709,10 @@ mod tests {
             schema_version: 1,
             host: "terra".into(),
             capacity_units: Some(12),
-            busy_source: BusySource::LinuxFdinfoLockPaths {
+            busy_source: BusySource::TerraWrapperFdinfo {
                 proc_root: root.path().join("missing-proc"),
                 owner_uid: 1000,
+                wrapper_path: PathBuf::from("/home/peter/dev/worktrees/locked-build.sh"),
                 lane_paths: (1..=12)
                     .map(|lane| PathBuf::from(format!("/tmp/lane{lane}.lock")))
                     .collect(),
@@ -1528,11 +1733,9 @@ mod tests {
                 .exposition
                 .contains("ix_build_target_dir_bytes{host=\"terra\",repo=\"sample\"} 13")
         );
-        assert!(
-            result
-                .exposition
-                .contains("ix_build_probe_unavailable{host=\"terra\",probe=\"lock_ownership\"} 1")
-        );
+        assert!(result.exposition.contains(
+            "ix_build_probe_unavailable{host=\"terra\",probe=\"wrapper_lane_ownership\"} 1"
+        ));
         assert!(!result.exposition.contains("ix_build_slots_busy"));
         assert_eq!(result.failures.len(), 1);
         Ok(())

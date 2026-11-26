@@ -66,9 +66,10 @@ absolute `path` fields. For example, Terra's source configuration is:
   "host": "terra",
   "capacity_units": 12,
   "busy_source": {
-    "kind": "linux_fdinfo_lock_paths",
+    "kind": "terra_wrapper_fdinfo",
     "proc_root": "/proc",
     "owner_uid": 1000,
+    "wrapper_path": "/home/<user>/dev/worktrees/locked-build.sh",
     "lane_paths": [
       "/tmp/quire-heavy-check.lane1.lock", "/tmp/quire-heavy-check.lane2.lock",
       "/tmp/quire-heavy-check.lane3.lock", "/tmp/quire-heavy-check.lane4.lock",
@@ -82,13 +83,18 @@ absolute `path` fields. For example, Terra's source configuration is:
 }
 ```
 
-The `lane_paths` array must contain all 12 configured ordinary lane paths. Host source
-types and capacities are constrained as follows:
+The `lane_paths` array must contain all 12 configured ordinary lane paths. Terra
+filters process directories by `owner_uid`, reads `stat` to select `bash`, and then
+matches only cmdlines whose `argv[1]` equals `wrapper_path`. It reads fdinfo only after
+the corresponding fd symlink target matches a configured lane path. A matching lane
+counts only when fdinfo contains a `FLOCK WRITE` record, so queued wrappers with an
+open but unlocked lane descriptor do not count as busy. Host source types and
+capacities are constrained as follows:
 
 | Host | Busy source | Configured capacity |
 |---|---|---:|
 | Draco | Distinct configured slot paths whose live `/usr/bin/lockf -t 0` process has a child | 6 |
-| Terra | Distinct configured paths held by a process with a matching `/proc/<pid>/fdinfo` write lock | 12 |
+| Terra | Distinct configured lane paths with a `FLOCK WRITE` record held by the configured wrapper process | 12 |
 | Titan | Live admitted jobs from the cargo-resource-controller registry plus distinct arch-test lock paths outside those jobs' process groups | omitted |
 | Luna | Top-level `cargo` process trees running build, test, or check commands | omitted |
 
