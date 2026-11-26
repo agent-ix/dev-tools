@@ -95,16 +95,69 @@ capacities are constrained as follows:
 |---|---|---:|
 | Draco | Distinct configured slot paths whose live `/usr/bin/lockf -t 0` process has a child | 6 |
 | Terra | Distinct configured lane paths with a `FLOCK WRITE` record held by the configured wrapper process | 12 |
-| Titan | Live admitted jobs from the cargo-resource-controller registry plus distinct arch-test lock paths outside those jobs' process groups | omitted |
+| Titan | Live cargo-resource-controller jobs, FLOCK lanes held by the two configured build wrappers, and arch-test FLOCK lanes, deduplicated by process group | omitted |
 | Luna | Top-level `cargo` process trees running build, test, or check commands | omitted |
 
-Titan's `busy_source` uses `arch_lock_prefix` instead of a finite lock-path list.
-Set it to the absolute prefix ending in `arch-test-target-`, such as
-`/home/<user>/dev/worktrees/arch-test-target-`. The sampler matches only descriptor
-symlink targets with a valid repository name followed by `.lock`, `-2.lock`, `-3.lock`,
-or `-4.lock`; it never opens or stats those lock paths. Inherited descriptors count
-one lane path, and paths held within a live controller job's process group do not add
-a second activity count.
+Titan has three observed lock-backed sources in addition to the controller registry:
+the 13 lanes in `/home/<user>/dev/worktrees/locked-build.sh` (12 ordinary lanes and
+the separate Kani lane), three `cargo-slot.sh` lanes under the QSL handoff worktree,
+and per-repository arch-test lanes held by `/home/<user>/arch-test-run.sh`. Configure
+both build wrappers explicitly in `wrapper_sources`; the validator requires both
+observed wrapper basenames and their sourced lane counts. `arch_lock_prefix` is the
+absolute prefix ending in `arch-test-target-`, such as
+`/home/<user>/dev/worktrees/arch-test-target-`. The arch adapter reads fdinfo only
+for the configured `arch-test-run.sh` process and only when an fd symlink matches a
+valid repository lane path. It never opens or stats lock paths. Wrapper adapters
+similarly filter to the configured Bash script before inspecting descriptors. Active
+process groups are unioned across the controller registry and all lock sources, so an
+inherited descriptor or a build visible through multiple sources counts once.
+
+Titan's mixed, partially uncapped controls do not establish a host-wide configured
+slot count. Omit `capacity_units`; do not derive a total from the per-repository arch
+lanes or from the wrapper ceilings.
+
+The Titan source shape is:
+
+```json
+{
+  "schema_version": 1,
+  "host": "titan",
+  "busy_source": {
+    "kind": "titan_build_wrappers_and_arch_locks",
+    "proc_root": "/proc",
+    "owner_uid": 1000,
+    "registry_path": "/home/<user>/.local/state/cargo-resource-controller/jobs.json",
+    "arch_lock_prefix": "/home/<user>/dev/worktrees/arch-test-target-",
+    "arch_wrapper_path": "/home/<user>/arch-test-run.sh",
+    "wrapper_sources": [
+      {
+        "wrapper_path": "/home/<user>/dev/worktrees/locked-build.sh",
+        "lane_paths": [
+          "/tmp/quire-heavy-check.lane1.lock", "/tmp/quire-heavy-check.lane2.lock",
+          "/tmp/quire-heavy-check.lane3.lock", "/tmp/quire-heavy-check.lane4.lock",
+          "/tmp/quire-heavy-check.lane5.lock", "/tmp/quire-heavy-check.lane6.lock",
+          "/tmp/quire-heavy-check.lane7.lock", "/tmp/quire-heavy-check.lane8.lock",
+          "/tmp/quire-heavy-check.lane9.lock", "/tmp/quire-heavy-check.lane10.lock",
+          "/tmp/quire-heavy-check.lane11.lock", "/tmp/quire-heavy-check.lane12.lock",
+          "/tmp/quire-heavy-check.lane-kani.lock"
+        ]
+      },
+      {
+        "wrapper_path": "/home/<user>/dev/worktrees/QSL-handoff/<worktree>/cargo-slot.sh",
+        "lane_paths": [
+          "/home/<user>/dev/worktrees/QSL-handoff/<worktree>/cargo-slots/slot1",
+          "/home/<user>/dev/worktrees/QSL-handoff/<worktree>/cargo-slots/slot2",
+          "/home/<user>/dev/worktrees/QSL-handoff/<worktree>/cargo-slots/slot3"
+        ]
+      }
+    ]
+  }
+}
+```
+
+Replace `<user>` and `<worktree>` with the host's actual account and QSL handoff
+worktree. The validator rejects a config missing either observed wrapper or any
+configured lane.
 
 The sampler emits `ix_build_slots_busy` when its busy source can be read and emits
 `ix_build_slots_configured` only for Draco and Terra. Queue depth and build/test outcome

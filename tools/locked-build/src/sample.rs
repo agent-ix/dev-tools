@@ -50,11 +50,13 @@ enum BusySource {
         wrapper_path: PathBuf,
         lane_paths: Vec<PathBuf>,
     },
-    TitanControllerJobsAndArchLocks {
+    TitanBuildWrappersAndArchLocks {
         proc_root: PathBuf,
         owner_uid: u32,
         registry_path: PathBuf,
         arch_lock_prefix: PathBuf,
+        arch_wrapper_path: PathBuf,
+        wrapper_sources: Vec<WrapperLaneSource>,
     },
     CargoProcessTrees {
         proc_root: PathBuf,
@@ -69,6 +71,13 @@ enum BusySource {
 struct TargetDirectory {
     repo: String,
     path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WrapperLaneSource {
+    wrapper_path: PathBuf,
+    lane_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -159,7 +168,7 @@ impl SamplerConfig {
             (&self.host[..], &self.busy_source),
             ("draco", BusySource::MacosLockfChildren { .. })
                 | ("terra", BusySource::TerraWrapperFdinfo { .. })
-                | ("titan", BusySource::TitanControllerJobsAndArchLocks { .. })
+                | ("titan", BusySource::TitanBuildWrappersAndArchLocks { .. })
                 | ("luna", BusySource::CargoProcessTrees { .. })
         );
         if !source_matches {
@@ -182,19 +191,97 @@ impl SamplerConfig {
                 validate_absolute(wrapper_path, "Terra wrapper path")?;
                 validate_path_list(lane_paths, 12, "Terra lane paths")?;
             }
-            BusySource::TitanControllerJobsAndArchLocks {
+            BusySource::TitanBuildWrappersAndArchLocks {
                 proc_root,
                 registry_path,
                 arch_lock_prefix,
+                arch_wrapper_path,
+                wrapper_sources,
                 ..
             } => {
                 validate_absolute(proc_root, "proc_root")?;
                 validate_absolute(registry_path, "registry_path")?;
                 validate_absolute(arch_lock_prefix, "Titan arch-test lock prefix")?;
+                validate_absolute(arch_wrapper_path, "Titan arch-test wrapper path")?;
+                if arch_wrapper_path.file_name() != Some(OsStr::new("arch-test-run.sh"))
+                    || arch_wrapper_path
+                        .parent()
+                        .map(|home| home.join("dev/worktrees/arch-test-target-"))
+                        != Some(arch_lock_prefix.clone())
+                {
+                    return Err(Error::new(
+                        ErrorCode::Configuration,
+                        "Titan arch lock source must match arch-test-run.sh's host worktrees",
+                    ));
+                }
                 if arch_lock_prefix.file_name() != Some(OsStr::new("arch-test-target-")) {
                     return Err(Error::new(
                         ErrorCode::Configuration,
                         "Titan arch-test lock prefix must end with arch-test-target-",
+                    ));
+                }
+                if wrapper_sources.len() != 2 {
+                    return Err(Error::new(
+                        ErrorCode::Configuration,
+                        "Titan must configure both observed build wrappers",
+                    ));
+                }
+                let mut wrapper_paths = BTreeSet::new();
+                let mut lane_paths = BTreeSet::new();
+                let mut has_locked_build = false;
+                let mut has_cargo_slot = false;
+                for wrapper in wrapper_sources {
+                    validate_absolute(&wrapper.wrapper_path, "Titan wrapper path")?;
+                    if !wrapper_paths.insert(&wrapper.wrapper_path)
+                        || wrapper.wrapper_path == *arch_wrapper_path
+                    {
+                        return Err(Error::new(
+                            ErrorCode::Configuration,
+                            "Titan wrapper paths must be distinct",
+                        ));
+                    }
+                    let expected_lane_paths =
+                        match wrapper.wrapper_path.file_name().and_then(OsStr::to_str) {
+                            Some("locked-build.sh") => {
+                                has_locked_build = true;
+                                titan_locked_build_lane_paths()
+                            }
+                            Some("cargo-slot.sh") => {
+                                has_cargo_slot = true;
+                                titan_cargo_slot_lane_paths(&wrapper.wrapper_path).ok_or_else(|| {
+                                Error::new(
+                                    ErrorCode::Configuration,
+                                    "Titan cargo-slot.sh must have a parent worktree directory",
+                                )
+                            })?
+                            }
+                            _ => {
+                                return Err(Error::new(
+                                    ErrorCode::Configuration,
+                                    "Titan wrapper path is not one of the observed build wrappers",
+                                ));
+                            }
+                        };
+                    validate_nonempty_path_list(&wrapper.lane_paths, "Titan wrapper lane paths")?;
+                    if wrapper.lane_paths != expected_lane_paths {
+                        return Err(Error::new(
+                            ErrorCode::Configuration,
+                            "Titan wrapper lanes do not match the observed source paths",
+                        ));
+                    }
+                    for lane_path in &wrapper.lane_paths {
+                        if !lane_paths.insert(lane_path) {
+                            return Err(Error::new(
+                                ErrorCode::Configuration,
+                                "Titan wrapper lane paths must be distinct across sources",
+                            ));
+                        }
+                    }
+                }
+                if !has_locked_build || !has_cargo_slot {
+                    return Err(Error::new(
+                        ErrorCode::Configuration,
+                        "Titan must configure locked-build.sh and cargo-slot.sh",
                     ));
                 }
             }
@@ -289,6 +376,24 @@ fn validate_nonempty_path_list(paths: &[PathBuf], name: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn titan_locked_build_lane_paths() -> Vec<PathBuf> {
+    (1..=12)
+        .map(|number| PathBuf::from(format!("/tmp/quire-heavy-check.lane{number}.lock")))
+        .chain(std::iter::once(PathBuf::from(
+            "/tmp/quire-heavy-check.lane-kani.lock",
+        )))
+        .collect()
+}
+
+fn titan_cargo_slot_lane_paths(wrapper_path: &Path) -> Option<Vec<PathBuf>> {
+    let slots = wrapper_path.parent()?.join("cargo-slots");
+    Some(
+        (1..=3)
+            .map(|number| slots.join(format!("slot{number}")))
+            .collect(),
+    )
 }
 
 pub(crate) fn run(config_path: &Path, output_path: &Path) -> Result<i32> {
@@ -391,7 +496,7 @@ fn busy_source_name(source: &BusySource) -> &'static str {
     match source {
         BusySource::MacosLockfChildren { .. } => "process_table",
         BusySource::TerraWrapperFdinfo { .. } => "wrapper_lane_ownership",
-        BusySource::TitanControllerJobsAndArchLocks { .. } => "controller_and_arch_locks",
+        BusySource::TitanBuildWrappersAndArchLocks { .. } => "controller_wrappers_and_arch_lanes",
         BusySource::CargoProcessTrees { .. } => "cargo_processes",
     }
 }
@@ -460,12 +565,21 @@ fn busy_count(source: &BusySource) -> std::result::Result<u64, String> {
             wrapper_path,
             lane_paths,
         } => terra_wrapper_busy(proc_root, *owner_uid, wrapper_path, lane_paths),
-        BusySource::TitanControllerJobsAndArchLocks {
+        BusySource::TitanBuildWrappersAndArchLocks {
             proc_root,
             owner_uid,
             registry_path,
             arch_lock_prefix,
-        } => titan_busy(proc_root, *owner_uid, registry_path, arch_lock_prefix),
+            arch_wrapper_path,
+            wrapper_sources,
+        } => titan_busy(
+            proc_root,
+            *owner_uid,
+            registry_path,
+            arch_lock_prefix,
+            arch_wrapper_path,
+            wrapper_sources,
+        ),
         BusySource::CargoProcessTrees {
             proc_root,
             owner_uid,
@@ -665,6 +779,8 @@ fn titan_busy(
     owner_uid: u32,
     registry_path: &Path,
     arch_lock_prefix: &Path,
+    arch_wrapper_path: &Path,
+    wrapper_sources: &[WrapperLaneSource],
 ) -> std::result::Result<u64, String> {
     let bytes = read_bounded(registry_path, SOURCE_FILE_LIMIT)
         .map_err(|error| format!("controller registry read failed: {}", error.kind()))?;
@@ -675,7 +791,6 @@ fn titan_busy(
         .iter()
         .map(|process| (process.pid, process))
         .collect::<HashMap<_, _>>();
-    let mut active = BTreeSet::new();
     let mut active_process_groups = BTreeSet::new();
     for job in registry.jobs {
         if job.pid == 0
@@ -695,23 +810,32 @@ fn titan_busy(
             && process.start_time == job.start
             && process.state != 'Z'
         {
-            active.insert(job.pid);
             active_process_groups.insert(process.process_group_id);
         }
     }
-    let arch_lanes = fdinfo_lock_holder_groups(proc_root, &processes, |target| {
-        is_arch_test_lock(target, arch_lock_prefix)
-    })?;
-    let independent_arch_lanes = arch_lanes
-        .values()
-        .filter(|groups| {
-            !groups
-                .iter()
-                .any(|group| active_process_groups.contains(group))
-        })
-        .count();
-    u64::try_from(active.len() + independent_arch_lanes)
-        .map_err(|_| "active job and arch-lane count overflow".into())
+    for wrapper in wrapper_sources {
+        let lane_paths = wrapper.lane_paths.iter().cloned().collect::<BTreeSet<_>>();
+        let wrapper_groups =
+            wrapper_lane_holder_groups(proc_root, owner_uid, &wrapper.wrapper_path, |target| {
+                lane_paths.contains(target)
+            })?;
+        active_process_groups.extend(
+            wrapper_groups
+                .values()
+                .flat_map(|groups| groups.iter().copied()),
+        );
+    }
+    let arch_lane_groups =
+        wrapper_lane_holder_groups(proc_root, owner_uid, arch_wrapper_path, |target| {
+            is_arch_test_lock(target, arch_lock_prefix)
+        })?;
+    active_process_groups.extend(
+        arch_lane_groups
+            .values()
+            .flat_map(|groups| groups.iter().copied()),
+    );
+    u64::try_from(active_process_groups.len())
+        .map_err(|_| "active build process-group count overflow".into())
 }
 
 fn cargo_tree_busy(
@@ -831,7 +955,18 @@ fn terra_wrapper_lock_paths(
     wrapper_path: &Path,
     lock_paths: &[PathBuf],
 ) -> std::result::Result<BTreeSet<PathBuf>, String> {
-    let lane_paths = lock_paths.iter().collect::<BTreeSet<_>>();
+    let lane_groups = wrapper_lane_holder_groups(proc_root, owner_uid, wrapper_path, |target| {
+        lock_paths.iter().any(|path| path == target)
+    })?;
+    Ok(lane_groups.into_keys().collect())
+}
+
+fn wrapper_lane_holder_groups(
+    proc_root: &Path,
+    owner_uid: u32,
+    wrapper_path: &Path,
+    matches_target: impl Fn(&Path) -> bool,
+) -> std::result::Result<BTreeMap<PathBuf, BTreeSet<u32>>, String> {
     let entries = fs::read_dir(proc_root)
         .map_err(|error| format!("process table enumeration failed: {}", error.kind()))?;
     let mut pids_seen = 0_usize;
@@ -839,7 +974,7 @@ fn terra_wrapper_lock_paths(
     let mut total_fd_entries = 0_usize;
     let mut total_fdinfo_entries = 0_usize;
     let mut total_fdinfo_bytes = 0_usize;
-    let mut active_lanes = BTreeSet::new();
+    let mut active_lanes = BTreeMap::<PathBuf, BTreeSet<u32>>::new();
 
     for entry in entries {
         let entry =
@@ -876,7 +1011,7 @@ fn terra_wrapper_lock_paths(
         if !proc_stat_comm_is(&stat, b"bash")? {
             continue;
         }
-        let (_, _, _, state) = parse_proc_stat(&stat)?;
+        let (_, process_group_id, _, state) = parse_proc_stat(&stat)?;
         if state == 'Z' {
             continue;
         }
@@ -925,7 +1060,7 @@ fn terra_wrapper_lock_paths(
                     return Err(format!("wrapper fd target read failed: {}", error.kind()));
                 }
             };
-            if !lane_paths.contains(&descriptor_target) {
+            if !matches_target(&descriptor_target) {
                 continue;
             }
             let fdinfo_path = process_dir.join("fdinfo").join(fd_name);
@@ -942,7 +1077,10 @@ fn terra_wrapper_lock_paths(
                 .ok_or_else(|| "wrapper fdinfo byte count overflow".to_owned())?;
             check_fdinfo_bounds(total_fdinfo_entries, total_fdinfo_bytes)?;
             if has_flock_write_lock(&fdinfo) {
-                active_lanes.insert(descriptor_target);
+                active_lanes
+                    .entry(descriptor_target)
+                    .or_default()
+                    .insert(process_group_id);
             }
         }
     }
@@ -962,66 +1100,6 @@ fn proc_stat_comm_is(stat: &[u8], expected: &[u8]) -> std::result::Result<bool, 
         return Err("process stat command field is malformed".into());
     }
     Ok(&stat[start + 1..end] == expected)
-}
-
-fn fdinfo_lock_holder_groups(
-    proc_root: &Path,
-    processes: &[ProcessRecord],
-    matches_target: impl Fn(&Path) -> bool,
-) -> std::result::Result<BTreeMap<PathBuf, BTreeSet<u32>>, String> {
-    let mut lane_holders = BTreeMap::<PathBuf, BTreeSet<u32>>::new();
-    let mut total_fdinfo_entries = 0_usize;
-    let mut total_fdinfo_bytes = 0_usize;
-    for process in processes.iter().filter(|process| process.state != 'Z') {
-        let process_dir = proc_root.join(process.pid.to_string());
-        let fdinfo_dir = process_dir.join("fdinfo");
-        let fd_dir = process_dir.join("fd");
-        let entries = match fs::read_dir(&fdinfo_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("fdinfo enumeration failed: {}", error.kind())),
-        };
-        let mut fd_count = 0_usize;
-        for entry in entries {
-            let entry =
-                entry.map_err(|error| format!("fdinfo enumeration failed: {}", error.kind()))?;
-            fd_count += 1;
-            if fd_count > FD_LIMIT_PER_PROCESS {
-                return Err("process fdinfo entry limit exceeded".into());
-            }
-            total_fdinfo_entries += 1;
-            if total_fdinfo_entries > FDINFO_ENTRY_LIMIT {
-                return Err("total fdinfo entry limit exceeded".into());
-            }
-            let fd_name = entry.file_name();
-            let info_path = entry.path();
-            let bytes = match read_bounded(&info_path, 16_384) {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(format!("fdinfo read failed: {}", error.kind())),
-            };
-            total_fdinfo_bytes = total_fdinfo_bytes
-                .checked_add(bytes.len())
-                .ok_or_else(|| "total fdinfo byte count overflow".to_owned())?;
-            check_fdinfo_bounds(total_fdinfo_entries, total_fdinfo_bytes)?;
-            if !has_flock_write_lock(&bytes) {
-                continue;
-            }
-            let descriptor = fd_dir.join(fd_name);
-            let descriptor_target = match fs::read_link(&descriptor) {
-                Ok(target) => target,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(format!("fd target read failed: {}", error.kind())),
-            };
-            if matches_target(&descriptor_target) {
-                lane_holders
-                    .entry(descriptor_target)
-                    .or_default()
-                    .insert(process.process_group_id);
-            }
-        }
-    }
-    Ok(lane_holders)
 }
 
 fn is_arch_test_lock(target: &Path, prefix: &Path) -> bool {
@@ -1350,11 +1428,32 @@ mod tests {
         state: char,
         arguments: &[&str],
     ) -> std::io::Result<PathBuf> {
+        proc_entry_for_uid(
+            root,
+            pid,
+            parent_pid,
+            group_id,
+            start_time,
+            (state, 1000),
+            arguments,
+        )
+    }
+
+    fn proc_entry_for_uid(
+        root: &Path,
+        pid: u32,
+        parent_pid: u32,
+        group_id: u32,
+        start_time: u64,
+        state_uid: (char, u32),
+        arguments: &[&str],
+    ) -> std::io::Result<PathBuf> {
+        let (state, uid) = state_uid;
         let path = root.join(pid.to_string());
         fs::create_dir_all(&path)?;
         fs::write(
             path.join("status"),
-            "Name:\ttest\nUid:\t1000\t1000\t1000\t1000\n",
+            format!("Name:\ttest\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
         )?;
         let mut stat_fields = vec![
             state.to_string(),
@@ -1451,7 +1550,11 @@ mod tests {
             101,
             300,
             'S',
-            &["bash", "/home/builder/dev/worktrees/locked-build.sh", "build"],
+            &[
+                "bash",
+                "/home/builder/dev/worktrees/locked-build.sh",
+                "build",
+            ],
         )?;
         fs::write(
             process.join("fdinfo/4"),
@@ -1470,7 +1573,11 @@ mod tests {
             101,
             301,
             'S',
-            &["bash", "/home/builder/dev/worktrees/locked-build.sh", "test"],
+            &[
+                "bash",
+                "/home/builder/dev/worktrees/locked-build.sh",
+                "test",
+            ],
         )?;
         fs::write(
             inherited.join("fdinfo/6"),
@@ -1484,7 +1591,11 @@ mod tests {
             103,
             302,
             'S',
-            &["bash", "/home/builder/dev/worktrees/locked-build.sh", "build"],
+            &[
+                "bash",
+                "/home/builder/dev/worktrees/locked-build.sh",
+                "build",
+            ],
         )?;
         fs::write(queued.join("fdinfo/7"), "pos:\t0\nflags:\t0100002\n")?;
         std::os::unix::fs::symlink(&lane_three, queued.join("fd/7"))?;
@@ -1525,37 +1636,107 @@ mod tests {
 
     /// Trace: FR-015-AC-15
     #[test]
-    fn titan_controller_and_lane_sources_deduplicate_same_live_process() -> TestResult {
+    fn titan_counts_controller_wrapper_and_arch_sources_once_per_process_group() -> TestResult {
         let root = tempfile::tempdir()?;
         let prefix = PathBuf::from("/home/builder/dev/worktrees/arch-test-target-");
-        let lane = PathBuf::from("/home/builder/dev/worktrees/arch-test-target-unseen-repo.lock");
-        let another_lane =
-            PathBuf::from("/home/builder/dev/worktrees/arch-test-target-unseen-repo-2.lock");
-        let process = proc_entry(root.path(), 201, 1, 201, 901, 'S', &[])?;
+        let arch_wrapper = PathBuf::from("/home/builder/arch-test-run.sh");
+        let build_wrapper = PathBuf::from("/home/builder/dev/worktrees/locked-build.sh");
+        let cargo_slot_wrapper =
+            PathBuf::from("/home/builder/dev/worktrees/QSL-handoff/cargo-slot.sh");
+        let build_lane = PathBuf::from("/tmp/quire-heavy-check.lane1.lock");
+        let cargo_slot_lane =
+            PathBuf::from("/home/builder/dev/worktrees/QSL-handoff/cargo-slots/slot1");
+        let arch_lane = PathBuf::from("/home/builder/dev/worktrees/arch-test-target-repo.lock");
+        let another_arch_lane =
+            PathBuf::from("/home/builder/dev/worktrees/arch-test-target-repo-2.lock");
+        let owner_uid = fs::metadata(root.path())?.uid();
+        let process = proc_entry_for_uid(
+            root.path(),
+            201,
+            1,
+            201,
+            901,
+            ('S', owner_uid),
+            &[
+                "bash",
+                "/home/builder/dev/worktrees/locked-build.sh",
+                "build",
+            ],
+        )?;
         fs::write(
             process.join("fdinfo/9"),
             "lock:\t1: FLOCK ADVISORY WRITE 201 00:33:456 END\n",
         )?;
-        std::os::unix::fs::symlink(&lane, process.join("fd/9"))?;
         fs::write(
             process.join("fdinfo/10"),
             "lock:\t1: FLOCK ADVISORY WRITE 201 00:33:457 END\n",
         )?;
-        std::os::unix::fs::symlink(&another_lane, process.join("fd/10"))?;
-        let inherited = proc_entry(root.path(), 202, 201, 201, 902, 'S', &[])?;
+        std::os::unix::fs::symlink(&build_lane, process.join("fd/9"))?;
+        std::os::unix::fs::symlink(&build_lane, process.join("fd/10"))?;
+        let inherited = proc_entry_for_uid(
+            root.path(),
+            202,
+            201,
+            201,
+            902,
+            ('S', owner_uid),
+            &[
+                "bash",
+                "/home/builder/dev/worktrees/locked-build.sh",
+                "build",
+            ],
+        )?;
         fs::write(
             inherited.join("fdinfo/11"),
             "lock:\t1: FLOCK ADVISORY WRITE 202 00:33:456 END\n",
         )?;
-        std::os::unix::fs::symlink(&lane, inherited.join("fd/11"))?;
-        let unadmitted = proc_entry(root.path(), 303, 1, 303, 903, 'S', &[])?;
-        let independent_lane =
-            PathBuf::from("/home/builder/dev/worktrees/arch-test-target-another-repo-4.lock");
-        fs::write(
-            unadmitted.join("fdinfo/12"),
-            "lock:\t1: FLOCK ADVISORY WRITE 303 00:33:458 END\n",
+        std::os::unix::fs::symlink(&build_lane, inherited.join("fd/11"))?;
+        let arch_holder = proc_entry_for_uid(
+            root.path(),
+            203,
+            201,
+            201,
+            903,
+            ('S', owner_uid),
+            &["bash", "/home/builder/arch-test-run.sh", "repo"],
         )?;
-        std::os::unix::fs::symlink(&independent_lane, unadmitted.join("fd/12"))?;
+        fs::write(
+            arch_holder.join("fdinfo/12"),
+            "lock:\t1: FLOCK ADVISORY WRITE 203 00:33:458 END\n",
+        )?;
+        std::os::unix::fs::symlink(&arch_lane, arch_holder.join("fd/12"))?;
+        let independent_arch = proc_entry_for_uid(
+            root.path(),
+            303,
+            1,
+            303,
+            904,
+            ('S', owner_uid),
+            &["bash", "/home/builder/arch-test-run.sh", "repo"],
+        )?;
+        fs::write(
+            independent_arch.join("fdinfo/13"),
+            "lock:\t1: FLOCK ADVISORY WRITE 303 00:33:459 END\n",
+        )?;
+        std::os::unix::fs::symlink(&another_arch_lane, independent_arch.join("fd/13"))?;
+        let cargo_slot = proc_entry_for_uid(
+            root.path(),
+            404,
+            1,
+            404,
+            905,
+            ('S', owner_uid),
+            &[
+                "bash",
+                "/home/builder/dev/worktrees/QSL-handoff/cargo-slot.sh",
+                "log",
+            ],
+        )?;
+        fs::write(
+            cargo_slot.join("fdinfo/14"),
+            "lock:\t1: FLOCK ADVISORY WRITE 404 00:33:460 END\n",
+        )?;
+        std::os::unix::fs::symlink(&cargo_slot_lane, cargo_slot.join("fd/14"))?;
         let registry = root.path().join("jobs.json");
         fs::write(
             &registry,
@@ -1563,11 +1744,43 @@ mod tests {
                 "sequence": 1,
                 "jobs": [{
                     "pid": 201, "pgid": 201, "start": "901", "sequence": 1,
-                    "owner": 80, "command": ["cargo", "build"], "launched": "2026-11-25T00:00:00Z"
+                    "owner": owner_uid, "command": ["cargo", "build"], "launched": "2026-11-25T00:00:00Z"
                 }]
             }))?,
         )?;
-        assert_eq!(titan_busy(root.path(), 1000, &registry, &prefix)?, 2);
+        let wrapper_sources = vec![
+            WrapperLaneSource {
+                wrapper_path: build_wrapper,
+                lane_paths: titan_locked_build_lane_paths(),
+            },
+            WrapperLaneSource {
+                lane_paths: titan_cargo_slot_lane_paths(&cargo_slot_wrapper)
+                    .ok_or("Titan cargo-slot fixture must have a worktree parent")?,
+                wrapper_path: cargo_slot_wrapper,
+            },
+        ];
+        let config = SamplerConfig {
+            schema_version: 1,
+            host: "titan".into(),
+            capacity_units: None,
+            busy_source: BusySource::TitanBuildWrappersAndArchLocks {
+                proc_root: root.path().to_path_buf(),
+                owner_uid,
+                registry_path: registry,
+                arch_lock_prefix: prefix,
+                arch_wrapper_path: arch_wrapper,
+                wrapper_sources,
+            },
+            target_dirs: Vec::new(),
+        };
+        config.validate()?;
+        let sampled = sample(&config);
+        assert!(
+            sampled
+                .exposition
+                .contains("ix_build_slots_busy{host=\"titan\"} 3")
+        );
+        assert!(!sampled.exposition.contains("ix_build_slots_configured"));
         Ok(())
     }
 
