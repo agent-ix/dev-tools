@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "hosts": [
+    {"host": "draco", "capacity_units": 18, "total_memory_bytes": 68719476736},
+    {"host": "luna", "capacity_units": 8, "total_memory_bytes": 67383029760},
+    {"host": "titan", "capacity_units": 32, "total_memory_bytes": 65865936896},
+    {"host": "terra", "capacity_units": 14, "total_memory_bytes": 101250785280}
+  ]
+}

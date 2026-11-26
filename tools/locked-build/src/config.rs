@@ -114,6 +114,8 @@ impl Default for Config {
             ("point".to_owned(), 2),
             ("block".to_owned(), 1),
             ("periodic".to_owned(), 0),
+            ("arch-test".to_owned(), 2),
+            ("kani".to_owned(), 0),
         ]);
         Self {
             host: "localhost".to_owned(),
@@ -273,11 +275,12 @@ impl Config {
         if self.max_bytes.is_some() && self.target_root.is_none() {
             return Err(invalid("target_root", "is required when max_bytes is set"));
         }
-        if self
-            .priority_classes
-            .iter()
-            .any(|(name, _)| !matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic"))
-        {
+        if self.priority_classes.iter().any(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "must-fix" | "point" | "block" | "periodic" | "arch-test" | "kani"
+            )
+        }) {
             return Err(invalid("priority_classes", "contains an unknown class"));
         }
         if self.memory_per_job_bytes == 0 {
@@ -287,8 +290,10 @@ impl Config {
             .memory_per_job_by_class
             .iter()
             .any(|(class, estimate)| {
-                !matches!(class.as_str(), "must-fix" | "point" | "block" | "periodic")
-                    || *estimate == 0
+                !matches!(
+                    class.as_str(),
+                    "must-fix" | "point" | "block" | "periodic" | "arch-test" | "kani"
+                ) || *estimate == 0
                     || self
                         .memory_cap_by_class
                         .get(class)
@@ -301,7 +306,10 @@ impl Config {
             ));
         }
         if self.memory_cap_by_class.iter().any(|(name, cap)| {
-            !matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic") || *cap == 0
+            !matches!(
+                name.as_str(),
+                "must-fix" | "point" | "block" | "periodic" | "arch-test" | "kani"
+            ) || *cap == 0
         }) {
             return Err(invalid(
                 "memory_cap_by_class",

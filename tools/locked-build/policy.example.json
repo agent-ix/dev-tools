@@ -26,7 +26,9 @@
     "must-fix": 3,
     "point": 2,
     "block": 1,
-    "periodic": 0
+    "periodic": 0,
+    "arch-test": 2,
+    "kani": 0
   },
   "real_cargo": null
 }

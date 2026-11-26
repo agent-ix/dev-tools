@@ -29,3 +29,30 @@ locked-build cancel REQUEST-ID
 `rss_cap` means memory enforcement killed the command for exceeding its cap. `memory_cap_unavailable` means policy required memory enforcement that the launcher could not establish, so the command was not launched.
 
 Use `locked-build policy show` to inspect the effective policy. `locked-build policy init --force` regenerates it.
+
+## Install and verify a host
+
+From the dev-tools repository root, install the binary, measured policy, and
+Cargo shim with `make install-tools`. The command is idempotent and puts the
+shim ahead of real Cargo in the supported shell startup files. Start a new
+shell after the first install. Run `locked-build check-install` to compare all
+tool versions against `tools/locked-build/tool-versions.json`; its one-line
+`ok`/`mismatch` output and exit status are suitable for ix-board cadence checks.
+
+## Wrapper migration map
+
+| Old command or state | New command |
+|---|---|
+| `locked-build.sh` build lane | `locked-build run --class <must-fix\|point\|block\|periodic> --owner <owner> --ticket <ticket> -- cargo ...` |
+| `locked-build.sh` Kani lane | `locked-build run --class kani --owner <owner> --ticket <ticket> -- cargo kani ...` |
+| `lead-reqs-cargo.sh` | `locked-build run --class must-fix --owner lead-reqs --ticket <ticket> -- cargo ...` |
+| `arch-test-run.sh` | `locked-build worktree-run --repository <repo> --slot <n> --ticket <ticket> -- cargo test ...` |
+| cargo-resource-controller jobs registry | `locked-build status` and `locked-build metrics` |
+| per-lane `gate.sh` or raw `timeout ... cargo` | `locked-build run --class <class> --owner <owner> --ticket <ticket> -- cargo ...` |
+
+The checked-in host capacity examples record core and RAM measurements for
+draco (18 cores), luna (8), titan (32), and terra (14). Installation uses the
+host's measured cores, RAM, and disk when
+writing its local policy. Terra's Linux verification is run through `ssh cave`.
+Windows is unsupported: the process supervisor uses Unix process and signal
+APIs.

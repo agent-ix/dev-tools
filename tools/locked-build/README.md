@@ -5,17 +5,35 @@ type: readme
 
 locked-build queues shared-host builds and starts each command when its resource lease is admitted.
 
-## Install
+## Install all host admission tools
 
-From this directory, install with Rust and Make:
+From the repository root, install locked-build, the Cargo shim, and a measured
+host policy with one command:
 
 ```sh
-make install
+make install-tools
 ```
 
-The first command creates a host policy under `$XDG_CONFIG_HOME` or
-`$HOME/.config`, and private state under `$XDG_STATE_HOME` or
-`$HOME/.local/state`. Both directories are created on demand.
+The installer builds and copies the binary only when its bytes change. It
+creates `~/.config/locked-build/policy.json` from the host's core, memory, and
+disk measurements, writes `~/.local/share/dev-tools/installed.json`, and adds
+`~/.local/lib/locked-build/shims` ahead of the real Cargo path in shell startup
+files. Re-running the command leaves identical files untouched. Start a new
+shell after the first install.
+
+Check pinned versions of the installed tools with:
+
+```sh
+locked-build check-install
+```
+
+The install target runs the version check after setup. Its machine-readable
+one-line results report `ok` or `mismatch` per tool and it exits 0 when every
+pin matches, 1 otherwise. Pins live in
+[`tool-versions.json`](tool-versions.json); the host capacity examples in
+[`host-capacity-examples.json`](host-capacity-examples.json) record measured
+cores and RAM for draco (18), luna (8), titan (32), and terra (14). The
+installed policy is generated from each host's own measurements.
 
 ## Run a command
 
@@ -28,6 +46,23 @@ come from the environment or the current user, host, directory, and Git branch.
 Use `--class must-fix`, `--class point`, `--class block`, or `--class periodic`;
 the default class is `periodic`. Set `LOCKED_BUILD_OWNER` or
 `LOCKED_BUILD_TICKET` to override the derived labels.
+
+## Replace the retired build wrappers
+
+| Retired mechanism | Replacement |
+|---|---|
+| `locked-build.sh` ordinary lanes | `locked-build run --class <must-fix\|point\|block\|periodic> --owner <owner> --ticket <ticket> -- cargo ...` |
+| `locked-build.sh` Kani lane | `locked-build run --class kani --owner <owner> --ticket <ticket> -- cargo kani ...` |
+| `lead-reqs-cargo.sh` | `locked-build run --class must-fix --owner lead-reqs --ticket <ticket> -- cargo ...` |
+| `arch-test-run.sh` | `locked-build worktree-run --repository <repo> --slot <n> --ticket <ticket> -- cargo test ...` |
+| `cargo-resource-controller` registry | `locked-build status` and `locked-build metrics` read the durable lease state |
+| per-lane `gate.sh` and raw `timeout ... cargo` | `locked-build run --class <class> --owner <owner> --ticket <ticket> -- cargo ...` |
+
+`worktree-run` serializes each repository slot, assigns it a stable owner, and
+admits the command with the `arch-test` class. Kani uses a separate `kani`
+class. Both classes are present in a generated host policy and metrics labels.
+Build and test commands run on Linux and macOS. Windows is unsupported because
+the process supervisor and signal handling use Unix APIs.
 
 ## Check a request
 
