@@ -1392,6 +1392,34 @@ fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> R
 }
 
 #[test]
+fn systemd_scope_probe_requires_delegated_memory_controller() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let parent = root.path().join("user.slice");
+    let child = parent.join("session.scope");
+    std::fs::create_dir_all(&child)?;
+    std::fs::write(parent.join("cgroup.subtree_control"), "cpu memory\n")?;
+    std::fs::write(child.join("memory.max"), "max\n")?;
+    assert!(memory_controller_delegated_at(
+        root.path(),
+        "user.slice/session.scope"
+    ));
+
+    std::fs::write(parent.join("cgroup.subtree_control"), "cpu\n")?;
+    assert!(!memory_controller_delegated_at(
+        root.path(),
+        "user.slice/session.scope"
+    ));
+    std::fs::write(parent.join("cgroup.subtree_control"), "memory\n")?;
+    std::fs::remove_file(child.join("memory.max"))?;
+    assert!(!memory_controller_delegated_at(
+        root.path(),
+        "user.slice/session.scope"
+    ));
+    assert!(!memory_controller_delegated_at(root.path(), "../escape"));
+    Ok(())
+}
+
+#[test]
 fn supervise_loop_uses_persisted_scope_and_injected_scope_kill() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;

@@ -927,6 +927,10 @@ fn supervise_started_command(
         if status.is_none() {
             status = child.try_wait()?;
         }
+        if status.is_some() && enforcement == Some(MemoryEnforcement::SystemdScope) {
+            observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
+            cgroup_oom_evidence.read_known_files();
+        }
         let policy = store.transaction(|state, config| {
             if state.find(&request.id)?.phase.terminal() {
                 return Ok(None);
@@ -964,7 +968,7 @@ fn supervise_started_command(
                 && group_absent(watchdog.pid)
             {
                 if enforcement == Some(MemoryEnforcement::SystemdScope) {
-                    observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
+                    cgroup_oom_evidence.read_known_files();
                 }
                 finish_supervised_command(
                     state,
@@ -1195,6 +1199,9 @@ fn lease_command_spec_for_enforcement(
 }
 
 fn systemd_scope_available(memory_cap_bytes: u64, timeout: Duration) -> bool {
+    if !memory_controller_delegated() {
+        return false;
+    }
     let spec = lease_command_spec(
         LauncherPlatform::Linux,
         "/usr/bin/true",
@@ -1204,6 +1211,35 @@ fn systemd_scope_available(memory_cap_bytes: u64, timeout: Duration) -> bool {
     run_probe_with_timeout(timeout, || {
         Command::new(spec.program).args(spec.arguments).spawn()
     })
+}
+
+fn memory_controller_delegated() -> bool {
+    let Ok(membership) = std::fs::read_to_string("/proc/self/cgroup") else {
+        return false;
+    };
+    let Some(relative) = membership.lines().find_map(|line| line.strip_prefix("0::")) else {
+        return false;
+    };
+    memory_controller_delegated_at(std::path::Path::new("/sys/fs/cgroup"), relative)
+}
+
+fn memory_controller_delegated_at(cgroup_root: &std::path::Path, relative: &str) -> bool {
+    let relative = std::path::Path::new(relative.trim_start_matches('/'));
+    if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let group = cgroup_root.join(relative);
+    if !group.join("memory.max").is_file() {
+        return false;
+    }
+    let Some(parent) = group.parent() else {
+        return false;
+    };
+    std::fs::read_to_string(parent.join("cgroup.subtree_control"))
+        .is_ok_and(|controllers| controllers.split_whitespace().any(|item| item == "memory"))
 }
 
 fn run_probe_with_timeout(
