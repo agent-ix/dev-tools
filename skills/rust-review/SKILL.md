@@ -64,7 +64,7 @@ the PR's comparison of those results.
   check that no existing type covers it, that the writer and reader of a format
   use the same declared type, that a value used by two formats lives once, that
   a derived field has one function, and that the PR lists what was searched and
-  where the other side is. A duplicate type or a hand-written mirror struct is
+  where the other side is, and that requirement frontmatter links the users to the type owner where specs exist. A duplicate type or a hand-written mirror struct is
   a finding (Medium; High when the two copies already disagree and a wrong
   result is reachable). Apply [shared interface types](../rust-style/references/api-design.md#shared-interface-types).
 - **Implementation:** Find unfinished behavior, no-op trait methods, placeholder
