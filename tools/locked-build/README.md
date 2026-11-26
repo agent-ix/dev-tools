@@ -28,7 +28,7 @@ This command runs a build under the host policy and returns its exit status:
 
 ```sh
 locked-build --state /tmp/build-queue --config /path/to/host-policy.json \
-  run --owner draco:team:code --ticket TEAM-12 --units 1 --priority 0 \
+  run --owner draco:team:code --ticket TEAM-12 --units 1 --class point \
   -- cargo test -p selected-package
 ```
 
@@ -93,6 +93,10 @@ When configured, lease policy sets `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`, and
 `max(1, floor(configured_cargo_build_jobs / active_leased_units))`; active leased
 units include the command being started. See [the policy reference](reference.md)
 for optional fields and examples.
+
+Use `--class must-fix`, `--class point`, `--class block`, or `--class periodic`
+to use the configured named priorities. Numeric `--priority` remains available;
+the two options are mutually exclusive.
 
 With `target_root`, each owner gets a private `CARGO_TARGET_DIR` beneath that
 root. On lease end, the tool deletes that owner's target when `trim_after_ms` or

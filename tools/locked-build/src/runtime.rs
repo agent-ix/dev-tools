@@ -113,6 +113,16 @@ pub(crate) fn enqueue(
     })
 }
 
+pub(crate) fn priority_for_class(store: &Store, class: &str) -> Result<u32> {
+    store.transaction(|_, config| {
+        config
+            .priority_classes
+            .get(class)
+            .copied()
+            .ok_or_else(|| Error::new(ErrorCode::Request, "priority class is not configured"))
+    })
+}
+
 pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<Child> {
     let stdout = OpenOptions::new()
         .create(true)

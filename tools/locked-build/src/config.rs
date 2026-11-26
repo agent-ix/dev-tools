@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Validated host policy and observed resources.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,9 @@ pub struct Config {
     /// Delete a target directory when its measured size exceeds this limit.
     #[serde(default)]
     pub max_bytes: Option<u64>,
+    /// Named priority classes and their numeric scheduler priorities.
+    #[serde(default)]
+    pub priority_classes: BTreeMap<String, u32>,
 }
 
 impl Config {
@@ -115,6 +119,10 @@ impl Config {
             && self.rust_test_threads.is_none_or(|threads| threads > 0)
             && (self.trim_after_ms.is_none() && self.max_bytes.is_none()
                 || self.target_root.is_some())
+            && self.priority_classes.iter().all(|(name, priority)| {
+                matches!(name.as_str(), "must-fix" | "point" | "block" | "periodic")
+                    && *priority <= self.maximum_priority
+            })
             && u64::from(self.maximum_units)
                 .checked_mul(self.memory_per_unit_bytes)
                 .is_some()

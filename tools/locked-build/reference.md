@@ -38,6 +38,7 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `target_root` | Optional root for owner-specific `CARGO_TARGET_DIR` directories. Relative paths resolve from the policy file. |
 | `trim_after_ms` | Optional idle age after which an owner's target directory is deleted when its lease ends. |
 | `max_bytes` | Optional target size limit; the target directory is deleted when it exceeds this many bytes at lease end. |
+| `priority_classes` | Optional mapping of `must-fix`, `point`, `block`, and `periodic` to numeric priorities no greater than `maximum_priority`. |
 
 Unset environment policy values leave their inherited variables unchanged. For
 `cargo_build_jobs`, active leased units include the command being started. The
@@ -47,6 +48,10 @@ When target lifecycle is enabled, each owner receives one directory under
 `target_root`. Cleanup runs after the owner's last active lease, and is skipped
 unless the age or size limit is exceeded. Symlinks in the target tree are
 rejected, and cleanup never follows them.
+`run --class NAME` looks up `NAME` in `priority_classes`; the default numeric
+priority remains 0 when neither `--class` nor `--priority` is supplied. Class
+and numeric priority options cannot be used together. Metrics continue grouping
+numeric priorities 0, 1, and 2 or greater under `check`, `test`, and `gate`.
 
 Resource observations use available RAM, available filesystem bytes, and one-minute load.
 An external sample includes exactly these fields:

@@ -45,8 +45,10 @@ enum Action {
         ticket: String,
         #[arg(long, default_value_t = 1)]
         units: u32,
-        #[arg(long, default_value_t = 0)]
-        priority: u32,
+        #[arg(long, conflicts_with = "class")]
+        priority: Option<u32>,
+        #[arg(long, conflicts_with = "priority")]
+        class: Option<String>,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -121,8 +123,13 @@ fn execute(cli: Cli) -> Result<i32> {
             ticket,
             units,
             priority,
+            class,
             command,
         } => {
+            let priority = match class {
+                Some(class) => runtime::priority_for_class(&store, &class)?,
+                None => priority.unwrap_or(0),
+            };
             let id = runtime::enqueue(&store, &owner, &ticket, units, priority, &command)?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let worker = runtime::spawn_worker(&store, &id)?;
@@ -179,4 +186,46 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_accepts_class_and_rejects_class_with_numeric_priority() {
+        let parsed = Cli::try_parse_from([
+            "locked-build",
+            "run",
+            "--owner",
+            "draco:team:code",
+            "--ticket",
+            "TEAM-1",
+            "--class",
+            "must-fix",
+            "--",
+            "cargo",
+            "test",
+        ]);
+        assert!(
+            matches!(parsed, Ok(Cli { command: Action::Run { class: Some(class), priority: None, .. }, .. }) if class == "must-fix")
+        );
+
+        let conflict = Cli::try_parse_from([
+            "locked-build",
+            "run",
+            "--owner",
+            "draco:team:code",
+            "--ticket",
+            "TEAM-1",
+            "--priority",
+            "1",
+            "--class",
+            "point",
+            "--",
+            "cargo",
+            "test",
+        ]);
+        assert!(conflict.is_err());
+    }
 }

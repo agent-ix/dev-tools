@@ -28,6 +28,7 @@ pub(crate) fn policy() -> Config {
         target_root: None,
         trim_after_ms: None,
         max_bytes: None,
+        priority_classes: std::collections::BTreeMap::new(),
     }
 }
 

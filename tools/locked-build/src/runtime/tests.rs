@@ -663,6 +663,7 @@ fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()>
             target_root: None,
             trim_after_ms: None,
             max_bytes: None,
+            priority_classes: std::collections::BTreeMap::new(),
         })?,
     )?;
     let missing = root.path().join("not-created");
@@ -704,6 +705,19 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
             "RUST_TEST_THREADS=3"
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn named_priority_uses_policy_mapping_and_rejects_unconfigured_classes() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.priority_classes.insert("must-fix".to_owned(), 2);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    assert_eq!(priority_for_class(&store, "must-fix")?, 2);
+    assert!(priority_for_class(&store, "missing").is_err());
     Ok(())
 }
 
