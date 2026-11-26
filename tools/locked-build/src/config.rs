@@ -46,6 +46,15 @@ pub struct Config {
     pub maximum_requests: usize,
     /// Optional host-agent JSON measurement; absent uses local live telemetry.
     pub sample_file: Option<PathBuf>,
+    /// Maximum cargo jobs for an otherwise idle host, divided by active leased units.
+    #[serde(default)]
+    pub cargo_build_jobs: Option<u32>,
+    /// Rust test thread count set for each leased command.
+    #[serde(default)]
+    pub rust_test_threads: Option<u32>,
+    /// Incremental compilation setting inherited by each leased command when configured.
+    #[serde(default)]
+    pub cargo_incremental: Option<bool>,
 }
 
 impl Config {
@@ -88,6 +97,8 @@ impl Config {
                 .is_some()
             && self.maximum_requests > 0
             && self.maximum_requests <= 100_000
+            && self.cargo_build_jobs.is_none_or(|jobs| jobs > 0)
+            && self.rust_test_threads.is_none_or(|threads| threads > 0)
             && u64::from(self.maximum_units)
                 .checked_mul(self.memory_per_unit_bytes)
                 .is_some()

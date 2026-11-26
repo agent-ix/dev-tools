@@ -88,6 +88,12 @@ After `(maximum_priority + 1) * aging_ms`, the oldest feasible request reserves 
 Freed units accumulate for that request, including when it needs several units.
 An occupied host cannot make a feasible large request ineligible for reservation.
 
+When configured, lease policy sets `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS`, and
+`CARGO_INCREMENTAL` for the command. Cargo jobs are pressure-scaled as
+`max(1, floor(configured_cargo_build_jobs / active_leased_units))`; active leased
+units include the command being started. See [the policy reference](reference.md)
+for optional fields and examples.
+
 Capacity shrink preserves running commands and reports overcommit.
 New admission waits until current capacity and resource reserves permit it.
 Memory admission conservatively charges all declared running budgets against measured available RAM.

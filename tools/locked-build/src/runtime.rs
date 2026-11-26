@@ -674,7 +674,7 @@ fn start_command(
     fence: &WorkerFence,
     watchdog: &crate::model::ProcessIdentity,
 ) -> Result<Child> {
-    store.transaction(|state, _| {
+    store.transaction(|state, config| {
         fence.require_running(state.find(&request.id)?)?;
         if state.find(&request.id)?.watchdog.as_ref() != Some(watchdog)
             || Processes::read().role_identity(watchdog, &request.id, "watchdog", watchdog.pid)
@@ -692,13 +692,41 @@ fn start_command(
         let group = i32::try_from(watchdog.pid)
             .map_err(|_| Error::new(ErrorCode::State, "command group out of range"))?;
         // Creation and every quiescence decision share the durable store lock.
-        Command::new(program)
+        let active_units = state
+            .requests
+            .iter()
+            .filter(|candidate| candidate.phase == Phase::Running)
+            .fold(0_u32, |total, candidate| {
+                total.saturating_add(candidate.units)
+            });
+        let mut command = Command::new(program);
+        command
             .args(request.command.iter().skip(1))
             .current_dir(&request.cwd)
-            .process_group(group)
-            .spawn()
-            .map_err(Into::into)
+            .process_group(group);
+        apply_build_environment(&mut command, config, active_units);
+        command.spawn().map_err(Into::into)
     })
+}
+
+fn apply_build_environment(
+    command: &mut Command,
+    config: &crate::config::Config,
+    active_units: u32,
+) {
+    if let Some(maximum_jobs) = config.cargo_build_jobs {
+        let pressure_units = active_units.max(1);
+        command.env(
+            "CARGO_BUILD_JOBS",
+            (maximum_jobs / pressure_units).max(1).to_string(),
+        );
+    }
+    if let Some(threads) = config.rust_test_threads {
+        command.env("RUST_TEST_THREADS", threads.to_string());
+    }
+    if let Some(incremental) = config.cargo_incremental {
+        command.env("CARGO_INCREMENTAL", if incremental { "1" } else { "0" });
+    }
 }
 
 pub(crate) fn prune(store: &Store) -> Result<usize> {

@@ -657,11 +657,50 @@ fn metrics_open_refuses_a_missing_state_path_without_creating_it() -> Result<()>
             poll_ms: 1,
             maximum_requests: 1,
             sample_file: None,
+            cargo_build_jobs: None,
+            rust_test_threads: None,
+            cargo_incremental: None,
         })?,
     )?;
     let missing = root.path().join("not-created");
     assert!(Store::open_existing(&missing, &config).is_err());
     assert!(!missing.exists());
+    Ok(())
+}
+
+#[test]
+fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
+    policy.cargo_build_jobs = Some(8);
+    policy.rust_test_threads = Some(3);
+    policy.cargo_incremental = Some(false);
+
+    let mut command = Command::new("/usr/bin/env");
+    command
+        .env_remove("CARGO_BUILD_JOBS")
+        .env_remove("RUST_TEST_THREADS")
+        .env_remove("CARGO_INCREMENTAL");
+    apply_build_environment(&mut command, &policy, 2);
+    let output = command.output()?;
+    assert!(output.status.success());
+    let environment = String::from_utf8(output.stdout)?;
+    let mut actual: Vec<_> = environment
+        .lines()
+        .filter(|line| {
+            line.starts_with("CARGO_BUILD_JOBS=")
+                || line.starts_with("RUST_TEST_THREADS=")
+                || line.starts_with("CARGO_INCREMENTAL=")
+        })
+        .collect();
+    actual.sort_unstable();
+    assert_eq!(
+        actual,
+        [
+            "CARGO_BUILD_JOBS=4",
+            "CARGO_INCREMENTAL=0",
+            "RUST_TEST_THREADS=3"
+        ]
+    );
     Ok(())
 }
 

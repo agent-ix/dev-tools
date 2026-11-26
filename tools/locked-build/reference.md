@@ -7,7 +7,8 @@ A host policy is a JSON document defining build admission and supervision limits
 
 ## Fields
 
-All fields except `sample_file` are required; unknown fields are rejected.
+All fields are required except `sample_file`, `cargo_build_jobs`,
+`rust_test_threads`, and `cargo_incremental`; unknown fields are rejected.
 Relative filesystem paths resolve from the policy file's directory.
 The polling interval cannot exceed the hold deadline or termination grace.
 
@@ -30,6 +31,14 @@ The polling interval cannot exceed the hold deadline or termination grace.
 | `poll_ms` | Positive supervisor observation cadence. |
 | `maximum_requests` | Retained request limit; explicit pruning frees space. |
 | `sample_file` | Host-agent sample path, or null for local measurements. |
+| `cargo_build_jobs` | Optional maximum Cargo jobs at one active leased unit. At spawn, divide by the total active leased units and clamp to at least one. |
+| `rust_test_threads` | Optional `RUST_TEST_THREADS` value set for each leased command. |
+| `cargo_incremental` | Optional incremental compilation setting; true sets `CARGO_INCREMENTAL=1`, false sets it to `0`. |
+
+Unset environment policy values leave their inherited variables unchanged. For
+`cargo_build_jobs`, active leased units include the command being started. The
+formula is `max(1, floor(configured_cargo_build_jobs / active_leased_units))`;
+for example, a policy value of 8 with 3 active units sets `CARGO_BUILD_JOBS=2`.
 
 Resource observations use available RAM, available filesystem bytes, and one-minute load.
 An external sample includes exactly these fields:
