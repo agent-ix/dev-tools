@@ -983,6 +983,11 @@ fn lease_accounting_charges_effective_jobs_and_rejects_a_lease_larger_than_budge
     const GIB: u64 = 1_000_000_000;
     let root = tempfile::tempdir()?;
     let store = lease_accounted_store(root.path(), 33, 54 * GIB, 8 * GIB)?;
+    store.transaction(|_, config| {
+        assert_eq!(config.memory_budget_bytes, Some(54 * GIB));
+        assert_eq!(config.memory_reserve_bytes, 8 * GIB);
+        Ok(())
+    })?;
     let one_job = enqueue(
         &store,
         "test:team:lead",

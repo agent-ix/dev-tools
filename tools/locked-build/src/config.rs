@@ -104,6 +104,11 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        let mut system = System::new_all();
+        system.refresh_memory();
+        let total_memory = system.total_memory();
+        let memory_reserve_bytes = total_memory / 4;
+        let memory_budget_bytes = memory_budget_after_reserve(total_memory, memory_reserve_bytes);
         let priority_classes = BTreeMap::from([
             ("must-fix".to_owned(), 3),
             ("point".to_owned(), 2),
@@ -115,7 +120,7 @@ impl Default for Config {
             capacity_units: 1,
             maximum_units: 1,
             memory_per_unit_bytes: 0,
-            memory_reserve_bytes: 0,
+            memory_reserve_bytes,
             disk_reserve_bytes: 0,
             disk_path: PathBuf::from("."),
             maximum_load: 8.0,
@@ -131,13 +136,17 @@ impl Default for Config {
             priority_classes,
             real_cargo: None,
             memory_admission: MemoryAdmissionMode::LeaseAccounted,
-            memory_budget_bytes: Some(16 * 1024 * 1024 * 1024),
+            memory_budget_bytes,
             memory_per_job_bytes: 2_500_000_000,
             memory_per_job_by_class: BTreeMap::new(),
             memory_cap_by_class: BTreeMap::new(),
             on_missing_cgroup: OnMissingCgroup::RssWatchdog,
         }
     }
+}
+
+fn memory_budget_after_reserve(total_memory: u64, memory_reserve: u64) -> Option<u64> {
+    (total_memory > 0 && memory_reserve < total_memory).then_some(total_memory - memory_reserve)
 }
 
 impl Config {
@@ -157,19 +166,12 @@ impl Config {
         config.capacity_units = cores;
         config.maximum_units = cores;
         config.maximum_load = f64::from(cores) * 2.0;
-        let mut system = System::new_all();
-        system.refresh_memory();
-        let total_memory = system.total_memory();
-        if total_memory == 0 {
-            return Err(Error::new(
+        let memory_budget = config.memory_budget_bytes.ok_or_else(|| {
+            Error::new(
                 ErrorCode::Configuration,
                 "cannot measure host memory for `memory_budget_bytes`",
-            ));
-        }
-        let memory_reserve = total_memory / 4;
-        let memory_budget = total_memory.saturating_sub(memory_reserve);
-        config.memory_reserve_bytes = memory_reserve;
-        config.memory_budget_bytes = Some(memory_budget);
+            )
+        })?;
         let safe_jobs = (memory_budget / config.memory_per_job_bytes).max(1);
         config.cargo_build_jobs = Some(cores.min(u32::try_from(safe_jobs).unwrap_or(u32::MAX)));
 
@@ -504,6 +506,16 @@ mod tests {
     }
 
     #[test]
+    fn default_memory_budget_subtracts_the_reserve_from_measured_ram() {
+        const GIB: u64 = 1_000_000_000;
+        assert_eq!(
+            memory_budget_after_reserve(62 * GIB, 8 * GIB),
+            Some(54 * GIB)
+        );
+        assert_eq!(memory_budget_after_reserve(8 * GIB, 8 * GIB), None);
+    }
+
+    #[test]
     fn example_policy_selects_lease_accounted_with_a_valid_cap_budget() -> Result<()> {
         let config: Config = serde_json::from_str(include_str!("../policy.example.json"))?;
 
@@ -522,9 +534,11 @@ mod tests {
         })?;
         object.remove("memory_per_unit_bytes");
         object.remove("memory_reserve_bytes");
+        object.remove("memory_budget_bytes");
         let config: Config = serde_json::from_value(value)?;
         assert_eq!(config.memory_per_unit_bytes, 0);
-        assert_eq!(config.memory_reserve_bytes, 0);
+        assert!(config.memory_reserve_bytes > 0);
+        assert!(config.memory_budget_bytes.is_some_and(|budget| budget > 0));
         config.validate()
     }
 
