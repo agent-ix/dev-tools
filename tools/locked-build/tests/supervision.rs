@@ -6,7 +6,10 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::sys::signal::{Signal, kill};
@@ -21,6 +24,9 @@ struct Harness {
     state: PathBuf,
     config: PathBuf,
     sample: PathBuf,
+    sample_stop: Arc<AtomicBool>,
+    sample_lock: Arc<Mutex<()>>,
+    sample_refresher: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Harness {
@@ -50,26 +56,36 @@ impl Harness {
                 "on_missing_cgroup": "rss_watchdog",
             }))?,
         )?;
+        let sample_stop = Arc::new(AtomicBool::new(false));
+        let sample_lock = Arc::new(Mutex::new(()));
+        let refresher_stop = sample_stop.clone();
+        let refresher_lock = sample_lock.clone();
+        let refresher_path = sample.clone();
+        let sample_refresher = Some(std::thread::spawn(move || {
+            while !refresher_stop.load(Ordering::Relaxed) {
+                if let Ok(_guard) = refresher_lock.lock() {
+                    let _ = write_sample(&refresher_path);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }));
         Ok(Self {
             root,
             state,
             config,
             sample,
+            sample_stop,
+            sample_lock,
+            sample_refresher,
         })
     }
 
     fn refresh_sample(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
-        let next = self.sample.with_extension("json.next");
-        fs::write(
-            &next,
-            serde_json::to_vec(&json!({
-                "host": "fixture-host", "observed_at_ms": now,
-                "memory_available_bytes": 1000000, "disk_available_bytes": 1000000, "load_one": 0.0,
-            }))?,
-        )?;
-        fs::rename(next, &self.sample)?;
-        Ok(())
+        let _guard = self
+            .sample_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("sample refresh lock poisoned"))?;
+        write_sample(&self.sample)
     }
 
     fn cli(&self) -> Command {
@@ -140,6 +156,7 @@ impl Harness {
     }
 
     fn persisted(&self) -> Result<Value, Box<dyn std::error::Error>> {
+        self.refresh_sample()?;
         Ok(serde_json::from_slice(&fs::read(
             self.state.join("state.json"),
         )?)?)
@@ -148,6 +165,10 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        self.sample_stop.store(true, Ordering::Relaxed);
+        if let Some(refresher) = self.sample_refresher.take() {
+            let _ = refresher.join();
+        }
         let mut pids = std::collections::BTreeSet::new();
         if let Ok(bytes) = fs::read(self.state.join("state.json"))
             && let Ok(state) = serde_json::from_slice::<Value>(&bytes)
@@ -189,6 +210,20 @@ impl Drop for Harness {
             }
         }
     }
+}
+
+fn write_sample(sample: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let next = sample.with_extension("json.next");
+    fs::write(
+        &next,
+        serde_json::to_vec(&json!({
+            "host": "fixture-host", "observed_at_ms": now,
+            "memory_available_bytes": 1000000, "disk_available_bytes": 1000000, "load_one": 0.0,
+        }))?,
+    )?;
+    fs::rename(next, sample)?;
+    Ok(())
 }
 
 fn observed(mut check: impl FnMut() -> bool) {
