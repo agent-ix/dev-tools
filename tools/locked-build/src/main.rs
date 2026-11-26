@@ -24,7 +24,6 @@ use crate::error::Result;
 use crate::model::RequestId;
 
 const DEFAULT_CARGO_CLASS: &str = "point";
-const DEFAULT_CARGO_OWNER: &str = "cargo-shim";
 const DEFAULT_CARGO_TICKET: &str = "MANUAL";
 
 #[derive(Parser)]
@@ -308,12 +307,23 @@ fn default_owner() -> String {
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned());
     let host = sysinfo::System::host_name().unwrap_or_else(|| "localhost".to_owned());
     let cwd = std::env::current_dir().ok();
+    derive_owner(&user, &host, cwd.as_deref())
+}
+
+fn derive_owner(user: &str, host: &str, cwd: Option<&std::path::Path>) -> String {
     let directory = cwd
         .as_deref()
         .and_then(std::path::Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "workspace".to_owned());
     format!("{user}@{host}:{directory}")
+}
+
+fn cargo_shim_owner(
+    read_env: impl FnOnce(&str) -> Option<String>,
+    fallback: impl FnOnce() -> String,
+) -> String {
+    read_env("LOCKED_BUILD_OWNER").unwrap_or_else(fallback)
 }
 
 fn default_ticket() -> String {
@@ -433,7 +443,7 @@ fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
         )
     })?;
     let class = cargo_shim_class(|name| std::env::var(name).ok());
-    let owner = std::env::var("LOCKED_BUILD_OWNER").unwrap_or_else(|_| DEFAULT_CARGO_OWNER.into());
+    let owner = cargo_shim_owner(|name| std::env::var(name).ok(), default_owner);
     let ticket =
         std::env::var("LOCKED_BUILD_TICKET").unwrap_or_else(|_| DEFAULT_CARGO_TICKET.into());
     let mut command = cargo_shim_command(CargoShimInvocation {
@@ -520,6 +530,27 @@ mod tests {
     }
 
     #[test]
+    fn cargo_shim_owner_uses_the_same_per_worktree_default_as_run() {
+        let expected = derive_owner(
+            "qa",
+            "builder",
+            Some(std::path::Path::new("/repo/worktrees/topic-a")),
+        );
+        assert_eq!(expected, "qa@builder:topic-a");
+        assert_eq!(
+            cargo_shim_owner(|_| None, || expected.clone()),
+            "qa@builder:topic-a"
+        );
+        assert_eq!(
+            cargo_shim_owner(
+                |_| Some("override-owner".to_owned()),
+                || "unused".to_owned()
+            ),
+            "override-owner"
+        );
+    }
+
+    #[test]
     fn cargo_shim_executes_real_cargo_directly_inside_a_lease() -> Result<()> {
         let arguments = ["cargo", "test", "-p", "locked-build"]
             .into_iter()
@@ -529,13 +560,14 @@ mod tests {
         let root = tempfile::tempdir()?;
         let real_cargo = root.path().join("cargo");
         std::os::unix::fs::symlink("/bin/echo", &real_cargo)?;
+        let owner = derive_owner("qa", "builder", Some(std::path::Path::new("/repo/topic-a")));
         let command = cargo_shim_command(CargoShimInvocation {
             arguments: &arguments,
             real_cargo: &real_cargo,
             config_path: std::path::Path::new("/policy.json"),
             state_path: std::path::Path::new("/state"),
             class: DEFAULT_CARGO_CLASS,
-            owner: DEFAULT_CARGO_OWNER,
+            owner: &owner,
             ticket: DEFAULT_CARGO_TICKET,
             in_lease: true,
         })?;
@@ -634,13 +666,14 @@ mod tests {
             .map(OsString::from)
             .collect::<Vec<_>>();
         let real_cargo = std::path::Path::new("/bin/echo").canonicalize()?;
+        let owner = derive_owner("qa", "builder", Some(std::path::Path::new("/repo/topic-a")));
         let command = cargo_shim_command(CargoShimInvocation {
             arguments: &arguments,
             real_cargo: &real_cargo,
             config_path: std::path::Path::new("/policy/policy.json"),
             state_path: std::path::Path::new("/state"),
             class: DEFAULT_CARGO_CLASS,
-            owner: DEFAULT_CARGO_OWNER,
+            owner: &owner,
             ticket: DEFAULT_CARGO_TICKET,
             in_lease: false,
         })?;
@@ -657,7 +690,7 @@ mod tests {
                 "/policy/policy.json",
                 "run",
                 "--owner",
-                "cargo-shim",
+                "qa@builder:topic-a",
                 "--ticket",
                 "MANUAL",
                 "--class",

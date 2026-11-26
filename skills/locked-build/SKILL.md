@@ -15,7 +15,7 @@ locked-build run -- cargo test -p package-name
 
 State and policy paths resolve automatically. The first invocation writes a measured host policy. Use `--state` or `--config` only to override the defaults.
 
-Choose `--class must-fix`, `--class point`, `--class block`, or `--class periodic`. The default is `periodic`. Owner and ticket labels derive from the environment, host, directory, and Git branch; `LOCKED_BUILD_OWNER` and `LOCKED_BUILD_TICKET` override them.
+Choose `--class must-fix`, `--class point`, `--class block`, or `--class periodic`. The default is `periodic`. Direct runs and the Cargo shim derive the owner from the user, host, and current worktree directory; `LOCKED_BUILD_OWNER` overrides it. Ticket labels derive from the Git branch; `LOCKED_BUILD_TICKET` overrides them. This gives each worktree its own Cargo target directory.
 
 ## Read request status
 
