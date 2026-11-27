@@ -444,6 +444,7 @@ pub(crate) mod tests {
 
     pub(crate) fn state(requests: Vec<crate::model::Request>) -> State {
         State {
+            min_reader_version: 1,
             schema_version: 1,
             store_id: "0123456789abcdef0123456789abcdef".to_owned(),
             config_path: "/policy.json".into(),

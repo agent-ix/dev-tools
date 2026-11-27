@@ -6,6 +6,12 @@ type: reference
 Build telemetry is a Prometheus view of the durable transition ledger and current scheduler state.
 Use its counters to compare completed work and its gauges to inspect current queue health.
 
+Admission holds add three host-only gauges: `ix_build_queue_paused` is 1 in Held
+and 0 in Open; `ix_build_queue_hold_age_seconds` is the persisted hold's UTC age;
+`ix_build_queue_hold_alert_after_seconds` is its configured alert bound. The age
+and bound are zero in Open. LockedBuildQueueHoldOverdue fires after the age
+exceeds the bound for one minute. Hold IDs and notes are never metric labels.
+
 ## Fields
 
 Every family has a `host` label. Priority classes are `must-fix`, `point`, `block`, `periodic`, `kani`, and `arch-test`.

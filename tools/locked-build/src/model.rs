@@ -314,6 +314,8 @@ pub(crate) struct Request {
 #[serde(deny_unknown_fields)]
 pub(crate) struct State {
     pub schema_version: u32,
+    #[serde(default = "legacy_reader_version")]
+    pub min_reader_version: u32,
     pub store_id: String,
     pub config_path: PathBuf,
     pub host: String,
@@ -327,6 +329,10 @@ pub(crate) struct State {
     pub metrics: MetricsState,
     pub requests: Vec<Request>,
     pub events: Vec<Event>,
+}
+
+fn legacy_reader_version() -> u32 {
+    1
 }
 
 fn ignore_legacy_metrics<'de, D>(deserializer: D) -> std::result::Result<MetricsState, D::Error>

@@ -98,6 +98,7 @@ fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
 
 fn state(requests: Vec<Request>) -> State {
     State {
+        min_reader_version: 1,
         schema_version: 1,
         store_id: "store".into(),
         config_path: PathBuf::from("/policy"),

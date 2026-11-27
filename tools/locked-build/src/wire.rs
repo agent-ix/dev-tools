@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 /// Stable abnormal-outcome codes. Spellings are part of the monitoring contract.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub enum Code {
+    /// Illegal control-plane state transition.
+    #[serde(rename = "LB_INVALID_TRANSITION")]
+    InvalidTransition,
+    /// Store requires a newer reader.
+    #[serde(rename = "LB_STORE_VERSION")]
+    StoreVersion,
+    /// Policy was edited outside the audited command.
+    #[serde(rename = "LB_POLICY_MODIFIED")]
+    PolicyModified,
     /// Watchdog memory limit.
     #[serde(rename = "LB_RSS_CAP")]
     RssCap,
@@ -49,7 +58,10 @@ pub enum Code {
 
 impl Code {
     /// Every supported code, for bounded metrics and exhaustive validation.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 16] = [
+        Self::InvalidTransition,
+        Self::StoreVersion,
+        Self::PolicyModified,
         Self::RssCap,
         Self::OomKilled,
         Self::HoldTimeout,
@@ -67,6 +79,9 @@ impl Code {
     /// Stable wire spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::InvalidTransition => "LB_INVALID_TRANSITION",
+            Self::StoreVersion => "LB_STORE_VERSION",
+            Self::PolicyModified => "LB_POLICY_MODIFIED",
             Self::RssCap => "LB_RSS_CAP",
             Self::OomKilled => "LB_OOM_KILLED",
             Self::HoldTimeout => "LB_HOLD_TIMEOUT",
@@ -329,6 +344,30 @@ mod tests {
     #[test]
     fn every_code_has_a_stable_complete_hand_written_diagnostic() {
         let cases = [
+            (
+                Code::InvalidTransition,
+                "control.transition_valid",
+                "true",
+                "false",
+                "illegal transition",
+                "locked-build: LB_INVALID_TRANSITION request=host:r7 limit=control.transition_valid=true measured=false (illegal transition) killed=pgid:42/cargo",
+            ),
+            (
+                Code::StoreVersion,
+                "store.min_reader_version",
+                "2",
+                "1",
+                "reader too old",
+                "locked-build: LB_STORE_VERSION request=host:r7 limit=store.min_reader_version=2 measured=1 (reader too old) killed=pgid:42/cargo",
+            ),
+            (
+                Code::PolicyModified,
+                "policy.sha256",
+                "audited",
+                "modified",
+                "hand edit",
+                "locked-build: LB_POLICY_MODIFIED request=host:r7 limit=policy.sha256=audited measured=modified (hand edit) killed=pgid:42/cargo",
+            ),
             (
                 Code::RssCap,
                 "memory_per_job_bytes*parallelism",

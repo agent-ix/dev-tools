@@ -269,7 +269,7 @@ fn telemetry_generated_full_budget_is_below_1500_series() -> Result<()> {
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .count();
     eprintln!("SWM-417 generated series={series} (+6 runtime/exporter gauges)");
-    assert!(series + 6 <= 1500, "series budget exceeded: {}", series + 6);
+    assert!(series + 9 <= 1500, "series budget exceeded: {}", series + 9);
     assert_eq!(
         text.lines()
             .filter(|l| l.starts_with("ix_build_identity_total{"))
@@ -311,6 +311,9 @@ fn telemetry_generated_full_budget_is_below_1500_series() -> Result<()> {
             "ix_build_snapshot_size_bytes",
             "ix_build_export_error",
             "ix_build_running_memory_headroom_ratio",
+            "ix_build_queue_paused",
+            "ix_build_queue_hold_age_seconds",
+            "ix_build_queue_hold_alert_after_seconds",
         ]
         .into_iter()
         .map(str::to_owned),

@@ -6,6 +6,12 @@ use std::collections::BTreeMap;
 /// Stable error discriminants, independent of diagnostic text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
+    /// An explicit state-machine transition is illegal.
+    Transition,
+    /// Store data requires a newer reader protocol.
+    StoreVersion,
+    /// Policy bytes differ from the last audited policy write.
+    PolicyModified,
     /// Operating-system or filesystem operation failed.
     Io,
     /// A configuration field is invalid.

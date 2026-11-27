@@ -21,6 +21,165 @@ use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Provenance: SWM-429. Trace: FR-011-AC-7, FR-005-AC-4
+#[test]
+fn install_drain_handoff_preserves_foreground_waiters_across_binary_replacement() -> TestResult {
+    let harness = Harness::new(0, 120000)?;
+    let installed = harness.root.path().join("installed-locked-build");
+    fs::copy(env!("CARGO_BIN_EXE_locked-build"), &installed)?;
+    let mut callers = Vec::new();
+    for label in ["first", "second"] {
+        let marker = harness.root.path().join(label);
+        callers.push(
+            Command::new(&installed)
+                .arg("--state")
+                .arg(&harness.state)
+                .arg("--config")
+                .arg(&harness.config)
+                .args(["run", "--owner", label, "--ticket", "SWM-429", "--"])
+                .arg(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "subprocess_fixture",
+                    "--ignored",
+                    "--nocapture",
+                    "--skip",
+                ])
+                .arg(&marker)
+                .env("LOCKED_BUILD_FIXTURE_MODE", "block")
+                .env("IX_DRAIN_CONTEXT", format!("caller-{label}"))
+                .env("LOCKED_BUILD_FIXTURE_MARKER", &marker)
+                .env(
+                    "LOCKED_BUILD_FIXTURE_RELEASE",
+                    harness.root.path().join("release"),
+                )
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?,
+        );
+    }
+    observed(|| {
+        harness.persisted().is_ok_and(|report| {
+            report["requests"].as_array().is_some_and(|rows| {
+                rows.len() == 2 && rows.iter().all(|row| row["worker"]["pid"].is_u64())
+            })
+        })
+    });
+    let before = harness.persisted()?;
+    let admission = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(harness.state.join("admission.lock"))?;
+    admission.lock()?;
+    let election = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(harness.state.join("scheduler.lock"))?;
+    observed(|| election.try_lock().is_ok());
+    for request in before["requests"].as_array().ok_or("requests missing")? {
+        let claim = harness.state.join(format!(
+            "{}.launch.json",
+            request["id"].as_str().ok_or("id missing")?
+        ));
+        observed(|| {
+            fs::read(&claim)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|claim| claim["worker"].is_null())
+        });
+    }
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["capacity_units"] = json!(2);
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let next = harness.root.path().join("replacement");
+    fs::copy(env!("CARGO_BIN_EXE_locked-build"), &next)?;
+    fs::rename(next, &installed)?;
+    fs::write(
+        harness.state.join("service-binary.json"),
+        serde_json::to_vec(&installed)?,
+    )?;
+    drop(admission);
+    let mut successor = Command::new(&installed)
+        .arg("--state")
+        .arg(&harness.state)
+        .arg("--config")
+        .arg(&harness.config)
+        .arg("scheduler")
+        .stdin(Stdio::from(election))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    observed(|| {
+        harness.root.path().join("first").exists() && harness.root.path().join("second").exists()
+    });
+    assert_eq!(
+        fs::read_to_string(harness.root.path().join("first.context"))?,
+        "caller-first"
+    );
+    assert_eq!(
+        fs::read_to_string(harness.root.path().join("second.context"))?,
+        "caller-second"
+    );
+    fs::write(harness.root.path().join("release"), b"finish")?;
+    for caller in &mut callers {
+        assert!(
+            complete(caller)?.success(),
+            "foreground waiter failed after replacement"
+        );
+    }
+    assert!(complete(&mut successor)?.success());
+    let after = harness.persisted()?;
+    for (old, new) in before["requests"]
+        .as_array()
+        .ok_or("requests missing")?
+        .iter()
+        .zip(after["requests"].as_array().ok_or("requests missing")?)
+    {
+        for field in ["id", "sequence", "enqueued_at_ms", "enqueued_clock_ms"] {
+            assert_eq!(
+                old[field], new[field],
+                "queued {field} changed during upgrade"
+            );
+        }
+        assert_eq!(new["phase"], "succeeded");
+        assert!(new["stop"].is_null());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "native Linux unshare proof for queued context-preserving install handoff"]
+fn unshare_install_drain_handoff_preserves_namespace_and_environment() -> TestResult {
+    let mut child = NamespaceChild(
+        Command::new("unshare")
+            .args([
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+                "--kill-child=KILL",
+            ])
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "install_drain_handoff_preserves_foreground_waiters_across_binary_replacement",
+                "--nocapture",
+                "--test-threads=4",
+            ])
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent-locked-build-test-bus",
+            )
+            .env("XDG_RUNTIME_DIR", "/nonexistent-locked-build-test-runtime")
+            .spawn()?,
+    );
+    assert!(complete_before(&mut child.0, Duration::from_secs(120))?.success());
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 struct NamespaceChild(Child);
 
@@ -1854,6 +2013,9 @@ fn subprocess_fixture() -> TestResult {
         observed(|| descendant.exists());
     }
     fs::write(pid_file(&marker), std::process::id().to_string())?;
+    if let Some(context) = std::env::var_os("IX_DRAIN_CONTEXT") {
+        fs::write(marker.with_extension("context"), context.as_encoded_bytes())?;
+    }
     let mut file = OpenOptions::new().create(true).append(true).open(&marker)?;
     writeln!(file, "invoked")?;
     file.sync_all()?;

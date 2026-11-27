@@ -329,7 +329,20 @@ pub(crate) fn unscoped(error: &Error, request: String) -> Failure {
     if let Some(failure) = &error.failure {
         return failure.as_ref().clone();
     }
-    let (code, key, limit) = if error.code == ErrorCode::Request {
+    let (code, key, limit) = if matches!(
+        error.code,
+        ErrorCode::Transition | ErrorCode::StoreVersion | ErrorCode::PolicyModified
+    ) {
+        (
+            match error.code {
+                ErrorCode::Transition => Code::InvalidTransition,
+                ErrorCode::StoreVersion => Code::StoreVersion,
+                _ => Code::PolicyModified,
+            },
+            "control.transition_valid",
+            Value::Boolean(true),
+        )
+    } else if error.code == ErrorCode::Request {
         (
             Code::InvalidRequest,
             "policy.valid_request",

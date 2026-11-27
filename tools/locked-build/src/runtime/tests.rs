@@ -35,6 +35,41 @@ fn scope_probe_and_launch_require_the_same_oom_policy() {
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
 
+/// Provenance: SWM-429. Trace: FR-005-AC-4, FR-011-AC-7
+#[test]
+fn install_drain_holds_admission_without_reordering_or_cancelling_waiters() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let first = queued(&store)?;
+    let second = queued(&store)?;
+    let identity = Processes::self_identity()?;
+    let mut leases = Vec::new();
+    for id in [&first, &second] {
+        let (generation, lease) = spawn_worker_with(&store, id, false, |claim, lease| {
+            Ok((claim.generation, lease))
+        })?
+        .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+        claim_spawned_worker(&store, id, &identity, generation)?;
+        leases.push(lease);
+    }
+    let (before, config) = store.snapshot()?;
+    let positions = before.queue_positions(&config, clock_ms()?);
+    let hold = store
+        .try_lock_member("admission.lock")?
+        .ok_or_else(|| Error::new(ErrorCode::State, "admission hold missing"))?;
+    schedule_queue(&store)?;
+    let (held, _) = store.snapshot()?;
+    assert_eq!(held.find(&first)?.phase, Phase::Queued);
+    assert_eq!(held.find(&second)?.phase, Phase::Queued);
+    assert_eq!(held.queue_positions(&config, clock_ms()?), positions);
+    assert!(held.requests.iter().all(|request| request.stop.is_none()));
+    drop(hold);
+    schedule_queue(&store)?;
+    assert_eq!(store.snapshot()?.0.find(&first)?.phase, Phase::Running);
+    assert_eq!(store.snapshot()?.0.find(&second)?.phase, Phase::Queued);
+    Ok(())
+}
+
 /// Provenance: SWM-400. Trace: FR-005-AC-4
 #[test]
 fn owned_oom_result_does_not_invent_a_memory_events_counter() -> Result<()> {
@@ -3319,6 +3354,8 @@ fn legacy_embedded_metrics_field_is_ignored_without_breaking_state_decode() -> R
     let object = encoded
         .as_object_mut()
         .ok_or_else(|| Error::new(ErrorCode::State, "state JSON is not an object"))?;
+    object.insert("schema_version".into(), 1.into());
+    object.remove("min_reader_version");
     object.insert(
         "metrics".to_owned(),
         serde_json::json!({

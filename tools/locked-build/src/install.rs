@@ -6,6 +6,7 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,13 @@ const TOOL_MANIFEST: &str = include_str!("../tool-versions.json");
 const MANIFEST_VERSION: u32 = 1;
 const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
 const NPM_SCOPE_REGISTRY: &str = "--@agent-ix:registry=https://registry.npmjs.org/";
+
+#[path = "install/transaction.rs"]
+mod transaction;
+
+pub(crate) fn recover_transaction(store: &crate::store::Store) -> Result<()> {
+    transaction::recover(store)
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +60,7 @@ pub(crate) fn install_tools(
     search_path: Option<&OsStr>,
     owner: &str,
     transfer_from: Option<&str>,
+    drain_timeout: Option<Duration>,
 ) -> Result<()> {
     if crate::build_info::DIRTY != "false" {
         return Err(Error::new(
@@ -67,6 +76,7 @@ pub(crate) fn install_tools(
         owner,
         transfer_from,
         crate::build_info::COMMIT,
+        drain_timeout,
         Config::measured_default,
         || install_npm_packages(&read_manifest(TOOL_MANIFEST)?),
         || {
@@ -79,6 +89,19 @@ pub(crate) fn install_tools(
                 &detect_textfile_directory()?,
             )?;
             activate_monitoring(home)
+        },
+        |election, token| {
+            let shared = crate::writable::shared_root()?;
+            crate::scheduler::handoff(
+                &crate::store::Store {
+                    path: shared.clone(),
+                    config_path: shared.join("policy.json"),
+                },
+                &home.join(".local/bin/locked-build"),
+                election,
+                token,
+            )
+            .map(Some)
         },
     )
 }
@@ -99,9 +122,11 @@ fn install_tools_with_measurement(
         "fixture-rollout",
         None,
         "1111111111111111111111111111111111111111",
+        None,
         measure_policy,
         || Ok(()),
         || Ok(()),
+        |_, _| Ok(None),
     )
 }
 
@@ -114,9 +139,11 @@ fn install_tools_owned(
     owner: &str,
     transfer_from: Option<&str>,
     source: &str,
+    drain_timeout: Option<Duration>,
     measure_policy: impl FnOnce() -> Result<Config>,
     prepare: impl FnOnce() -> Result<()>,
     finish: impl FnOnce() -> Result<()>,
+    resume: impl FnOnce(std::fs::File, &str) -> Result<Option<std::process::Child>>,
 ) -> Result<()> {
     let provenance = crate::provenance::InstallGuard::acquire(
         home,
@@ -137,33 +164,18 @@ fn install_tools_owned(
     std::fs::create_dir_all(installed_bin_dir)?;
     let config_dir = crate::writable::host_root(Some(home));
     let shared = crate::writable::private_directory(shared)?;
-    let state_lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(shared.join("lock"))?;
-    state_lock.lock()?;
-    match std::fs::read(shared.join("state.json")) {
-        Ok(bytes) => {
-            let state: crate::model::State = serde_json::from_slice(&bytes)?;
-            if state
-                .requests
-                .iter()
-                .any(|request| !request.phase.terminal())
-            {
-                return Err(Error::new(
-                    ErrorCode::Configuration,
-                    "drain queued and running leases before install-tools; run installation outside an admitted lease",
-                ));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+    let held = transaction::Checked::new(home, &shared)?.hold(drain_timeout)?;
+    let idle = held.wait_idle()?;
+    if shared.join("policy-ledger.json").exists() {
+        crate::policy::check(&shared, &shared.join("policy.json"))?;
     }
     prepare()?;
-    copy_file_if_changed(current_exe, &installed_path)?;
+    let swapped = idle.swap(current_exe, &installed_path)?;
+    crate::store::Store {
+        path: shared.clone(),
+        config_path: shared.join("policy.json"),
+    }
+    .publish_service_binary(&installed_path)?;
     crate::writable::install_host_namespace(&shared)?;
     let data_dir = home.join(".local/share/dev-tools");
     let shim_dir = home.join(".local/lib/locked-build/shims");
@@ -244,14 +256,18 @@ fn install_tools_owned(
     for profile in [".profile", ".bashrc", ".zshrc"] {
         ensure_profile_line(&home.join(profile), &path_line)?;
     }
-    if crate::provenance::artifact_hash(&installed_path)? != provenance.record.artifact_sha256 {
-        return Err(Error::new(
-            ErrorCode::Configuration,
-            "installed binary changed during installation; provenance not published",
-        ));
-    }
-    finish()?;
-    provenance.publish()?;
+    let verified = swapped.verify(|| {
+        if crate::provenance::artifact_hash(&installed_path)? != provenance.record.artifact_sha256 {
+            return Err(Error::new(
+                ErrorCode::Configuration,
+                "installed binary changed during installation; provenance not published",
+            ));
+        }
+        finish()?;
+        crate::policy::baseline(&shared, &shared.join("policy.json"), "install")?;
+        provenance.publish()
+    })?;
+    verified.resume(resume)?;
 
     println!("installed locked-build {}", env!("CARGO_PKG_VERSION"));
     println!("policy: {}", policy_path.display());
@@ -259,6 +275,191 @@ fn install_tools_owned(
     println!("binary: {}", installed_path.display());
     println!("version record: {}", record_path.display());
     Ok(())
+}
+
+/// Admission is held independently of state writes, so workers can finish and
+/// callers can enqueue while installation waits. Dropping either file releases
+/// its OS lock, including on error or process exit. Never unlink lock files.
+/// Provenance: SWM-429. Trace: FR-011-AC-7, FR-005-AC-4
+struct InstallHold {
+    admission: Option<std::fs::File>,
+    state: Option<std::fs::File>,
+    election: Option<std::fs::File>,
+    durable: Option<(PathBuf, String)>,
+    started: Instant,
+}
+
+impl InstallHold {
+    fn open(&mut self) -> Result<()> {
+        if let Some((path, id)) = self.durable.as_ref() {
+            crate::queue::resume_locked(
+                &crate::store::Store {
+                    path: path.clone(),
+                    config_path: path.join("policy.json"),
+                },
+                Some(id),
+            )?;
+        }
+        self.durable = None;
+        Ok(())
+    }
+}
+
+impl Drop for InstallHold {
+    fn drop(&mut self) {
+        drop(self.state.take());
+        if let Some((path, id)) = self.durable.take() {
+            let store = crate::store::Store {
+                config_path: path.join("policy.json"),
+                path,
+            };
+            if let Err(error) = crate::queue::resume_locked(&store, Some(&id)) {
+                eprintln!(
+                    "install drain resume failed: {error}; use queue resume after repairing state"
+                );
+            }
+        }
+        drop(self.admission.take());
+    }
+}
+
+fn begin_hold(shared: &Path, drain_timeout: Option<Duration>) -> Result<InstallHold> {
+    let store = crate::store::Store {
+        path: shared.to_path_buf(),
+        config_path: shared.join("policy.json"),
+    };
+    let started = Instant::now();
+    let hold = {
+        let timeout = drain_timeout.unwrap_or(Duration::from_secs(5));
+        loop {
+            if let Some(hold) = store.try_lock_member("admission.lock")? {
+                break Some(hold);
+            }
+            if started.elapsed() >= timeout {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "installation drain timed out acquiring admission hold; nothing cancelled",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    // Construct cleanup ownership immediately after persistence. Any later
+    // returned error resumes the exact hold created by this installation.
+    let durable = {
+        let durable = crate::queue::pause_locked(&store, "install_drain", 900_000)?;
+        Some((shared.to_path_buf(), durable.id))
+    };
+    let guard = InstallHold {
+        admission: hold,
+        state: None,
+        election: None,
+        durable,
+        started,
+    };
+    Ok(guard)
+}
+
+#[cfg(test)]
+fn install_admission_hold(shared: &Path, drain_timeout: Option<Duration>) -> Result<InstallHold> {
+    wait_idle(begin_hold(shared, drain_timeout)?, shared, drain_timeout)
+}
+
+fn wait_idle(
+    mut guard: InstallHold,
+    shared: &Path,
+    drain_timeout: Option<Duration>,
+) -> Result<InstallHold> {
+    let store = crate::store::Store {
+        path: shared.to_path_buf(),
+        config_path: shared.join("policy.json"),
+    };
+    let started = guard.started;
+    guard.election = {
+        let timeout = drain_timeout.unwrap_or(Duration::from_secs(5));
+        loop {
+            if let Some(election) = store.try_lock_member("scheduler.lock")? {
+                break Some(election);
+            }
+            let protocol = std::fs::read(shared.join("scheduler.lock"))?;
+            if drain_timeout.is_some()
+                && protocol.get(12..) != Some(crate::scheduler::DRAIN_PROTOCOL)
+            {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "active scheduler does not support install drain; bootstrap with an empty-queue installation",
+                ));
+            }
+            if started.elapsed() >= timeout {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "installation drain timed out waiting for scheduler handoff; admission hold released",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    loop {
+        if let Some(state_lock) = store.try_lock_member("lock")? {
+            let busy = match std::fs::read(shared.join("state.json")) {
+                Ok(bytes) => {
+                    let state: crate::model::State = serde_json::from_slice(&bytes)?;
+                    let mut busy = false;
+                    for request in &state.requests {
+                        if request.phase.terminal() {
+                            continue;
+                        }
+                        if drain_timeout.is_none() || request.phase != crate::model::Phase::Queued {
+                            busy = true;
+                            continue;
+                        }
+                        if store
+                            .try_lock_member(&format!("{}.spawn.lock", request.id.0))?
+                            .is_none()
+                        {
+                            let supported = store.claim(&request.id)?.is_some_and(|claim| {
+                                claim.protocol == 2
+                                    && claim.store_id == state.store_id
+                                    && claim.request_id == request.id
+                                    && claim.generation == request.worker_generation
+                            });
+                            if !supported {
+                                return Err(Error::new(
+                                    ErrorCode::Configuration,
+                                    "queued supervisor does not support install drain; bootstrap with an empty-queue installation",
+                                ));
+                            }
+                            busy |= store
+                                .claim(&request.id)?
+                                .is_some_and(|claim| claim.worker.is_some());
+                        }
+                    }
+                    busy
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            };
+            if !busy {
+                guard.state = Some(state_lock);
+                return Ok(guard);
+            }
+            if drain_timeout.is_none() {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "drain queued and running leases before install-tools, or use --drain; run installation outside an admitted lease",
+                ));
+            }
+            // Running supervisors need the state lock to checkpoint completion.
+            drop(state_lock);
+        }
+        if drain_timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+            return Err(Error::new(
+                ErrorCode::Configuration,
+                "installation drain timed out; nothing cancelled; admission hold released",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn migrate_policy(old: &Path, new: &Path) -> Result<()> {
@@ -401,6 +602,11 @@ pub(crate) fn check_install(manifest_path: Option<&Path>) -> Result<i32> {
     let mut mismatches = 0_u32;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if let Some(home) = &home {
+        let root = crate::writable::host_root(Some(home));
+        if root.join("state").exists() || root.join("policy.json").exists() {
+            let shared = root.join("state").canonicalize()?;
+            crate::policy::check(&shared, &root.join("policy.json"))?;
+        }
         match crate::provenance::check(home) {
             Ok((matches, line)) => {
                 println!("{line}");
@@ -640,6 +846,10 @@ fn shell_quote_path(path: &Path) -> String {
         .replace('"', "\\\"")
         .replace('$', "\\$")
 }
+
+#[cfg(test)]
+#[path = "install/drain_tests.rs"]
+mod drain_tests;
 
 #[cfg(test)]
 mod tests {

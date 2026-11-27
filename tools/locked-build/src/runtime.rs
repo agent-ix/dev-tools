@@ -666,6 +666,9 @@ fn spawn_worker_with<T>(
     handoff: bool,
     spawn: impl FnOnce(&crate::model::WorkerClaim, std::fs::File) -> Result<T>,
 ) -> Result<Option<T>> {
+    let Some(_admission) = store.try_admission_lock()? else {
+        return Ok(None);
+    };
     let Some(lease) = store.try_lock_member(&format!("{}.spawn.lock", id.0))? else {
         return Ok(None);
     };
@@ -694,7 +697,7 @@ fn spawn_worker_with<T>(
             return Ok(None);
         }
         let pending = previous.as_ref().is_some_and(|claim| {
-            claim.protocol == 1
+            matches!(claim.protocol, 1 | 2)
                 && claim.store_id == store_id
                 && claim.request_id == *id
                 && claim.generation == request.worker_generation
@@ -719,7 +722,7 @@ fn spawn_worker_with<T>(
         request.worker = Some(launcher.clone());
         request.pid_namespace = None;
         let claim = crate::model::WorkerClaim {
-            protocol: 1,
+            protocol: 2,
             store_id,
             request_id: id.clone(),
             generation: request.worker_generation,
@@ -752,7 +755,7 @@ fn launch_worker(
         .append(true)
         .mode(0o600)
         .open(store.path.join(format!("{}.stderr", id.0)))?;
-    let child = Command::new(std::env::current_exe()?)
+    let child = Command::new(store.service_binary()?)
         .arg("--state")
         .arg(&store.path)
         .arg("--config")
@@ -771,6 +774,8 @@ fn launch_worker(
 /// Redacted snapshot suitable for deterministic monitoring consumers.
 #[derive(Serialize)]
 pub struct Report {
+    /// Durable admission hold; queued identity and ordering remain unchanged.
+    pub queue_hold: Option<crate::queue::Hold>,
     /// Effective policy bound for explicitly sized memory requests.
     pub max_request_memory: Option<u64>,
     /// Effective queued request limit for each owner.
@@ -915,7 +920,7 @@ fn recover_with_boot(
             }
             let mut origin_namespace = request.pid_namespace.clone();
             if request.phase == Phase::Queued && let Some(claim) = store.claim(&request.id)?
-                && claim.protocol == 1 && claim.store_id == state.store_id && claim.generation == request.worker_generation
+                && matches!(claim.protocol, 1 | 2) && claim.store_id == state.store_id && claim.generation == request.worker_generation
                 && (claim.worker.is_none() || claim.worker.as_ref() != request.worker.as_ref()) {
                 if claim.pid_namespace == pid_namespace {
                     respawn.push(request.id.clone());
@@ -1109,6 +1114,7 @@ fn status_with_clock(
         .collect();
     let used = state.used();
     Ok(Report {
+        queue_hold: store.queue_hold()?,
         max_request_memory: config.request_memory_cap(),
         max_queued_per_owner: config.owner_queue_cap(),
         queued_by_owner: state
@@ -1234,6 +1240,7 @@ fn metrics_with_clock(
         sampling_deadline,
         &config.cache,
     );
+    crate::queue::append_metrics(&mut text, &state.host, store.queue_hold()?.as_ref(), now);
     let checkpoint = crate::model::ExportCheckpoint {
         store_id: state.store_id.clone(),
         sequence: state.metrics.exported_sequence(),
@@ -1436,7 +1443,7 @@ fn claim_spawned_worker(
             return Ok(None);
         }
         let request = state.find_mut(id)?;
-        if claim.protocol != 1
+        if !matches!(claim.protocol, 1 | 2)
             || claim.pid_namespace != namespace
             || claim.request_id != *id
             || claim.generation != generation
@@ -1463,6 +1470,10 @@ fn claim_spawned_worker(
 }
 
 pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
+    // Keep the shared guard through the grant transaction: a drain hold cannot
+    // start between checking admission and publishing a running lease.
+    // Provenance: SWM-429. Trace: FR-005-AC-4, FR-011-AC-7
+    let admission = store.try_admission_lock()?;
     let (snapshot, _) = store.snapshot()?;
     let claims: std::collections::BTreeMap<_, _> = snapshot
         .requests
@@ -1486,7 +1497,7 @@ pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
         || Ok((now_ms()?, clock_ms()?)),
         |state, config, now, clock| {
             let sample = config.sample(now).ok();
-            loop {
+            while admission.is_some() {
                 let positions = state.queue_positions(config, clock);
                 let mut ordered: Vec<_> = positions.iter().collect();
                 ordered.sort_by_key(|(_, position)| **position);
@@ -1495,7 +1506,7 @@ pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
                     let id = RequestId(id.clone());
                     let request = state.find(&id)?;
                     let ready = claims.get(&id.0).is_some_and(|claim| {
-                        claim.protocol == 1
+                        matches!(claim.protocol, 1 | 2)
                             && claim.store_id == state.store_id
                             && claim.request_id == id
                             && claim.generation == request.worker_generation
@@ -1527,14 +1538,18 @@ pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
             for id in queued {
                 let registered = claims.get(&id.0).is_some_and(|claim| {
                     state.find(&id).is_ok_and(|request| {
-                        claim.protocol == 1
+                        matches!(claim.protocol, 1 | 2)
                             && claim.store_id == state.store_id
                             && claim.generation == request.worker_generation
                             && claim.worker.is_some()
                             && claim.worker.as_ref() == request.worker.as_ref()
                     })
                 });
-                let reason = state.admission_reason(&id, config, sample.as_ref(), now, clock)?;
+                let reason = if admission.is_none() {
+                    Some("install_drain")
+                } else {
+                    state.admission_reason(&id, config, sample.as_ref(), now, clock)?
+                };
                 let blocks = state.block_observations(&id, config, sample.as_ref(), now, clock)?;
                 let request = state.find_mut(&id)?;
                 // The worker-only lifetime lock is its queued liveness signal.
@@ -1716,7 +1731,7 @@ pub(crate) fn worker(store: &Store, id: &RequestId, generation: Option<u64>) -> 
         store.transaction(|state, _| {
             state.find_mut(id)?.pid_namespace = crate::process::pid_namespace()?;
             store.write_claim(&crate::model::WorkerClaim {
-                protocol: 1,
+                protocol: 2,
                 store_id: state.store_id.clone(),
                 request_id: id.clone(),
                 generation: fence.generation,
@@ -1728,6 +1743,41 @@ pub(crate) fn worker(store: &Store, id: &RequestId, generation: Option<u64>) -> 
     }
     let mut last_snapshot = None;
     let request = loop {
+        if store.try_admission_lock()?.is_none() {
+            let (state, _) = store.snapshot()?;
+            let request = state.find(id)?;
+            if !fence.owns(request) || request.phase.terminal() {
+                return Ok(());
+            }
+            if request.phase == Phase::Queued {
+                store.transaction(|state, _| {
+                    if state.find(id)?.phase == Phase::Queued && fence.owns(state.find(id)?) {
+                        let mut claim = store.claim(id)?.ok_or_else(|| {
+                            Error::new(ErrorCode::State, "queued handoff claim missing")
+                        })?;
+                        claim.worker = None;
+                        store.write_claim(&claim)?;
+                    }
+                    Ok(())
+                })?;
+                // Keep the spawn lock, PID namespace, caller environment and
+                // descriptors. The successor re-registers this same generation.
+                while store.try_admission_lock()?.is_none() {
+                    std::thread::sleep(Duration::from_millis(wait_interval()));
+                }
+                let error = Command::new(store.service_binary()?)
+                    .arg("--state")
+                    .arg(&store.path)
+                    .arg("--config")
+                    .arg(&store.config_path)
+                    .arg("worker")
+                    .arg(&id.0)
+                    .arg(fence.generation.to_string())
+                    .stdin(Stdio::from(_request_lease))
+                    .exec();
+                return Err(error.into());
+            }
+        }
         if interrupted.load(Ordering::Relaxed) {
             store.transaction(|state, config| {
                 if fence.owns(state.find(id)?) && state.find(id)?.phase == Phase::Queued {

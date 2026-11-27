@@ -12,8 +12,10 @@ mod install;
 mod kache_wrapper;
 mod metrics;
 mod model;
+mod policy;
 mod process;
 mod provenance;
+mod queue;
 mod recovery;
 mod runtime;
 mod sample;
@@ -95,6 +97,11 @@ enum Action {
     },
     /// Print a redacted JSON snapshot of capacity, requests and transitions.
     Status,
+    /// Pause or resume admission without cancelling or reordering requests.
+    Queue {
+        #[command(subcommand)]
+        command: QueueAction,
+    },
     /// Cancel a queued or running request, preserving the lease through cleanup.
     Cancel { request: String },
     /// Recover durable queued requests and verify orphaned running groups.
@@ -144,6 +151,12 @@ enum Action {
         /// Explicitly transfer from the previously recorded rollout owner.
         #[arg(long)]
         transfer_from: Option<String>,
+        /// Hold new admissions and wait for running leases before installation.
+        #[arg(long)]
+        drain: bool,
+        /// Maximum drain wait in milliseconds (1..=86400000; default 300000).
+        #[arg(long, requires = "drain", value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
+        drain_timeout_ms: Option<u64>,
     },
     /// Compare installed CLI versions against the pinned tool manifest.
     CheckInstall {
@@ -172,7 +185,12 @@ enum Action {
         generation: Option<u64>,
     },
     #[command(hide = true)]
-    Scheduler,
+    Scheduler {
+        #[arg(long)]
+        wait_for_admission: bool,
+        #[arg(long)]
+        install_token: Option<String>,
+    },
     #[command(hide = true)]
     Watchdog { request: String, generation: u64 },
     #[command(hide = true)]
@@ -180,7 +198,21 @@ enum Action {
 }
 
 #[derive(Subcommand)]
+enum QueueAction {
+    /// Durably hold admissions; running leases finish and queued requests retain order.
+    Pause {
+        /// Age in milliseconds after which monitoring alerts (default fifteen minutes).
+        #[arg(long, default_value_t = 900_000, value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
+        alert_after_ms: u64,
+    },
+    /// Release a durable operator hold, including one retained after a crash.
+    Resume,
+}
+
+#[derive(Subcommand)]
 enum PolicyAction {
+    /// Validate and atomically update one policy key, with backup and audit hash.
+    Set { key: String, value: String },
     /// Print the effective host policy as JSON.
     Show,
     /// Write a measured default policy; use --force to replace an existing file.
@@ -225,6 +257,8 @@ fn execute(cli: Cli) -> Result<i32> {
     if let Action::InstallTools {
         owner,
         transfer_from,
+        drain,
+        drain_timeout_ms,
     } = &cli.command
     {
         let home = std::env::var_os("HOME")
@@ -236,6 +270,7 @@ fn execute(cli: Cli) -> Result<i32> {
             std::env::var_os("PATH").as_deref(),
             owner,
             transfer_from.as_deref(),
+            drain.then(|| std::time::Duration::from_millis(drain_timeout_ms.unwrap_or(300_000))),
         )
         .map(|()| 0);
     }
@@ -345,6 +380,13 @@ fn execute(cli: Cli) -> Result<i32> {
             }
             PolicyAction::Init { force } => {
                 ensure_policy(&config, *force)?;
+                writable::private_directory(&state)?;
+                policy::baseline(&state, &config, "init")?;
+                return Ok(0);
+            }
+            PolicyAction::Set { key, value } => {
+                let store = store::Store::open(&state, &config)?;
+                policy::set(&store, key, value)?;
                 return Ok(0);
             }
         }
@@ -382,6 +424,21 @@ fn execute(cli: Cli) -> Result<i32> {
         }
         Action::Status => {
             println!("{}", serde_json::to_string(&runtime::status(&store)?)?);
+            Ok(0)
+        }
+        Action::Queue { command } => {
+            match command {
+                QueueAction::Pause { alert_after_ms } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&queue::pause(&store, alert_after_ms)?)?
+                    );
+                }
+                QueueAction::Resume => {
+                    queue::resume(&store)?;
+                    scheduler::ensure(&store)?;
+                }
+            }
             Ok(0)
         }
         Action::Cancel { request } => {
@@ -429,8 +486,11 @@ fn execute(cli: Cli) -> Result<i32> {
             runtime::worker(&store, &RequestId(request), generation)?;
             Ok(0)
         }
-        Action::Scheduler => {
-            scheduler::run(&store)?;
+        Action::Scheduler {
+            wait_for_admission,
+            install_token,
+        } => {
+            scheduler::run(&store, wait_for_admission, install_token.as_deref())?;
             Ok(0)
         }
         Action::Watchdog {
@@ -937,6 +997,55 @@ fn emit_error(error: &error::Error, explicit_state: Option<&std::path::Path>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Provenance: SWM-429. Trace: FR-011-AC-7
+    #[test]
+    fn install_drain_cli_requires_a_positive_bounded_timeout_and_explicit_hold() {
+        for tail in [
+            vec!["--drain-timeout-ms", "100"],
+            vec!["--drain", "--drain-timeout-ms", "0"],
+            vec!["--drain", "--drain-timeout-ms", "86400001"],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    ["locked-build", "install-tools", "--owner", "fixture"]
+                        .into_iter()
+                        .chain(tail)
+                )
+                .is_err()
+            );
+        }
+        let parsed = Cli::try_parse_from([
+            "locked-build",
+            "install-tools",
+            "--owner",
+            "fixture",
+            "--drain",
+        ]);
+        assert!(matches!(
+            parsed,
+            Ok(Cli {
+                command: Action::InstallTools {
+                    drain: true,
+                    drain_timeout_ms: None,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "locked-build",
+                "install-tools",
+                "--owner",
+                "fixture",
+                "--drain",
+                "--drain-timeout-ms",
+                "86400000",
+            ])
+            .is_ok()
+        );
+    }
 
     /// Provenance: SWM-380. Trace: FR-011-AC-7
     #[test]
