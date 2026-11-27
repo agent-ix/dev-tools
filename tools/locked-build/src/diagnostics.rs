@@ -86,6 +86,20 @@ pub(crate) fn process(request: &Request, refused: bool) -> String {
 
 pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Diagnostic {
     let id = &request.id.0;
+    if request.reason.as_deref() == Some("operator_release") {
+        return Diagnostic::failure(
+            Code::SupervisionLost,
+            id,
+            "policy.operator_release_allowed",
+            true.into(),
+            true.into(),
+            request
+                .supervision_detail
+                .as_deref()
+                .unwrap_or("explicit operator release"),
+            "not-signalled/operator-release",
+        );
+    }
     let memory_key = request.memory_limit_key.clone().unwrap_or_else(|| {
         if config.memory_per_job_by_class.contains_key(&request.class) {
             format!(

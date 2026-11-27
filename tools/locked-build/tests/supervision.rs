@@ -3,6 +3,8 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -28,6 +30,213 @@ impl Drop for NamespaceChild {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// Provenance: SWM-421, SWM-400. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "native Linux unprivileged namespace recovery and operator release"]
+fn unshare_recovery_drains_only_the_extinct_namespace() -> TestResult {
+    let harness = Harness::new(3, 120000)?;
+    fs::create_dir_all(&harness.state)?;
+    fs::set_permissions(&harness.state, fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        harness.state.join("host-namespace.json"),
+        serde_json::to_vec(&json!({
+            "boot_id": fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim(),
+            "pid_namespace": fs::read_link("/proc/self/ns/pid")?.to_string_lossy(),
+        }))?,
+    )?;
+    let spawn = |label: &str| -> Result<NamespaceChild, Box<dyn std::error::Error>> {
+        Ok(NamespaceChild(
+            Command::new("unshare")
+                .args([
+                    "--user",
+                    "--map-root-user",
+                    "--pid",
+                    "--fork",
+                    "--mount-proc",
+                    "--kill-child=KILL",
+                ])
+                .arg(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "namespace_recovery_fixture",
+                    "--ignored",
+                    "--test-threads=4",
+                ])
+                .env("IX_BUILD_RECOVERY_STATE", &harness.state)
+                .env("IX_BUILD_RECOVERY_CONFIG", &harness.config)
+                .env(
+                    "LOCKED_BUILD_FIXTURE_MARKER",
+                    harness.root.path().join(label),
+                )
+                .env(
+                    "LOCKED_BUILD_FIXTURE_RELEASE",
+                    harness.root.path().join(format!("release-{label}")),
+                )
+                .env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    "unix:path=/nonexistent-locked-build-test-bus",
+                )
+                .stdout(Stdio::from(fs::File::create(
+                    harness.root.path().join(format!("{label}.stdout")),
+                )?))
+                .stderr(Stdio::from(fs::File::create(
+                    harness.root.path().join(format!("{label}.stderr")),
+                )?))
+                .spawn()?,
+        ))
+    };
+    let mut children = Vec::new();
+    for label in ["dead", "live", "operator"] {
+        let mut child = spawn(label)?;
+        observed(|| {
+            harness.root.path().join(label).exists()
+                || child.0.try_wait().is_ok_and(|status| status.is_some())
+        });
+        assert!(
+            harness.root.path().join(label).exists(),
+            "{}\n{}",
+            fs::read_to_string(harness.root.path().join(format!("{label}.stderr")))?,
+            fs::read_to_string(harness.root.path().join(format!("{label}.stdout")))?
+        );
+        children.push(child);
+    }
+    let before = harness.report()?;
+    assert_eq!(before["used_units"], 3);
+    let live_id = before["requests"][1]["request_id"]
+        .as_str()
+        .ok_or("live id missing")?;
+    let refused = harness
+        .cli()
+        .args([
+            "recover",
+            "--dry-run",
+            "--release",
+            live_id,
+            "--reason",
+            "fixture attempted live release",
+        ])
+        .output()?;
+    assert_eq!(refused.status.code(), Some(2));
+    let refused: Value = serde_json::from_slice(&refused.stdout)?;
+    assert_eq!(refused["decisions"][0]["action"], "refused");
+    assert!(
+        !refused["decisions"][0]["live_evidence"]
+            .as_array()
+            .ok_or("evidence missing")?
+            .is_empty()
+    );
+    for index in [0, 2] {
+        children[index].0.kill()?;
+        children[index].0.wait()?;
+    }
+    let dry = harness.cli().args(["recover", "--dry-run"]).output()?;
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let dry: Value = serde_json::from_slice(&dry.stdout)?;
+    assert_eq!(dry["decisions"][0]["action"], "would_drain");
+    assert_eq!(dry["decisions"][1]["action"], "retain");
+    assert_eq!(dry["decisions"][2]["action"], "would_drain");
+    let operator_id = before["requests"][2]["request_id"]
+        .as_str()
+        .ok_or("operator id missing")?;
+    let released = harness
+        .cli()
+        .args([
+            "recover",
+            "--release",
+            operator_id,
+            "--reason",
+            "fixture owner confirmed ended sandbox",
+        ])
+        .output()?;
+    assert!(
+        released.status.success(),
+        "{}",
+        String::from_utf8_lossy(&released.stderr)
+    );
+    let released: Value = serde_json::from_slice(&released.stdout)?;
+    assert_eq!(released["decisions"][0]["action"], "released");
+    assert!(harness.output("recover")?.status.success());
+    let after = harness.report()?;
+    assert_eq!(after["used_units"], 1);
+    assert_eq!(after["requests"][0]["state"], "failed");
+    assert_eq!(after["requests"][0]["code"], "LB_SUPERVISION_LOST");
+    assert_eq!(after["requests"][1]["state"], "running");
+    assert!(children[1].0.try_wait()?.is_none());
+    assert!(
+        after["events"]
+            .as_array()
+            .ok_or("events missing")?
+            .iter()
+            .any(|event| event["request_id"] == operator_id
+                && event["kind"] == "operator_release"
+                && event["code"] == "LB_SUPERVISION_LOST"
+                && event["killed"] == "not-signalled/operator-release"
+                && event["message"].as_str().is_some_and(|text| text
+                    .contains("reason=fixture owner confirmed ended sandbox")
+                    && text.contains(&format!("uid={}", nix::unistd::geteuid()))
+                    && text.contains("prior_stop=None")))
+    );
+    let missing = harness.root.path().join("missing-state");
+    let rejected = Command::new(env!("CARGO_BIN_EXE_locked-build"))
+        .arg("--state")
+        .arg(&missing)
+        .arg("--config")
+        .arg(&harness.config)
+        .args(["recover", "--dry-run"])
+        .output()?;
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(!missing.exists(), "dry-run error created a state directory");
+    let invalid = Command::new(env!("CARGO_BIN_EXE_locked-build"))
+        .env("LOCKED_BUILD_STATE", &missing)
+        .args(["recover", "--dry-run=true"])
+        .output()?;
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(
+        !missing.exists(),
+        "invalid dry-run flag created a state directory"
+    );
+    eprintln!(
+        "namespace recovery: extinct drained; live retained; operator release audited; dry-run errors wrote no state"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "namespace recovery subprocess"]
+fn namespace_recovery_fixture() -> TestResult {
+    let marker = std::env::var_os("LOCKED_BUILD_FIXTURE_MARKER").ok_or("marker missing")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_locked-build"))
+        .arg("--state")
+        .arg(std::env::var_os("IX_BUILD_RECOVERY_STATE").ok_or("state missing")?)
+        .arg("--config")
+        .arg(std::env::var_os("IX_BUILD_RECOVERY_CONFIG").ok_or("config missing")?)
+        .args([
+            "run",
+            "--owner",
+            "test:namespace:worker",
+            "--ticket",
+            "SWM-421",
+            "--",
+        ])
+        .arg(std::env::current_exe()?)
+        .args(["--exact", "subprocess_fixture", "--ignored", "--skip"])
+        .arg(marker)
+        .env("LOCKED_BUILD_FIXTURE_MODE", "block")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }
 
 /// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4

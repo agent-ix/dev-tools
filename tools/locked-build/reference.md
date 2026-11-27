@@ -26,6 +26,17 @@ Status reads an atomic state/metrics snapshot without acquiring the write lock.
 `locked-build wait REQUEST-ID` attaches to an accepted request. On Linux,
 `locked-build recover --handoff-queued` fences and replaces legacy queued
 workers in the caller's PID namespace. Running requests retain their workers.
+
+Host-side recovery checks foreign namespace inits through readable `NSpid` fields and namespace links.
+Host tasks with protected namespace links do not make this census incomplete.
+An unreadable possible init preserves the lease; a provably extinct namespace produces a terminal `LB_SUPERVISION_LOST` event.
+
+`locked-build recover --dry-run` previews foreign leases without modifying the store or generating policy, aliases or failure logs.
+`recover --dry-run --release <request-id> --reason "owner confirmed ended sandbox"` previews an explicit operator release.
+Omit `--dry-run` to apply that release after authorization.
+Observed live worker, watchdog or command evidence refuses release, including after the hold deadline.
+Release requires an expired hold or a provably dead owner worker.
+The `operator_release` event records the operator UID, reason, prior stop and `LB_SUPERVISION_LOST`; release sends no signals.
 During a live queue upgrade, the operator must stop legacy queued `run` callers
 and reattach with `wait`; their old global polling otherwise continues.
 Keep running commands and their callers alive. Other hosts require a drained
@@ -337,7 +348,8 @@ an attribution.
 
 ## Transition events
 
-`status` and `recover` emit a versioned JSON snapshot.
+`status` and ordinary `recover` emit a versioned JSON snapshot.
+Recovery previews and explicit releases emit a `dry_run` flag and per-request `decisions` with actions and liveness evidence.
 Each transition has stable store/event/request IDs, host, owner, ticket,
 UTC time, resulting state, priority, units, capacity/free units, wait/hold durations, and reason.
 Consumers deduplicate by event ID and retain their own history before pruning.
