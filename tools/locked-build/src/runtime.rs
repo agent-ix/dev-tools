@@ -2419,7 +2419,9 @@ fn start_command(
         lease_record.cache_wrapper = cache_wrapper;
         lease_record.cache_wrapper_status = cache_wrapper_status;
         let child = command.spawn()?;
-        lease_record.command = Processes::read().member_identity(child.id());
+        // This owned child was just born and may already have moved groups.
+        // Read its known PID directly instead of relying on a host-wide census.
+        lease_record.command = Processes::read_workers(&[child.id()]).member_identity(child.id());
         state.find_mut(&request.id)?.lease_record = Some(lease_record);
         let running = state.find_mut(&request.id)?;
         running.command_started_clock_ms = Some(clock_ms()?);

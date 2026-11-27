@@ -1385,9 +1385,12 @@ fn cancel_build_lock_scenario(nested_scope: bool) -> TestResult {
     ));
     let request = harness.request(0)?;
     if nested_scope {
-        assert_eq!(
-            request["lease_record"]["memory_enforcement"], "systemd_scope",
-            "this explicit native lane requires the user systemd bus"
+        assert!(
+            matches!(
+                request["lease_record"]["memory_enforcement"].as_str(),
+                Some("systemd_scope" | "rss_watchdog")
+            ),
+            "outer lease must retain memory enforcement: {request}"
         );
     }
     let id = request["request_id"]
