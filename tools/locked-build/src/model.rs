@@ -81,6 +81,9 @@ pub(crate) struct CommandOutcome {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseRecord {
+    /// Observed kernel OOM-kill counter for this command's memory scope.
+    #[serde(default)]
+    pub oom_kill_count: u64,
     /// Identity of the launched command; memory accounting starts here.
     #[serde(default)]
     pub command: Option<ProcessIdentity>,
@@ -169,6 +172,8 @@ pub enum MemoryEnforcement {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Request {
+    #[serde(default)]
+    pub supervision_detail: Option<String>,
     #[serde(default, flatten)]
     pub trace: locked_build::wire::RequestTrace,
     #[serde(default)]
@@ -194,6 +199,12 @@ pub(crate) struct Request {
     /// Memory limit reserved for this lease when policy configures one.
     #[serde(default)]
     pub memory_cap_bytes: Option<u64>,
+    /// Admission reservation, independent of the enforced hard cap.
+    #[serde(default)]
+    pub memory_reservation_bytes: Option<u64>,
+    /// Policy source selected with the recorded hard cap, before policy edits.
+    #[serde(default)]
+    pub memory_limit_key: Option<String>,
     /// Cargo job count paired with the reserved memory lease.
     #[serde(default)]
     pub memory_cargo_jobs: Option<u32>,
@@ -268,6 +279,9 @@ where
 /// Stable transition evidence; command arguments and environment are excluded.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Event {
+    /// Repairs a previously published outcome without counting a new attempt.
+    #[serde(default)]
+    pub correction: bool,
     /// Queue/diagnostic fields shared with status consumers.
     #[serde(default, flatten)]
     pub trace: locked_build::wire::RequestTrace,
@@ -314,6 +328,11 @@ fn transition_kind() -> String {
 }
 
 impl Request {
+    pub(crate) fn reservation_bytes(&self) -> u64 {
+        self.memory_reservation_bytes
+            .or(self.memory_cap_bytes)
+            .unwrap_or(0)
+    }
     pub(crate) fn trace_snapshot(&self, clock: u64) -> locked_build::wire::RequestTrace {
         let mut trace = self.trace.clone();
         let end = self.ended_clock_ms.unwrap_or(clock);
@@ -359,6 +378,9 @@ impl Request {
             .as_ref()
             .and_then(|lease| lease.cargo_build_jobs);
         trace.granted_memory_bytes = self.started_at_ms.and(self.memory_cap_bytes);
+        trace.granted_memory_reservation_bytes = self
+            .started_at_ms
+            .and(self.memory_reservation_bytes.or(self.memory_cap_bytes));
         if let Some(last) = self.blocked_at_clock_ms {
             for reason in &mut trace.blocked_reasons {
                 if self.active_blocked_reasons.contains(&reason.reason) {
@@ -501,7 +523,7 @@ impl State {
             .iter()
             .filter(|request| request.phase == Phase::Running)
             .fold(0_u64, |sum, request| {
-                sum.saturating_add(request.memory_cap_bytes.unwrap_or(0))
+                sum.saturating_add(request.reservation_bytes())
             })
     }
 
@@ -528,6 +550,7 @@ impl State {
             .unwrap_or(clock)
             .saturating_sub(request.enqueued_clock_ms);
         let event = Event {
+            correction: false,
             trace: request.trace_snapshot(clock),
             kind: transition_kind(),
             schema_version: 1,
@@ -618,9 +641,9 @@ impl State {
                 .unwrap_or(0)
                 .saturating_sub(self.memory_used(config));
             let backfill = config.memory_admission == MemoryAdmissionMode::LeaseAccounted
-                && next.memory_cap_bytes.unwrap_or(0) > free
+                && next.reservation_bytes() > free
                 && clock.saturating_sub(next.enqueued_clock_ms) < reservation_ms
-                && request.memory_cap_bytes.unwrap_or(0) <= free;
+                && request.reservation_bytes() <= free;
             if !backfill {
                 return Ok(Some("fifo_or_priority_reservation"));
             }
@@ -637,7 +660,7 @@ impl State {
         }
         if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
             let budget = config.memory_budget_bytes.unwrap_or(0);
-            let cap = request.memory_cap_bytes.unwrap_or(0);
+            let cap = request.reservation_bytes();
             if self.memory_used(config).saturating_add(cap) > budget {
                 return Ok(Some("memory_budget"));
             }
@@ -717,7 +740,7 @@ impl State {
         if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
             let value = self
                 .memory_used(config)
-                .saturating_add(request.memory_cap_bytes.unwrap_or(0));
+                .saturating_add(request.reservation_bytes());
             let limit = config.memory_budget_bytes.unwrap_or(0);
             if value > limit {
                 add("memory_budget", value as f64, limit as f64);

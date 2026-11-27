@@ -336,9 +336,23 @@ fn lock_worktree_slot(state: &std::path::Path, repository: &str, slot: u32) -> R
 fn resolve_paths(
     state_flag: Option<&std::path::Path>,
     config_flag: Option<&std::path::Path>,
-    env: impl FnMut(&str) -> Option<PathBuf>,
+    mut env: impl FnMut(&str) -> Option<PathBuf>,
 ) -> Result<(PathBuf, PathBuf)> {
-    resolve_paths_with_shared(state_flag, config_flag, env, &writable::shared_root()?)
+    let state = state_flag
+        .map(PathBuf::from)
+        .or_else(|| env("LOCKED_BUILD_STATE"));
+    let config = config_flag
+        .map(PathBuf::from)
+        .or_else(|| env("LOCKED_BUILD_CONFIG"));
+    if let (Some(state), Some(config)) = (&state, &config) {
+        return Ok((state.clone(), config.clone()));
+    }
+    resolve_paths_with_shared(
+        state.as_deref(),
+        config.as_deref(),
+        env,
+        &writable::shared_root()?,
+    )
 }
 
 fn resolve_paths_with_shared(

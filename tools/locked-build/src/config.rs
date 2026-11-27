@@ -89,11 +89,16 @@ pub struct Config {
     pub memory_admission: MemoryAdmissionMode,
     /// Total build memory budget for `lease_accounted` admission.
     pub memory_budget_bytes: Option<u64>,
-    /// Estimated memory used by one Cargo job or resource unit.
-    pub memory_per_job_bytes: u64,
-    /// Per-class per-job memory estimates.
+    /// Admission reservation per Cargo job or resource unit.
+    pub memory_reserve_per_job_bytes: u64,
+    /// Enforced hard memory limit per Cargo job or resource unit.
+    pub memory_limit_per_job_bytes: u64,
+    /// Per-class per-job hard memory limits.
     #[serde(default)]
     pub memory_per_job_by_class: BTreeMap<String, u64>,
+    /// Optional admission reservation overrides, independent of hard limits.
+    #[serde(default)]
+    pub memory_reserve_per_job_by_class: BTreeMap<String, u64>,
     /// Maximum lease size accepted for each class.
     #[serde(default)]
     pub memory_cap_by_class: BTreeMap<String, u64>,
@@ -139,8 +144,10 @@ impl Default for Config {
             real_cargo: None,
             memory_admission: MemoryAdmissionMode::LeaseAccounted,
             memory_budget_bytes,
-            memory_per_job_bytes: 6_000_000_000,
+            memory_reserve_per_job_bytes: 3_000_000_000,
+            memory_limit_per_job_bytes: 8_000_000_000,
             memory_per_job_by_class: BTreeMap::new(),
+            memory_reserve_per_job_by_class: BTreeMap::new(),
             memory_cap_by_class: BTreeMap::new(),
             on_missing_cgroup: OnMissingCgroup::RssWatchdog,
         }
@@ -174,7 +181,7 @@ impl Config {
                 "cannot measure host memory for `memory_budget_bytes`",
             )
         })?;
-        let safe_jobs = (memory_budget / config.memory_per_job_bytes).max(1);
+        let safe_jobs = (memory_budget / config.memory_reserve_per_job_bytes).max(1);
         config.cargo_build_jobs = Some(cores.min(u32::try_from(safe_jobs).unwrap_or(u32::MAX)));
 
         let disk_path = crate::writable::shared_root()?;
@@ -283,8 +290,46 @@ impl Config {
         }) {
             return Err(invalid("priority_classes", "contains an unknown class"));
         }
-        if self.memory_per_job_bytes == 0 {
-            return Err(invalid("memory_per_job_bytes", "must be positive"));
+        if self.memory_limit_per_job_bytes == 0 {
+            return Err(invalid("memory_limit_per_job_bytes", "must be positive"));
+        }
+        if self.memory_reserve_per_job_bytes == 0 {
+            return Err(invalid("memory_reserve_per_job_bytes", "must be positive"));
+        }
+        if self
+            .memory_reserve_per_job_by_class
+            .iter()
+            .any(|(class, bytes)| !self.priority_classes.contains_key(class) || *bytes == 0)
+        {
+            return Err(invalid(
+                "memory_reserve_per_job_by_class",
+                "requires known classes and positive reservations",
+            ));
+        }
+        for class in [
+            "must-fix",
+            "point",
+            "block",
+            "periodic",
+            "arch-test",
+            "kani",
+        ] {
+            let reservation = self
+                .memory_reserve_per_job_by_class
+                .get(class)
+                .copied()
+                .unwrap_or(self.memory_reserve_per_job_bytes);
+            let limit = self
+                .memory_per_job_by_class
+                .get(class)
+                .copied()
+                .unwrap_or(self.memory_limit_per_job_bytes);
+            if reservation > limit {
+                return Err(invalid(
+                    "memory_reserve_per_job_bytes",
+                    "effective reservation must not exceed the per-job hard limit",
+                ));
+            }
         }
         if self
             .memory_per_job_by_class
@@ -485,13 +530,15 @@ mod tests {
 
     /// Provenance: SWM-379. Trace: FR-005-AC-4
     #[test]
-    fn generated_policy_uses_six_gb_per_job_and_sizes_jobs_within_budget() -> Result<()> {
+    fn generated_policy_separates_reservation_from_cap_and_sizes_jobs_within_budget() -> Result<()>
+    {
         let policy = Config::measured_default()?;
-        assert_eq!(policy.memory_per_job_bytes, 6_000_000_000);
+        assert_eq!(policy.memory_limit_per_job_bytes, 8_000_000_000);
+        assert_eq!(policy.memory_reserve_per_job_bytes, 3_000_000_000);
         let budget = policy
             .memory_budget_bytes
             .ok_or_else(|| Error::new(ErrorCode::Configuration, "missing measured budget"))?;
-        let expected = u64::from(policy.capacity_units).min((budget / 6_000_000_000).max(1));
+        let expected = u64::from(policy.capacity_units).min((budget / 3_000_000_000).max(1));
         assert_eq!(policy.cargo_build_jobs.map(u64::from), Some(expected));
         Ok(())
     }
@@ -547,7 +594,8 @@ mod tests {
 
         assert_eq!(config.memory_admission, MemoryAdmissionMode::LeaseAccounted);
         assert_eq!(config.memory_budget_bytes, Some(17_179_869_184));
-        assert_eq!(config.memory_per_job_bytes, 6_000_000_000);
+        assert_eq!(config.memory_limit_per_job_bytes, 8_000_000_000);
+        assert_eq!(config.memory_reserve_per_job_bytes, 3_000_000_000);
         config.validate()
     }
 

@@ -219,20 +219,18 @@ fn observe_with_clock(
                 rss_fallback_cap(record.memory_enforcement, request.memory_cap_bytes)
             });
             if let Some(cap) = cap {
-                let sample = request.lease_record.as_ref().and_then(|record| record.command.as_ref()).and_then(|root| processes.command_memory_sample(root));
+                let sample = request
+                    .lease_record
+                    .as_ref()
+                    .and_then(|record| record.command.as_ref())
+                    .and_then(|root| processes.command_memory_sample(root));
                 if let Some(sample) = sample {
-                    request.measured_memory_bytes = Some(sample.bytes);
-                    if let Some(record) = &mut request.lease_record {
-                        if record.memory_sample.is_none() {
-                            let contributions = sample.contributors.iter().map(|row| format!("{}:{}", row.pid, row.bytes)).collect::<Vec<_>>().join(",");
-                            eprintln!("request={} memory_sample metric={} measured_bytes={} memory_cap_bytes={cap} pids={contributions}", id.0, sample.metric.as_str(), sample.bytes);
-                            record.memory_sample = Some(sample.clone());
-                        }
-                        if sample.bytes > cap { record.memory_sample = Some(sample.clone()); }
-                    }
-                    if sample.bytes > cap { request.stop = Some(StopReason::MemoryCap); }
+                    observe_memory_sample(request, sample, cap);
                 } else if processes.group_has_live_members(watchdog.pid, Some(watchdog.pid)) {
-                    return Err(Error::new(ErrorCode::State, "command-tree memory supervision unavailable"));
+                    return Err(Error::new(
+                        ErrorCode::State,
+                        "command-tree memory supervision unavailable",
+                    ));
                 }
             }
         }
@@ -271,6 +269,37 @@ fn observe_with_clock(
             poll_ms: crate::config::POLL_INTERVAL_MS,
         })
     })
+}
+
+pub(crate) fn observe_memory_sample(
+    request: &mut crate::model::Request,
+    sample: crate::model::MemorySample,
+    cap: u64,
+) {
+    request.measured_memory_bytes = Some(sample.bytes);
+    if let Some(record) = &mut request.lease_record {
+        if record.memory_sample.is_none() {
+            let contributions = sample
+                .contributors
+                .iter()
+                .map(|row| format!("{}:{}", row.pid, row.bytes))
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "request={} memory_sample metric={} measured_bytes={} memory_cap_bytes={cap} pids={contributions}",
+                request.id.0,
+                sample.metric.as_str(),
+                sample.bytes
+            );
+            record.memory_sample = Some(sample.clone());
+        }
+        if sample.bytes > cap {
+            record.memory_sample = Some(sample.clone());
+        }
+    }
+    if sample.bytes > cap {
+        request.stop = Some(StopReason::MemoryCap);
+    }
 }
 
 fn rss_fallback_cap(enforcement: MemoryEnforcement, request_cap: Option<u64>) -> Option<u64> {

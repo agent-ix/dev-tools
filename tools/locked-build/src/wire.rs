@@ -233,6 +233,10 @@ pub struct RequestTrace {
     pub requested_memory_bytes: Option<u64>,
     /// Reserved/admitted memory cap.
     pub granted_memory_bytes: Option<u64>,
+    /// Requested admission reservation, separate from the hard-cap aliases.
+    pub requested_memory_reservation_bytes: Option<u64>,
+    /// Granted admission reservation, separate from the hard-cap aliases.
+    pub granted_memory_reservation_bytes: Option<u64>,
 }
 
 /// One counter series in status JSON.
@@ -354,6 +358,8 @@ pub struct RequestProjection {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct EventProjection {
+    /// This event corrects an earlier outcome of the same attempt.
+    pub correction: bool,
     /// Event sequence identity.
     pub event_id: String,
     /// Snapshot UTC timestamp.

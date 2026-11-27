@@ -77,9 +77,35 @@ fn install_tools_with_measurement(
         )
     })?;
     std::fs::create_dir_all(installed_bin_dir)?;
-    copy_file_if_changed(current_exe, &installed_path)?;
     let config_dir = crate::writable::host_root(Some(home));
     let shared = crate::writable::private_directory(shared)?;
+    let state_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(shared.join("lock"))?;
+    state_lock.lock()?;
+    match std::fs::read(shared.join("state.json")) {
+        Ok(bytes) => {
+            let state: crate::model::State = serde_json::from_slice(&bytes)?;
+            if state
+                .requests
+                .iter()
+                .any(|request| !request.phase.terminal())
+            {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "drain queued and running leases before install-tools; run installation outside an admitted lease",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    copy_file_if_changed(current_exe, &installed_path)?;
+    crate::writable::install_host_namespace(&shared)?;
     let data_dir = home.join(".local/share/dev-tools");
     let shim_dir = home.join(".local/lib/locked-build/shims");
     create_private_dir(&config_dir)?;
@@ -87,18 +113,18 @@ fn install_tools_with_measurement(
     create_private_dir(&shim_dir)?;
 
     let host_policy = config_dir.join("policy.json");
+    for path in [
+        home.join(".config/locked-build/policy.json"),
+        host_policy.clone(),
+        shared.join("policy.json"),
+    ] {
+        migrate_memory_fields(&path)?;
+    }
     migrate_policy(&home.join(".config/locked-build/policy.json"), &host_policy)?;
     let policy_path = shared.join("policy.json");
-    let previous_config = std::fs::read(shared.join("state.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<crate::model::State>(&bytes).ok())
-        .map(|state| state.config_path);
-    let host_identity = host_policy.canonicalize().ok();
-    let legacy_parent = home.join(".config/locked-build").canonicalize().ok();
-    let legacy_identity = legacy_parent.map(|parent| parent.join("policy.json"));
     let adopt_host = !policy_path.exists()
-        || (previous_config.is_some()
-            && (previous_config == host_identity || previous_config == legacy_identity));
+        || (host_policy.exists()
+            && host_policy.canonicalize().ok() != policy_path.canonicalize().ok());
     let mut policy = if adopt_host && host_policy.exists() {
         Config::read(&host_policy)?
     } else if policy_path.exists() {
@@ -194,6 +220,67 @@ fn migrate_policy(old: &Path, new: &Path) -> Result<()> {
     Ok(())
 }
 
+fn migrate_memory_fields(path: &Path) -> Result<()> {
+    if !path.try_exists()? {
+        return Ok(());
+    }
+    let path = path.canonicalize()?;
+    let before = std::fs::read(&path)?;
+    let mut policy: serde_json::Value = serde_json::from_slice(&before)?;
+    let fields = policy
+        .as_object_mut()
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "host policy must be an object"))?;
+    if fields.remove("memory_per_job_bytes").is_none() {
+        return Ok(());
+    }
+    fields
+        .entry("memory_reserve_per_job_bytes")
+        .or_insert(3_000_000_000_u64.into());
+    fields
+        .entry("memory_limit_per_job_bytes")
+        .or_insert(8_000_000_000_u64.into());
+    // Preserve a deliberately smaller per-class cap without reserving more
+    // than it can enforce after the split.
+    let reserve = fields
+        .get("memory_reserve_per_job_bytes")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(3_000_000_000);
+    let overrides: Vec<_> = fields
+        .get("memory_per_job_by_class")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(class, limit)| {
+            limit
+                .as_u64()
+                .filter(|limit| *limit < reserve)
+                .map(|limit| (class.clone(), limit))
+        })
+        .collect();
+    if !overrides.is_empty() {
+        let reservations = fields
+            .entry("memory_reserve_per_job_by_class")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(reservations) = reservations.as_object_mut() {
+            for (class, bytes) in overrides {
+                reservations.entry(class).or_insert(bytes.into());
+            }
+        }
+    }
+    let validated: Config = serde_json::from_value(policy.clone())?;
+    validated.validate()?;
+    let backup = path.with_file_name("policy.before-memory-split.json");
+    if !crate::writable::publish_file(&backup, &before, false)? && std::fs::read(&backup)? != before
+    {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "memory-policy migration backup conflicts; preserving policy",
+        ));
+    }
+    crate::writable::publish_file(&path, &serde_json::to_vec_pretty(&policy)?, true)?;
+    Ok(())
+}
+
 fn install_npm_packages(manifest: &ToolManifest) -> Result<()> {
     let arguments = npm_install_arguments(&manifest.tools)?;
     if arguments.is_empty() {
@@ -285,8 +372,12 @@ fn check_tool(
     search_path: Option<&OsStr>,
     home: Option<&Path>,
 ) -> std::result::Result<String, String> {
-    let executable = resolve_tool_executable(&pin.executable, search_path, home)
-        .ok_or_else(|| "unavailable=not-found".to_owned())?;
+    let executable = resolve_tool_executable(
+        &pin.executable,
+        search_path,
+        if pin.version.is_some() { home } else { None },
+    )
+    .ok_or_else(|| "unavailable=not-found".to_owned())?;
     let Some(version) = pin.version.as_deref() else {
         return Ok("present".to_owned());
     };
@@ -377,7 +468,7 @@ fn resolve_tool_executable(
     }
     candidates.into_iter().find_map(|candidate| {
         if !candidate.is_file()
-            || std::fs::metadata(&candidate).ok()?.permissions().mode() & 0o111 == 0
+            || nix::unistd::access(&candidate, nix::unistd::AccessFlags::X_OK).is_err()
         {
             return None;
         }
@@ -469,6 +560,90 @@ fn shell_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trace: FR-011-AC-7, FR-005-AC-4
+    #[test]
+    fn install_refuses_a_live_queue_before_changing_binary_or_policy() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let shared = root.path().join("shared");
+        let policy = root.path().join("policy.json");
+        std::fs::write(&policy, serde_json::to_vec(&Config::default())?)?;
+        let store = crate::store::Store::open(&shared, &policy)?;
+        crate::runtime::enqueue(&store, "fixture", "SWM-379", 1, 0, None, &["true".into()])?;
+        let before = std::fs::read(shared.join("state.json"))?;
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join(".local/bin"))?;
+        let binary = home.join(".local/bin/locked-build");
+        std::fs::write(&binary, b"old installed bytes")?;
+        let result = install_tools_with_measurement(
+            &home,
+            &std::env::current_exe()?,
+            None,
+            &shared,
+            Config::measured_default,
+        );
+        assert!(
+            result
+                .err()
+                .is_some_and(|error| error.message.contains("drain queued and running leases"))
+        );
+        assert_eq!(std::fs::read(binary)?, b"old installed bytes");
+        assert_eq!(std::fs::read(shared.join("state.json"))?, before);
+        assert!(!shared.join("policy.json").exists());
+        Ok(())
+    }
+
+    /// Trace: FR-011-AC-7
+    #[test]
+    fn memory_policy_split_migrates_once_and_preserves_host_tuning() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("policy.json");
+        let before = br#"{"host":"titan","cargo_build_jobs":4,"rust_test_threads":4,"disk_reserve_bytes":100000000000,"hold_ms":5400000,"memory_per_job_bytes":6000000000,"memory_per_job_by_class":{"point":2500000000}}"#;
+        std::fs::write(&path, before)?;
+        migrate_memory_fields(&path)?;
+        let policy = Config::read(&path)?;
+        assert_eq!(
+            (
+                policy.memory_reserve_per_job_bytes,
+                policy.memory_limit_per_job_bytes
+            ),
+            (3_000_000_000, 8_000_000_000)
+        );
+        assert_eq!(
+            policy.memory_reserve_per_job_by_class.get("point"),
+            Some(&2_500_000_000)
+        );
+        assert_eq!(
+            (
+                policy.cargo_build_jobs,
+                policy.rust_test_threads,
+                policy.disk_reserve_bytes,
+                policy.hold_ms
+            ),
+            (Some(4), Some(4), 100_000_000_000, 5_400_000)
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("policy.before-memory-split.json"))?,
+            before
+        );
+        let installed = std::fs::read(&path)?;
+        migrate_memory_fields(&path)?;
+        assert_eq!(std::fs::read(&path)?, installed);
+        let explicit = root.path().join("explicit");
+        std::fs::create_dir(&explicit)?;
+        let explicit = explicit.join("policy.json");
+        std::fs::write(&explicit, br#"{"memory_per_job_bytes":6000000000,"memory_reserve_per_job_bytes":1000000000,"memory_limit_per_job_bytes":16000000000}"#)?;
+        migrate_memory_fields(&explicit)?;
+        let policy = Config::read(&explicit)?;
+        assert_eq!(
+            (
+                policy.memory_reserve_per_job_bytes,
+                policy.memory_limit_per_job_bytes
+            ),
+            (1_000_000_000, 16_000_000_000)
+        );
+        Ok(())
+    }
 
     /// Provenance: SWM-374. Trace: FR-011-AC-7
     #[test]
@@ -617,6 +792,42 @@ mod tests {
         Ok(())
     }
 
+    /// Trace: FR-011-AC-7
+    #[test]
+    fn presence_only_requires_path_and_actual_execute_permission() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home_bin = root.path().join("home/.local/bin");
+        let path_bin = root.path().join("path");
+        std::fs::create_dir_all(&home_bin)?;
+        std::fs::create_dir(&path_bin)?;
+        let executable = home_bin.join("presence-tool");
+        std::fs::write(&executable, b"not invoked")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let pin = ToolPin {
+            name: "presence-tool".into(),
+            executable: "presence-tool".into(),
+            version: None,
+            npm_package: None,
+        };
+        let path = std::env::join_paths([&path_bin])
+            .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+        assert_eq!(
+            check_tool(&pin, Some(&path), Some(&root.path().join("home"))),
+            Err("unavailable=not-found".into())
+        );
+        let in_path = path_bin.join("presence-tool");
+        std::fs::rename(&executable, &in_path)?;
+        assert_eq!(check_tool(&pin, Some(&path), None), Ok("present".into()));
+        std::fs::set_permissions(&in_path, std::fs::Permissions::from_mode(0o001))?;
+        if !nix::unistd::geteuid().is_root() {
+            assert_eq!(
+                check_tool(&pin, Some(&path), None),
+                Err("unavailable=not-found".into())
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn version_check_recognizes_cli_version_formats() {
         assert!(version_matches(
@@ -741,6 +952,10 @@ mod tests {
         prior.transaction(|_, _| Ok(()))?;
         let competing = br#"{"host":"test-host","capacity_units":1,"maximum_units":1,"cargo_build_jobs":8,"rust_test_threads":8}"#;
         std::fs::write(shared.join("policy.json"), competing)?;
+        // A new binary may already have opened status before installation,
+        // rewriting the old config_path. The tuned host policy must still win.
+        crate::store::Store::open(&shared, &shared.join("policy.json"))?
+            .transaction(|_, _| Ok(()))?;
         install_tools_with_measurement(&home, &current_exe, None, &shared, || {
             let mut config: Config =
                 serde_json::from_str(include_str!("../policy.example.json"))

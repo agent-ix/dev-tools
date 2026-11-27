@@ -339,7 +339,7 @@ impl MetricsState {
             .collect();
         ordered.sort_by_key(|(sequence, _)| *sequence);
         for (sequence, event) in ordered {
-            if event.kind == "blocked" || event.kind == "command_started" {
+            if event.correction || event.kind == "blocked" || event.kind == "command_started" {
                 self.last_event_sequence = sequence;
                 continue;
             }
@@ -857,6 +857,7 @@ mod tests {
 
     fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
         Request {
+            supervision_detail: None,
             trace: Default::default(),
             command_started_clock_ms: None,
             blocked_at_clock_ms: None,
@@ -871,6 +872,8 @@ mod tests {
             priority: 0,
             class: "periodic".to_owned(),
             memory_cap_bytes: None,
+            memory_reservation_bytes: None,
+            memory_limit_key: None,
             memory_cargo_jobs: None,
             memory_rust_test_threads: None,
             memory_parallelism: None,
@@ -1313,6 +1316,7 @@ mod tests {
     #[test]
     fn exposition_excludes_ticket_request_command_and_environment_values() -> Result<()> {
         let mut request = crate::model::Request {
+            supervision_detail: None,
             trace: Default::default(),
             command_started_clock_ms: None,
             blocked_at_clock_ms: None,
@@ -1327,6 +1331,8 @@ mod tests {
             priority: 0,
             class: "periodic".to_owned(),
             memory_cap_bytes: None,
+            memory_reservation_bytes: None,
+            memory_limit_key: None,
             memory_cargo_jobs: None,
             memory_rust_test_threads: None,
             memory_parallelism: None,
@@ -1409,6 +1415,7 @@ mod tests {
 
     fn event(sequence: u64, phase: &str, priority: u32, wait_ms: u64) -> Event {
         Event {
+            correction: false,
             trace: Default::default(),
             kind: "transition".to_owned(),
             schema_version: 1,
@@ -1473,10 +1480,13 @@ mod tests {
         let mut refused = event(4, "failed", 0, 0);
         refused.kind = "refused".into();
         refused.trace.diagnostic.code = Some(Code::RefusedMemoryBudget);
-        let events = [admitted, started, timeout, refused];
+        let mut correction = event(5, "succeeded", 0, 2_500);
+        correction.correction = true;
+        correction.trace.diagnostic.code = Some(Code::SupervisionLost);
+        let events = [admitted, started, timeout, refused, correction];
         let mut metrics = MetricsState::default();
-        metrics.reconcile_events(&events, 5)?;
-        metrics.reconcile_events(&events, 5)?;
+        metrics.reconcile_events(&events, 6)?;
+        metrics.reconcile_events(&events, 6)?;
         let saved = serde_json::to_vec(&metrics)?;
         let restored: MetricsState = serde_json::from_slice(&saved)?;
         let state = state(Vec::new());
@@ -1484,6 +1494,7 @@ mod tests {
         for expected in [
             "ix_build_requests_total{host=\"draco\",class=\"periodic\",outcome=\"timed_out\"} 1",
             "ix_build_requests_total{host=\"draco\",class=\"periodic\",outcome=\"refused\"} 1",
+            "ix_build_requests_total{host=\"draco\",class=\"periodic\",outcome=\"ok\"} 0",
             "ix_build_terminations_total{host=\"draco\",class=\"periodic\",code=\"LB_HOLD_TIMEOUT\"} 1",
             "ix_build_terminations_total{host=\"draco\",class=\"periodic\",code=\"LB_REFUSED_MEMORY_BUDGET\"} 1",
             "ix_build_blocked_seconds_total{host=\"draco\",class=\"periodic\",reason=\"memory_budget\"} 3.25",

@@ -13,7 +13,8 @@ fn stable_boot_identity_prevents_timestamp_drift_from_expiring_live_leases() {
     assert!(state.rebooted(Some("kernel-boot-b"), 100));
     state.boot_id = None;
     assert!(!state.rebooted(Some("kernel-boot-a"), 112));
-    assert!(state.rebooted(None, 112));
+    assert!(!state.rebooted(None, 112));
+    assert!(state.rebooted(None, 700));
 }
 
 pub(crate) fn policy() -> Config {
@@ -46,6 +47,7 @@ fn sample() -> HostSample {
 
 fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
     Request {
+        supervision_detail: None,
         trace: Default::default(),
         command_started_clock_ms: None,
         blocked_at_clock_ms: None,
@@ -60,6 +62,8 @@ fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
         priority,
         class: "periodic".to_owned(),
         memory_cap_bytes: None,
+        memory_reservation_bytes: None,
+        memory_limit_key: None,
         memory_cargo_jobs: None,
         memory_rust_test_threads: None,
         memory_parallelism: None,
@@ -394,10 +398,10 @@ fn every_terminal_path_has_code_limit_measurement_and_roundtrips() -> Result<()>
         let message = diagnostic.message.as_deref().unwrap_or("");
         let expected_line = match expected {
             Code::RssCap => {
-                "locked-build: LB_RSS_CAP request=r1 limit=policy.memory_per_job_bytes*parallelism=24000000000 measured=25000000000 (rss_bytes) killed=pgid:42/true"
+                "locked-build: LB_RSS_CAP request=r1 limit=policy.memory_limit_per_job_bytes*parallelism=24000000000 measured=25000000000 (rss_bytes) killed=pgid:42/true"
             }
             Code::OomKilled => {
-                "locked-build: LB_OOM_KILLED request=r1 limit=policy.memory_per_job_bytes*parallelism=24000000000 measured=>=1 (cgroup oom_kill counter) killed=pgid:42/true"
+                "locked-build: LB_OOM_KILLED request=r1 limit=policy.memory_limit_per_job_bytes*parallelism=24000000000 measured=>=1 (cgroup oom_kill counter) killed=pgid:42/true"
             }
             Code::HoldTimeout => {
                 "locked-build: LB_HOLD_TIMEOUT request=r1 limit=policy.hold_ms=1000 measured=480 (elapsed_ms) killed=pgid:42/true"

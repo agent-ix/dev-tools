@@ -86,14 +86,16 @@ pub(crate) fn process(request: &Request, refused: bool) -> String {
 
 pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Diagnostic {
     let id = &request.id.0;
-    let memory_key = if config.memory_per_job_by_class.contains_key(&request.class) {
-        format!(
-            "policy.memory_per_job_by_class.{}*parallelism",
-            request.class
-        )
-    } else {
-        "policy.memory_per_job_bytes*parallelism".to_owned()
-    };
+    let memory_key = request.memory_limit_key.clone().unwrap_or_else(|| {
+        if config.memory_per_job_by_class.contains_key(&request.class) {
+            format!(
+                "policy.memory_per_job_by_class.{}*parallelism",
+                request.class
+            )
+        } else {
+            "policy.memory_limit_per_job_bytes*parallelism".to_owned()
+        }
+    });
     let killed = process(
         request,
         request.lease_record.is_none()
@@ -103,18 +105,52 @@ pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Dia
                 .is_some_and(|record| record.memory_enforcement == MemoryEnforcement::Refused),
     );
     let finish = |code, key: &str, limit: Value, value: Value, what: &str| {
-        Diagnostic::failure(code, id, key, limit, value, what, &killed)
+        let detail = if code == Code::SupervisionLost {
+            request
+                .supervision_detail
+                .as_ref()
+                .map(|detail| format!("{what}; detail={detail}"))
+        } else {
+            None
+        };
+        Diagnostic::failure(
+            code,
+            id,
+            key,
+            limit,
+            value,
+            detail.as_deref().unwrap_or(what),
+            &killed,
+        )
     };
+    if let Some(record) = request
+        .lease_record
+        .as_ref()
+        .filter(|record| record.oom_kill_count > 0)
+    {
+        return finish(
+            Code::OomKilled,
+            &memory_key,
+            request.memory_cap_bytes.unwrap_or(0).into(),
+            record.oom_kill_count.into(),
+            "cgroup memory.events oom_kill counter",
+        );
+    }
     match request.stop {
         Some(StopReason::MemoryCap) => {
+            let sample = request
+                .lease_record
+                .as_ref()
+                .and_then(|record| record.memory_sample.as_ref());
             return finish(
                 Code::RssCap,
                 &memory_key,
                 request.memory_cap_bytes.unwrap_or(0).into(),
-                request
-                    .measured_memory_bytes
+                sample
+                    .map(|sample| sample.bytes)
+                    .or(request.measured_memory_bytes)
                     .map_or_else(|| Value::from("unavailable"), Value::from),
-                "rss_bytes",
+                sample.map_or("rss_bytes", |sample| sample.metric.as_str()),
             );
         }
         Some(StopReason::TimedOut) => {

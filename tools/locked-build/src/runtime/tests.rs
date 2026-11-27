@@ -8,6 +8,242 @@ use super::*;
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
 
+/// Trace: FR-005-AC-1, FR-005-AC-8
+#[test]
+fn titan_reservations_bound_admission_independently_of_hard_caps() -> Result<()> {
+    for (class_reservation, expected_running) in [(None, 5_u64), (Some(2_500_000_000), 6)] {
+        let root = tempfile::tempdir()?;
+        let store = lease_accounted_store(root.path(), 24, 49_400_000_000, 0)?;
+        let mut policy = Config::read(&store.config_path)?;
+        policy.memory_reserve_per_job_bytes = 3_000_000_000;
+        policy.memory_limit_per_job_bytes = 8_000_000_000;
+        policy.cargo_build_jobs = Some(4);
+        if let Some(reservation) = class_reservation {
+            policy
+                .memory_reserve_per_job_by_class
+                .insert("point".into(), reservation);
+        }
+        std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+        let mut admitted = 0;
+        for sequence in 1..=7 {
+            let id = enqueue(
+                &store,
+                "titan-fixture",
+                "SWM-379",
+                1,
+                0,
+                Some("point"),
+                &["cargo".into(), "build".into(), "-j3".into()],
+            )?;
+            let worker = ProcessIdentity {
+                pid: u32::MAX - sequence,
+                started_seconds: 7,
+            };
+            let fence = claim_worker(&store, &id, &worker)?
+                .ok_or_else(|| Error::new(ErrorCode::State, "fixture claim missing"))?;
+            if matches!(
+                admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+                Admission::Granted(_)
+            ) {
+                admitted += 1;
+            }
+            let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+            assert_eq!(request.memory_cap_bytes, Some(24_000_000_000));
+            assert_eq!(
+                request.memory_reservation_bytes,
+                Some(if class_reservation.is_some() {
+                    7_500_000_000
+                } else {
+                    9_000_000_000
+                })
+            );
+        }
+        assert_eq!(admitted, expected_running);
+        store.transaction(|state, config| {
+            assert_eq!(state.memory_used(config), 45_000_000_000);
+            assert!(
+                state
+                    .requests
+                    .iter()
+                    .filter(|request| request.phase == Phase::Running)
+                    .map(|request| request.memory_cap_bytes.unwrap_or(0))
+                    .sum::<u64>()
+                    > 49_400_000_000
+            );
+            Ok(())
+        })?;
+        let report = status(&store)?;
+        assert!(
+            report
+                .requests
+                .iter()
+                .filter(|request| request.state == "queued")
+                .all(|request| request.memory_free_budget_bytes == Some(4_400_000_000))
+        );
+    }
+    Ok(())
+}
+
+/// Trace: FR-005-AC-1, FR-005-AC-3, FR-015-AC-3
+#[test]
+fn jobs_four_records_twelve_gb_reservation_and_thirty_two_gb_limit_and_refusals_keep_inputs()
+-> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 4, 49_400_000_000, 0)?;
+    let mut policy = Config::read(&store.config_path)?;
+    policy.memory_reserve_per_job_bytes = 3_000_000_000;
+    policy.memory_limit_per_job_bytes = 8_000_000_000;
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let id = enqueue(
+        &store,
+        "titan-fixture",
+        "SWM-379",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j4".into()],
+    )?;
+    let worker = ProcessIdentity {
+        pid: u32::MAX - 1,
+        started_seconds: 7,
+    };
+    let fence = claim_worker(&store, &id, &worker)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "fixture claim missing"))?;
+    assert!(matches!(
+        admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
+        Admission::Granted(_)
+    ));
+    let report = status(&store)?;
+    assert_eq!(report.requests[0].trace.requested_jobs, Some(4));
+    assert_eq!(
+        report.requests[0].trace.requested_memory_bytes,
+        Some(32_000_000_000)
+    );
+    assert_eq!(
+        report.requests[0].trace.granted_memory_bytes,
+        Some(32_000_000_000)
+    );
+    assert_eq!(
+        report.requests[0].trace.granted_memory_reservation_bytes,
+        Some(12_000_000_000)
+    );
+    policy.memory_budget_bytes = Some(11_000_000_000);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let error = enqueue(
+        &store,
+        "titan-fixture",
+        "SWM-379",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j8".into()],
+    )
+    .err()
+    .ok_or_else(|| Error::new(ErrorCode::State, "fixture refusal missing"))?;
+    let failure = error
+        .failure
+        .ok_or_else(|| Error::new(ErrorCode::State, "fixture diagnostic missing"))?;
+    assert_eq!(
+        failure.diagnostic.message,
+        Some(format!(
+            "locked-build: LB_REFUSED_MEMORY_BUDGET request={} limit=policy.memory_budget_bytes=11000000000 measured=12000000000 (requested memory reservation bytes) killed=not-started/command",
+            failure.request_id
+        ))
+    );
+    let event = status(&store)?
+        .events
+        .pop()
+        .ok_or_else(|| Error::new(ErrorCode::State, "fixture event missing"))?;
+    assert_eq!(event.trace.requested_jobs, Some(8));
+    assert_eq!(event.trace.requested_memory_bytes, Some(64_000_000_000));
+    assert_eq!(
+        event.trace.requested_memory_reservation_bytes,
+        Some(24_000_000_000)
+    );
+    assert_eq!(event.trace.granted_memory_bytes, None);
+    assert_eq!(event.trace.granted_memory_reservation_bytes, None);
+    Ok(())
+}
+
+/// Trace: FR-005-AC-4
+#[test]
+fn titan_eight_point_three_gb_peak_survives_a_two_job_sixteen_gb_limit() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let mut request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let policy = Config::default();
+    request.memory_cap_bytes = Some(estimate_memory_lease(
+        &Config {
+            memory_budget_bytes: Some(49_400_000_000),
+            ..policy.clone()
+        },
+        "point",
+        2,
+    )?);
+    request.memory_reservation_bytes = Some(6_000_000_000);
+    request.lease_record = Some(LeaseRecord {
+        memory_enforcement: MemoryEnforcement::RssWatchdog,
+        ..Default::default()
+    });
+    let cap = request.memory_cap_bytes.unwrap_or(0);
+    assert_eq!(cap, 16_000_000_000);
+    crate::watchdog::observe_memory_sample(
+        &mut request,
+        crate::model::MemorySample {
+            contributors: Vec::new(),
+            bytes: 8_300_000_000,
+            metric: crate::model::MemoryMetric::PssAnon,
+        },
+        cap,
+    );
+    assert_eq!(request.stop, None);
+    let launch = lease_command_spec_for_enforcement(
+        LauncherPlatform::Linux,
+        "cargo",
+        &["build".into()],
+        Some(cap),
+        MemoryEnforcement::SystemdScope,
+    );
+    assert!(
+        launch
+            .arguments
+            .iter()
+            .any(|argument| argument == "MemoryMax=16000000000")
+    );
+    crate::watchdog::observe_memory_sample(
+        &mut request,
+        crate::model::MemorySample {
+            contributors: Vec::new(),
+            bytes: 17_000_000_000,
+            metric: crate::model::MemoryMetric::PssAnon,
+        },
+        cap,
+    );
+    assert_eq!(request.stop, Some(StopReason::MemoryCap));
+    Ok(())
+}
+
+/// Trace: FR-005-AC-4
+#[test]
+fn recovery_adopts_a_legacy_workerless_queued_request() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    store.transaction(|state, _| {
+        state.find_mut(&id)?.pid_namespace = None;
+        Ok(())
+    })?;
+    assert_eq!(recover(&store)?, [id.clone()]);
+    store.transaction(|state, _| {
+        assert_eq!(
+            state.find(&id)?.pid_namespace,
+            crate::process::pid_namespace()?
+        );
+        Ok(())
+    })
+}
+
 /// Trace: FR-005-AC-8
 #[test]
 fn injected_boot_jitter_keeps_a_running_lease_but_real_reboot_expires_it() -> Result<()> {
@@ -57,16 +293,25 @@ fn injected_boot_jitter_keeps_a_running_lease_but_real_reboot_expires_it() -> Re
 fn vanished_watchdog_keeps_worker_supervision_and_real_success() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
+    let mut policy = Config::read(&store.config_path)?;
+    policy.termination_grace_ms = 20;
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
     let id = queued(&store)?;
+    let mut watchdog_child = Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()?;
+    let group = i32::try_from(watchdog_child.id())
+        .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
     let mut command = Command::new("/bin/cat")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .process_group(0)
+        .process_group(group)
         .spawn()?;
     let input = command.stdin.take();
-    // Inject a watchdog identity that vanished; the command's group still exists.
+    // The owned watchdog leader will die while a distinct command remains live.
     let watchdog = ProcessIdentity {
-        pid: command.id(),
+        pid: watchdog_child.id(),
         started_seconds: 1,
     };
     let worker = ProcessIdentity {
@@ -81,13 +326,15 @@ fn vanished_watchdog_keeps_worker_supervision_and_real_success() -> Result<()> {
         request.started_at_ms = Some(now_ms()?);
         request.started_clock_ms = Some(clock_ms()?);
         request.watchdog = Some(watchdog.clone());
+        request.memory_cap_bytes = Some(1_000_000_000);
         request.lease_record = Some(LeaseRecord {
+            command: Processes::read().member_identity(command.id()),
             memory_enforcement: MemoryEnforcement::RssWatchdog,
             ..Default::default()
         });
         Ok(request.clone())
     })?;
-    let mut watchdog_child = Command::new("/usr/bin/true").spawn()?;
+    watchdog_child.kill()?;
     let path = store.path.clone();
     let config_path = store.config_path.clone();
     // Keep the command alive until the worker has durably observed degradation.
@@ -149,7 +396,7 @@ fn refusal_ledger_metrics_and_requested_parallelism_use_hand_written_values() ->
     let root = tempfile::tempdir()?;
     let store = lease_accounted_store(root.path(), 4, 49_400_000_000, 0)?;
     let mut policy = Config::read(&store.config_path)?;
-    policy.memory_per_job_bytes = 6_000_000_000;
+    policy.memory_limit_per_job_bytes = 6_000_000_000;
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
     let id = enqueue(
         &store,
@@ -327,7 +574,8 @@ fn lease_accounted_store(root: &Path, capacity: u32, budget: u64, reserve: u64) 
     policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
     policy.memory_budget_bytes = Some(budget);
     policy.memory_reserve_bytes = reserve;
-    policy.memory_per_job_bytes = 2_500_000_000;
+    policy.memory_limit_per_job_bytes = 2_500_000_000;
+    policy.memory_reserve_per_job_bytes = 2_500_000_000;
     policy.memory_per_job_by_class.clear();
     policy.memory_cap_by_class.clear();
     policy.cargo_build_jobs = Some(capacity);
@@ -1198,7 +1446,8 @@ fn memory_charge_uses_test_threads_and_non_cargo_environment_is_capped_by_units(
     policy.memory_budget_bytes = Some(100_000_000_000);
     policy.cargo_build_jobs = Some(16);
     policy.rust_test_threads = Some(16);
-    policy.memory_per_job_bytes = 2_500_000_000;
+    policy.memory_limit_per_job_bytes = 2_500_000_000;
+    policy.memory_reserve_per_job_bytes = 2_500_000_000;
 
     let cargo_command = [
         "cargo".into(),
@@ -1259,7 +1508,8 @@ fn new_requests_use_per_class_memory_cap_overrides_and_default_cap() -> Result<(
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
-    policy.memory_per_job_bytes = 512;
+    policy.memory_limit_per_job_bytes = 512;
+    policy.memory_reserve_per_job_bytes = 512;
     policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
     policy.memory_budget_bytes = Some(2_000);
     policy
@@ -1789,8 +2039,9 @@ fn supervise_scope_exit(
     )
     .map_err(|error| Error::new(ErrorCode::Io, error.to_string()))?;
     assert_eq!(command.wait()?.signal(), Some(15));
+    let mut watchdog_child = Command::new("/usr/bin/true").process_group(0).spawn()?;
     let watchdog = ProcessIdentity {
-        pid: command_pid,
+        pid: watchdog_child.id(),
         started_seconds: 1,
     };
     let worker = ProcessIdentity {
@@ -1815,7 +2066,6 @@ fn supervise_scope_exit(
     assert!(stale_request.lease_record.is_none());
     let events = root.path().join("memory.events");
     std::fs::write(&events, "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n")?;
-    let mut watchdog_child = Command::new("/usr/bin/true").spawn()?;
     let mut observations = 0;
     supervise_started_command(
         &store,
@@ -1844,20 +2094,20 @@ fn supervise_scope_exit(
     assert_eq!(report.requests[0].request_id, id);
     assert_eq!(report.requests[0].memory_cap_bytes, Some(1_000_000));
     assert_eq!(report.requests[0].reason.as_deref(), Some(expected_reason));
-    assert_eq!(
-        memory_cap_report(
-            &id,
-            report.requests[0].memory_cap_bytes,
-            report.requests[0]
-                .lease_record
-                .as_ref()
-                .and_then(|record| record.memory_sample.as_ref())
-        ),
-        format!(
-            "request={} reason=rss_cap measured_bytes=unavailable memory_cap_bytes=1000000 metric=unavailable",
-            id.0
-        )
-    );
+    if expected_stop == Some(StopReason::MemoryCap) {
+        assert_eq!(
+            report.requests[0].trace.diagnostic.message,
+            Some(format!(
+                "locked-build: LB_OOM_KILLED request={} limit=policy.memory_limit_per_job_bytes*parallelism=1000000 measured=1 (cgroup memory.events oom_kill counter) killed=pgid:{}/true",
+                id.0, watchdog.pid
+            ))
+        );
+    } else {
+        assert_eq!(
+            report.requests[0].trace.diagnostic.code,
+            Some(locked_build::wire::Code::ExternalSignal)
+        );
+    }
     Ok(())
 }
 
@@ -1897,12 +2147,17 @@ fn scope_oom_evidence_survives_scope_cleanup() -> Result<()> {
 
 /// Provenance: SWM-379. Trace: FR-005-AC-4
 #[test]
-fn default_memory_estimate_charges_six_gb_per_job_but_preserves_explicit_values() -> Result<()> {
+fn default_memory_reservation_and_hard_limit_are_separate() -> Result<()> {
     let mut policy: Config = serde_json::from_str(
         r#"{"host":"fixture","capacity_units":4,"maximum_units":4,"memory_budget_bytes":50000000000}"#,
     )?;
-    assert_eq!(estimate_memory_lease(&policy, "point", 4)?, 24_000_000_000);
-    policy.memory_per_job_bytes = 2_500_000_000;
+    assert_eq!(estimate_memory_lease(&policy, "point", 4)?, 32_000_000_000);
+    assert_eq!(
+        estimate_memory_reservation(&policy, "point", 4)?,
+        12_000_000_000
+    );
+    policy.memory_limit_per_job_bytes = 2_500_000_000;
+    policy.memory_reserve_per_job_bytes = 2_500_000_000;
     assert_eq!(estimate_memory_lease(&policy, "point", 4)?, 10_000_000_000);
     Ok(())
 }
@@ -1934,7 +2189,7 @@ fn scope_oom_evidence_survives_watchdog_finalizing_first() -> Result<()> {
         record_scope_oom(
             request,
             Some(MemoryEnforcement::SystemdScope),
-            evidence.detected(),
+            evidence.oom_kill_count,
         );
         request.command_finished = Some(CommandOutcome {
             code: None,
@@ -2137,7 +2392,10 @@ fn recovery_never_reaps_or_respawns_a_foreign_pid_namespace_lease() -> Result<()
     store.transaction(|state, _| {
         assert_eq!(state.find(&running)?.phase, Phase::Running);
         assert_eq!(state.find(&running)?.worker.as_ref(), Some(&worker));
-        assert!(state.find(&running)?.reason.is_none());
+        assert_eq!(
+            state.find(&running)?.reason.as_deref(),
+            Some("foreign_pid_namespace_live_or_unverifiable")
+        );
         assert_eq!(state.used(), 1);
         assert_eq!(state.find(&queued)?.phase, Phase::Queued);
         Ok(())
@@ -2146,17 +2404,39 @@ fn recovery_never_reaps_or_respawns_a_foreign_pid_namespace_lease() -> Result<()
 
 /// Provenance: SWM-380. Trace: FR-005-AC-4
 #[test]
-fn memory_cap_diagnostic_reports_measured_value_cap_and_metric() {
-    let id = RequestId("store-a:r25".into());
+fn memory_cap_diagnostic_reports_measured_value_cap_and_metric() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
     let sample = crate::model::MemorySample {
         contributors: Vec::new(),
         bytes: 25_000_000_000,
         metric: crate::model::MemoryMetric::PssAnon,
     };
+    let diagnostic = store.transaction(|state, config| {
+        let mut request = state.find(&id)?.clone();
+        request.phase = Phase::Running;
+        request.memory_cap_bytes = Some(24_000_000_000);
+        request.stop = Some(StopReason::MemoryCap);
+        request.watchdog = Some(ProcessIdentity {
+            pid: 42,
+            started_seconds: 7,
+        });
+        request.lease_record = Some(LeaseRecord {
+            memory_sample: Some(sample),
+            memory_enforcement: MemoryEnforcement::RssWatchdog,
+            ..Default::default()
+        });
+        Ok(crate::diagnostics::for_request(&request, config, 100))
+    })?;
     assert_eq!(
-        memory_cap_report(&id, Some(24_000_000_000), Some(&sample)),
-        "request=store-a:r25 reason=rss_cap measured_bytes=25000000000 memory_cap_bytes=24000000000 metric=pss_anon"
+        diagnostic.message,
+        Some(format!(
+            "locked-build: LB_RSS_CAP request={} limit=policy.memory_limit_per_job_bytes*parallelism=24000000000 measured=25000000000 (pss_anon) killed=pgid:42/true",
+            id.0
+        ))
     );
+    Ok(())
 }
 
 /// Provenance: SWM-380. Trace: FR-005-AC-2, FR-005-AC-4

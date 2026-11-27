@@ -37,6 +37,64 @@ pub(crate) fn pid_namespace() -> Result<Option<String>> {
     }
 }
 
+pub(crate) struct NamespaceSnapshot {
+    namespaces: BTreeSet<String>,
+    complete: bool,
+}
+
+impl NamespaceSnapshot {
+    pub(crate) fn alive(&self, namespace: &str) -> Option<bool> {
+        if self.namespaces.contains(namespace) {
+            Some(true)
+        } else if self.complete {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+fn namespace_alive_at(root: &std::path::Path, namespace: &str) -> Result<bool> {
+    namespaces_at(root)?
+        .alive(namespace)
+        .ok_or_else(|| Error::new(ErrorCode::State, "PID namespace liveness is unknown"))
+}
+
+pub(crate) fn namespaces_at(root: &std::path::Path) -> Result<NamespaceSnapshot> {
+    use std::os::unix::fs::{DirEntryExt, MetadataExt};
+    // Absence is evidence only when every listed process identity can be read
+    // without a race. Permission failures are unknown, never proof of death.
+    let mut incomplete = false;
+    let mut namespaces = BTreeSet::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        let listed_inode = entry.ino();
+        let observed = std::fs::read_link(entry.path().join("ns/pid"));
+        match observed {
+            Ok(value) => {
+                namespaces.insert(value.to_string_lossy().into_owned());
+            }
+            Err(_) => {
+                incomplete = true;
+            }
+        }
+        match std::fs::metadata(entry.path()) {
+            Ok(metadata) if metadata.ino() == listed_inode => {}
+            _ => {
+                incomplete = true;
+            }
+        }
+    }
+    Ok(NamespaceSnapshot {
+        namespaces,
+        complete: !incomplete,
+    })
+}
+
 pub(crate) fn watchdog_memory_metric() -> crate::model::MemoryMetric {
     if cfg!(target_os = "linux") {
         crate::model::MemoryMetric::PssAnon
@@ -405,6 +463,21 @@ fn parse_oom_kill_count(events: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trace: FR-005-AC-4
+    #[test]
+    fn namespace_scan_distinguishes_live_extinct_and_unverifiable() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let ns = root.path().join("11/ns");
+        std::fs::create_dir_all(&ns)?;
+        std::os::unix::fs::symlink("pid:[host]", ns.join("pid"))?;
+        assert!(namespace_alive_at(root.path(), "pid:[host]")?);
+        assert!(!namespace_alive_at(root.path(), "pid:[extinct]")?);
+        std::fs::create_dir(root.path().join("22"))?;
+        assert!(namespace_alive_at(root.path(), "pid:[extinct]").is_err());
+        assert!(namespace_alive_at(root.path(), "pid:[host]")?);
+        Ok(())
+    }
 
     /// Provenance: SWM-380. Trace: FR-005-AC-4
     #[cfg(target_os = "linux")]

@@ -52,7 +52,7 @@ impl Harness {
                 "aging_ms": 1000, "hold_ms": hold_ms, "termination_grace_ms": 200,
                 "sample_file": sample,
                 "memory_admission": "live_available", "memory_budget_bytes": null,
-                "memory_per_job_bytes": 2500000000_u64, "memory_per_job_by_class": {}, "memory_cap_by_class": {},
+                "memory_reserve_per_job_bytes": 2500000000_u64, "memory_limit_per_job_bytes": 2500000000_u64, "memory_per_job_by_class": {}, "memory_cap_by_class": {},
                 "on_missing_cgroup": "rss_watchdog",
             }))?,
         )?;

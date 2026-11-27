@@ -17,8 +17,9 @@ must-fix always precedes aged lower classes.
 
 Every policy field has a serde default; unknown fields are rejected. A small
 policy can set only `host`, `capacity_units`, and `maximum_units`. `lease_accounted`
-requires a positive `memory_budget_bytes` and `memory_per_job_bytes`. It charges
-each request by its resolved Cargo job count times the per-job estimate;
+requires positive `memory_budget_bytes`, `memory_reserve_per_job_bytes` and
+`memory_limit_per_job_bytes`. It reserves each request's resolved parallelism
+times the reservation estimate; the separate hard limit controls enforcement.
 non-Cargo commands use requested units. `memory_per_unit_bytes` and
 `memory_reserve_bytes` are required only in `live_available` mode.
 Relative filesystem paths resolve from the policy file's directory.
@@ -47,8 +48,10 @@ when a tool is missing, version output is unavailable, or its version is older.
 | `memory_reserve_bytes` | RAM retained outside build leases in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_admission` | `lease_accounted` (default) sums fixed leases against `memory_budget_bytes` without reading live available memory; `live_available` compares `MemAvailable` with lease-unit charges. |
 | `memory_budget_bytes` | Total memory available to concurrent leases in `lease_accounted` mode. |
-| `memory_per_job_bytes` | Memory estimate per Cargo job or non-Cargo unit; generated policies use 6 GB. |
-| `memory_per_job_by_class` | Optional per-class per-job estimates, bounded by the class cap when one is configured. |
+| `memory_reserve_per_job_bytes` | Admission reservation per effective worker; default 3 GB. |
+| `memory_limit_per_job_bytes` | Enforced hard cap per effective worker; default 8 GB. |
+| `memory_reserve_per_job_by_class` | Optional per-class admission reservation overrides. |
+| `memory_per_job_by_class` | Optional per-class per-job hard limits, bounded by the total class cap when configured. |
 | `memory_cap_by_class` | Optional maximum total lease size for each named class. |
 | `on_missing_cgroup` | `rss_watchdog` (default) enforces a configured cap with process-group RSS when a systemd scope is unavailable; `refuse` fails the lease without running the command. |
 | `disk_reserve_bytes` | Minimum free bytes for admission. |
