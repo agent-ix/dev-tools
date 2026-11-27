@@ -299,7 +299,8 @@ fn exit_75_is_executed_once_and_telemetry_excludes_command_arguments() -> TestRe
     let report = harness.report()?;
     assert_eq!(report["requests"][0]["state"], "failed");
     assert_eq!(report["requests"][0]["exit_code"], 75);
-    assert_eq!(report["events"].as_array().map(Vec::len), Some(3));
+    assert_eq!(report["events"].as_array().map(Vec::len), Some(4));
+    assert_eq!(report["events"][2]["kind"], "command_started");
     assert_eq!(report["used_units"], 0);
     assert!(!serde_json::to_string(&report)?.contains("subprocess_fixture"));
     Ok(())
@@ -372,7 +373,7 @@ fn concurrent_clients_never_duplicate_a_lease_and_run_in_fifo_order() -> TestRes
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|event| event["state"] == "running")
+        .filter(|event| event["state"] == "running" && event["kind"] == "transition")
         .map(|event| event["request_id"].clone())
         .collect();
     assert_eq!(
@@ -424,14 +425,27 @@ fn hold_timeout_kills_the_group_before_releasing_capacity() -> TestResult {
     let output = child.wait_with_output()?;
     assert_eq!(output.status.code(), Some(124));
     let run_output = String::from_utf8(output.stderr)?;
-    assert!(run_output.contains("hold_timeout"), "{run_output}");
-    assert!(run_output.contains("hold_ms=3000 ms"), "{run_output}");
+    let diagnostics = run_output
+        .lines()
+        .filter(|line| line.starts_with("locked-build: "))
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1, "{run_output}");
     assert!(
-        run_output.contains("change the limit in policy hold_ms"),
+        diagnostics[0].starts_with("locked-build: LB_HOLD_TIMEOUT request="),
+        "{run_output}"
+    );
+    assert!(
+        diagnostics[0].contains(" limit=policy.hold_ms=3000 measured="),
+        "{run_output}"
+    );
+    assert!(
+        diagnostics[0].contains(" (elapsed_ms) killed=pgid:"),
         "{run_output}"
     );
     assert_eq!(harness.request(0)?["state"], "timed_out");
     let request = harness.request(0)?;
+    assert_eq!(request["code"], "LB_HOLD_TIMEOUT");
+    assert_eq!(request["message"], diagnostics[0]);
     let reason = request["reason"]
         .as_str()
         .ok_or("reason missing")?
@@ -598,7 +612,7 @@ fn relative_host_sample_paths_work_from_another_directory_and_prune_removes_logs
     assert!(harness.output("prune")?.status.success());
     assert!(!log.exists());
     assert_eq!(harness.report()?["requests"], json!([]));
-    assert_eq!(harness.report()?["pruned_events"], 3);
+    assert_eq!(harness.report()?["pruned_events"], 4);
     Ok(())
 }
 
