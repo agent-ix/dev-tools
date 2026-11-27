@@ -29,6 +29,29 @@ pub struct ProcessIdentity {
     pub started_seconds: u64,
 }
 
+/// Durable launch authorization, written before a worker process is created.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkerClaim {
+    pub protocol: u32,
+    pub store_id: String,
+    pub request_id: RequestId,
+    pub generation: u64,
+    pub launcher: ProcessIdentity,
+    pub pid_namespace: Option<String>,
+    pub worker: Option<ProcessIdentity>,
+}
+
+/// A wakeup hint. The state snapshot and worker fence remain authoritative.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RequestNotice {
+    pub store_id: String,
+    pub request_id: RequestId,
+    pub generation: u64,
+    pub phase: Phase,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Phase {
@@ -328,6 +351,14 @@ fn transition_kind() -> String {
 }
 
 impl Request {
+    pub(crate) fn notice(&self, store_id: &str) -> RequestNotice {
+        RequestNotice {
+            store_id: store_id.to_owned(),
+            request_id: self.id.clone(),
+            generation: self.worker_generation,
+            phase: self.phase,
+        }
+    }
     pub(crate) fn reservation_bytes(&self) -> u64 {
         self.memory_reservation_bytes
             .or(self.memory_cap_bytes)
@@ -805,6 +836,15 @@ impl State {
             reason,
         } = completion;
         let request = self.find_mut(id)?;
+        let reason = reason.or(
+            if request.reason.as_deref() == Some("supervision_lost")
+                && request.supervision_detail.is_some()
+            {
+                Some("supervision_lost")
+            } else {
+                None
+            },
+        );
         request.observe_blocks(Vec::new(), clock);
         request.phase = match request.stop {
             Some(StopReason::Cancelled) => Phase::Cancelled,

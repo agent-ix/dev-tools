@@ -85,6 +85,7 @@ fn startup_command(store: &Store, id: &RequestId, generation: u64) -> Result<Com
         .arg("watchdog")
         .arg(&id.0)
         .arg(generation.to_string())
+        .stdin(Stdio::null())
         .process_group(0);
     Ok(command)
 }
@@ -124,7 +125,22 @@ pub(crate) fn run(store: &Store, id: &RequestId, generation: u64) -> Result<()> 
         return Ok(());
     }
     let result = enforce(store, id, generation, &worker, &identity);
-    if result.is_err() {
+    if let Err(error) = &result {
+        // Publish the actual signal's source before terminating the group.
+        // The worker must not classify our cleanup as an outside SIGTERM.
+        if let Err(record_error) = store.transaction(|state, _| {
+            let request = state.find_mut(id)?;
+            if request.phase == Phase::Running
+                && request.worker_generation == generation
+                && request.watchdog.as_ref() == Some(&identity)
+            {
+                request.reason = Some("supervision_lost".to_owned());
+                request.supervision_detail = Some(error.message.to_string());
+            }
+            Ok(())
+        }) {
+            eprintln!("locked-build: supervision-loss evidence unavailable: {record_error}");
+        }
         terminate_group(id, &identity, identity.pid, &policy)?;
     }
     result

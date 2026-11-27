@@ -2,17 +2,51 @@
 //! Private, bounded, atomic state protected by one operating-system lock.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::io::{BufReader, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
-use crate::model::State;
+use crate::model::{RequestId, RequestNotice, State, WorkerClaim};
 use crate::process::{IdentityState, Processes};
 
 const STATE_LIMIT: u64 = 32 * 1024 * 1024;
 const METRICS_FILE: &str = "metrics.json";
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileStamp {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified_ns: Option<u64>,
+}
+
+impl FileStamp {
+    fn read(path: &Path) -> std::io::Result<Self> {
+        let meta = fs::metadata(path)?;
+        Ok(Self {
+            device: meta.dev(),
+            inode: meta.ino(),
+            length: meta.len(),
+            modified_ns: meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|age| u64::try_from(age.as_nanos()).ok()),
+        })
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Snapshot<S = State, M = crate::metrics::MetricsState> {
+    state: S,
+    metrics: M,
+    source_state: FileStamp,
+    source_metrics: Option<FileStamp>,
+}
 
 pub(crate) struct Store {
     pub path: PathBuf,
@@ -20,6 +54,179 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    pub(crate) fn try_lock_member(&self, name: &str) -> Result<Option<File>> {
+        if name.contains('/') || name == "." || name == ".." {
+            return Err(Error::new(ErrorCode::State, "invalid store member"));
+        }
+        self.reject_link(name)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(self.path.join(name))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
+    pub(crate) fn inherited_or_try_lock(&self, name: &str) -> Result<Option<File>> {
+        use std::os::fd::AsFd;
+        self.reject_link(name)?;
+        let stdin: File = std::io::stdin().as_fd().try_clone_to_owned()?.into();
+        if let (Ok(input), Ok(expected)) = (stdin.metadata(), fs::metadata(self.path.join(name)))
+            && input.dev() == expected.dev()
+            && input.ino() == expected.ino()
+        {
+            return match stdin.try_lock() {
+                Ok(()) => Ok(Some(stdin)),
+                Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+                Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+            };
+        }
+        self.try_lock_member(name)
+    }
+
+    pub(crate) fn write_claim(&self, claim: &WorkerClaim) -> Result<()> {
+        self.write_atomic(
+            &format!("{}.launch.json", claim.request_id.0),
+            &serde_json::to_vec(claim)?,
+        )
+    }
+
+    pub(crate) fn claim(&self, id: &RequestId) -> Result<Option<WorkerClaim>> {
+        self.read_member(&format!("{}.launch.json", id.0), 16_384)
+    }
+
+    pub(crate) fn notice(&self, id: &RequestId) -> Result<Option<RequestNotice>> {
+        self.read_member(&format!("{}.notice.json", id.0), 16_384)
+    }
+
+    fn read_member<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+        limit: u64,
+    ) -> Result<Option<T>> {
+        if name.contains('/') {
+            return Err(Error::new(ErrorCode::State, "invalid store member"));
+        }
+        self.reject_link(name)?;
+        match File::open(self.path.join(name)) {
+            Ok(file) => {
+                if file.metadata()?.len() > limit {
+                    return Err(Error::new(
+                        ErrorCode::State,
+                        "store member exceeds size limit",
+                    ));
+                }
+                Ok(Some(serde_json::from_reader(BufReader::new(
+                    file.take(limit),
+                ))?))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<(State, Config)> {
+        let config = Config::read(&self.config_path)?;
+        if let Ok(Some(snapshot)) =
+            self.read_member::<Snapshot>("snapshot.json", STATE_LIMIT * 2 + 4096)
+            && FileStamp::read(&self.path.join("state.json")).ok().as_ref()
+                == Some(&snapshot.source_state)
+            && FileStamp::read(&self.path.join(METRICS_FILE)).ok() == snapshot.source_metrics
+        {
+            let mut state = snapshot.state;
+            state.metrics = snapshot.metrics;
+            if state.schema_version != 1 || state.host != config.host {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "unsupported schema or different host/configuration",
+                ));
+            }
+            state.validate(&config)?;
+            return Ok((state, config));
+        }
+        // Legacy writers can still finish running commands during a handoff.
+        // Read metrics first, then the atomic state file, and reconcile only
+        // when all intervening events remain available (including pruning).
+        for _ in 0..3 {
+            let mut metrics = load_metrics(&self.path.join(METRICS_FILE));
+            let history = metrics.has_history();
+            let mut state = match self.read_member::<State>("state.json", STATE_LIMIT)? {
+                Some(state) => state,
+                None => State {
+                    schema_version: 1,
+                    store_id: "00000000000000000000000000000000".to_owned(),
+                    config_path: self.config_path.clone(),
+                    host: config.host.clone(),
+                    boot_time: sysinfo::System::boot_time(),
+                    boot_id: crate::process::boot_id(),
+                    next_sequence: 1,
+                    next_event: 1,
+                    pruned_events: 0,
+                    metrics: Default::default(),
+                    requests: Vec::new(),
+                    events: Vec::new(),
+                },
+            };
+            if state.schema_version != 1 || state.host != config.host {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "unsupported schema or different host/configuration",
+                ));
+            }
+            metrics.bind_store(&state.store_id);
+            if history && !metrics.can_reconcile(&state) {
+                continue;
+            }
+            metrics.reconcile_events(&state.events, state.next_event)?;
+            state.metrics = metrics;
+            state.validate(&config)?;
+            return Ok((state, config));
+        }
+        Err(Error::new(
+            ErrorCode::State,
+            "state/metrics snapshot changed during recovery",
+        ))
+    }
+
+    pub(crate) fn repair_notices(&self, state: &State) {
+        for request in &state.requests {
+            let expected = request.notice(&state.store_id);
+            if request.phase.terminal()
+                && !self
+                    .path
+                    .join(format!("{}.notice.json", request.id.0))
+                    .is_file()
+            {
+                continue;
+            }
+            if self.notice(&request.id).ok().flatten().as_ref() != Some(&expected)
+                && let Err(error) =
+                    serde_json::to_vec(&expected)
+                        .map_err(Error::from)
+                        .and_then(|bytes| {
+                            self.write_atomic(&format!("{}.notice.json", request.id.0), &bytes)
+                        })
+            {
+                eprintln!("locked-build: request notification unavailable: {error}");
+            }
+        }
+    }
+
+    fn publish_snapshot(&self, state: &State) -> Result<()> {
+        let snapshot = Snapshot {
+            state,
+            metrics: &state.metrics,
+            source_state: FileStamp::read(&self.path.join("state.json"))?,
+            source_metrics: FileStamp::read(&self.path.join(METRICS_FILE)).ok(),
+        };
+        self.write_atomic("snapshot.json", &serde_json::to_vec(&snapshot)?)
+    }
     pub(crate) fn open(path: &Path, config_path: &Path) -> Result<Self> {
         match fs::DirBuilder::new()
             .recursive(true)
@@ -99,7 +306,7 @@ impl Store {
                 if file.metadata()?.len() > STATE_LIMIT {
                     return Err(Error::new(ErrorCode::State, "state exceeds size limit"));
                 }
-                serde_json::from_reader(file.take(STATE_LIMIT))?
+                serde_json::from_reader(BufReader::new(file.take(STATE_LIMIT)))?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => State {
                 schema_version: 1,
@@ -200,6 +407,11 @@ impl Store {
             .reconcile_events(&state.events, state.next_event)?;
         state.validate(&config)?;
         let before = serde_json::to_vec(&state)?;
+        let before_notices: std::collections::BTreeMap<_, _> = state
+            .requests
+            .iter()
+            .map(|request| (request.id.0.clone(), request.notice(&state.store_id)))
+            .collect();
         let previous_pruned = state.pruned_events;
         let (operation_now, operation_clock) = read_clock()?;
         let output = operation(&mut state, &config, operation_now, operation_clock)?;
@@ -221,6 +433,9 @@ impl Store {
             policy_path_changed || bytes != before || !self.path.join("state.json").try_exists()?;
         let metrics_changed = metrics_identity_changed || metrics_bytes != metrics_before;
         if !state_changed && !metrics_changed {
+            if let Err(error) = self.publish_snapshot(&state) {
+                eprintln!("locked-build: status snapshot unavailable: {error}");
+            }
             return Ok(output);
         }
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > STATE_LIMIT {
@@ -244,23 +459,48 @@ impl Store {
                 eprintln!("locked-build: metrics sidecar update failed: {error}");
             }
         }
+        if let Err(error) = self.publish_snapshot(&state) {
+            eprintln!("locked-build: status snapshot unavailable: {error}");
+        }
+        for request in &state.requests {
+            let notice = request.notice(&state.store_id);
+            if before_notices.get(&request.id.0) != Some(&notice)
+                && let Err(error) =
+                    serde_json::to_vec(&notice)
+                        .map_err(Error::from)
+                        .and_then(|bytes| {
+                            self.write_atomic(&format!("{}.notice.json", request.id.0), &bytes)
+                        })
+            {
+                eprintln!("locked-build: request notification unavailable: {error}");
+            }
+        }
         File::open(&self.path)?.sync_all()?;
         Ok(output)
     }
 
     fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<()> {
-        let next = format!("{name}.next");
+        // Notifications can be repaired concurrently with a canonical commit.
+        // Each publication needs its own temporary inode before atomic rename.
+        let next = format!("{name}.{}.next", random_id()?);
         self.reject_link(&next)?;
         let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .mode(0o600)
             .open(self.path.join(&next))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(self.path.join(next), self.path.join(name))?;
-        Ok(())
+        let result = (|| {
+            file.write_all(bytes)?;
+            // Reconstructible caches need atomic visibility, not disk flushes.
+            if name == "state.json" || name == METRICS_FILE || name.ends_with(".launch.json") {
+                file.sync_all()?;
+            }
+            fs::rename(self.path.join(&next), self.path.join(name))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(self.path.join(next));
+        }
+        result.map_err(Into::into)
     }
 
     fn reject_link(&self, name: &str) -> Result<()> {
@@ -312,7 +552,7 @@ fn load_metrics(path: &Path) -> crate::metrics::MetricsState {
             return Err(Error::new(ErrorCode::State, "invalid metrics sidecar file"));
         }
         let file = File::open(path)?;
-        serde_json::from_reader(file.take(STATE_LIMIT)).map_err(Into::into)
+        serde_json::from_reader(BufReader::new(file.take(STATE_LIMIT))).map_err(Into::into)
     })();
     match result {
         Ok(metrics) => metrics,

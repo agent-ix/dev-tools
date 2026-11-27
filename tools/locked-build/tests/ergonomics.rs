@@ -168,6 +168,7 @@ fn nested_shim_passes_through_without_state_or_policy_writes()
             .env("LOCKED_BUILD_STATE", home.join("must-not-exist"))
             .env("PATH", std::env::join_paths([&shim, &real])?)
             .env_remove("LOCKED_BUILD_LEASE")
+            .env_remove("LOCKED_BUILD_REAL_CARGO")
             .env_remove("CARGO_TARGET_DIR")
             .env_remove("CARGO_BUILD_JOBS")
             .env_remove("RUST_TEST_THREADS");
@@ -189,6 +190,62 @@ fn nested_shim_passes_through_without_state_or_policy_writes()
         assert_eq!(std::fs::read_dir(&home)?.count(), 0);
     }
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+/// Provenance: SWM-392. Trace: FR-011-AC-7
+#[test]
+fn nested_shim_does_not_read_an_invalid_policy() -> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let shim = root.path().join("shim");
+    let real = root.path().join("real");
+    std::fs::create_dir(&shim)?;
+    std::fs::create_dir(&real)?;
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_locked-build"), shim.join("cargo"))?;
+    std::os::unix::fs::symlink("/bin/echo", real.join("cargo"))?;
+    let policy = root.path().join("invalid-policy.json");
+    std::fs::write(
+        &policy,
+        "deliberately invalid; nested cargo must not read this",
+    )?;
+    let output = Command::new(shim.join("cargo"))
+        .arg("nested-passthrough")
+        .env("LOCKED_BUILD_LEASE", "1")
+        .env_remove("LOCKED_BUILD_REAL_CARGO")
+        .env("LOCKED_BUILD_CONFIG", &policy)
+        .env("LOCKED_BUILD_STATE", root.path().join("must-not-exist"))
+        .env("PATH", std::env::join_paths([shim, real])?)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"nested-passthrough\n");
+    assert!(output.stderr.is_empty());
+    assert!(!root.path().join("must-not-exist").exists());
+    Ok(())
+}
+
+/// Provenance: SWM-392. Trace: FR-011-AC-7
+#[test]
+fn nested_missing_cargo_reports_failure_without_creating_a_store()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let shim = root.path().join("cargo");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_locked-build"), &shim)?;
+    let output = Command::new(&shim)
+        .arg("test")
+        .env("LOCKED_BUILD_LEASE", "1")
+        .env_remove("LOCKED_BUILD_REAL_CARGO")
+        .env("HOME", root.path().join("absent-home"))
+        .env("LOCKED_BUILD_STATE", root.path().join("absent-state"))
+        .env("LOCKED_BUILD_CONFIG", root.path().join("absent-policy"))
+        .env("PATH", root.path())
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("locked-build: LB_"));
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 1);
     Ok(())
 }
 

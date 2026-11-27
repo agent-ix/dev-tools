@@ -109,11 +109,18 @@ the process supervisor and signal handling use Unix APIs.
 ```sh
 locked-build status
 locked-build cancel REQUEST-ID
+locked-build wait REQUEST-ID
 ```
 
 `queued` means the request is accepted and waiting for capacity. Its command has
 not started. `running` means the request holds a lease and its command has
 started. Status includes the request id needed by `cancel`.
+
+One elected scheduler handles admission and recovery for the store. Queued
+workers read request notices without polling the state write lock. Status reads
+an atomic snapshot and remains available while a writer holds that lock.
+`wait` attaches to an existing request and returns its recorded exit status.
+It preserves the request id and queue age.
 
 In the default `lease_accounted` mode, Cargo leases reserve the resolved
 parallelism times `memory_reserve_per_job_bytes` (default 3 GB) against the

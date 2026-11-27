@@ -204,8 +204,9 @@ impl Config {
     }
 
     pub(crate) fn read(path: &Path) -> Result<Self> {
-        let mut config: Self = serde_json::from_reader(std::fs::File::open(path)?)
-            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        let mut config: Self =
+            serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path)?))
+                .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
         let directory = path
             .parent()
             .ok_or_else(|| Error::new(ErrorCode::Configuration, "policy path has no directory"))?;
@@ -404,7 +405,8 @@ impl Config {
 
     pub(crate) fn sample(&self, now: u64) -> Result<HostSample> {
         if let Some(path) = &self.sample_file {
-            let sample: HostSample = serde_json::from_reader(std::fs::File::open(path)?)?;
+            let sample: HostSample =
+                serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path)?))?;
             return Ok(sample);
         }
         let path = self.disk_path.canonicalize()?;

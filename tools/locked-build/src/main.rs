@@ -11,6 +11,7 @@ mod model;
 mod process;
 mod runtime;
 mod sample;
+mod scheduler;
 mod store;
 mod watchdog;
 mod writable;
@@ -64,7 +65,13 @@ enum Action {
     /// Cancel a queued or running request, preserving the lease through cleanup.
     Cancel { request: String },
     /// Recover durable queued requests and verify orphaned running groups.
-    Recover,
+    Recover {
+        /// Fence legacy queued workers after their owners reattach with `wait`.
+        #[arg(long)]
+        handoff_queued: bool,
+    },
+    /// Reattach to an accepted request without submitting its command again.
+    Wait { request: String },
     /// Remove terminal requests/events after the monitoring consumer saved them.
     Prune,
     /// Export Prometheus text metrics to stdout or an atomic textfile-collector path.
@@ -101,7 +108,12 @@ enum Action {
         command: PolicyAction,
     },
     #[command(hide = true)]
-    Worker { request: String },
+    Worker {
+        request: String,
+        generation: Option<u64>,
+    },
+    #[command(hide = true)]
+    Scheduler,
     #[command(hide = true)]
     Watchdog { request: String, generation: u64 },
     #[command(hide = true)]
@@ -244,20 +256,8 @@ fn execute(cli: Cli) -> Result<i32> {
                 &command,
             )?;
             eprintln!("request={} output={}", id.0, store.path.display());
-            let worker = runtime::spawn_worker(&store, &id)?;
-            let (exit_code, _) = runtime::wait(&store, &id, vec![worker])?;
-            let failure = store.transaction(|state, _| {
-                let request = state.find(&id)?;
-                Ok(diagnostics::Failure {
-                    request_id: id.0.clone(),
-                    class: request.class.clone(),
-                    diagnostic: request.trace.diagnostic.clone(),
-                })
-            })?;
-            if failure.diagnostic.code.is_some() {
-                let _ = failure.emit(&store.path);
-            }
-            Ok(exit_code)
+            let workers = runtime::spawn_worker(&store, &id)?.into_iter().collect();
+            wait_and_report(&store, &id, workers)
         }
         Action::Status => {
             println!("{}", serde_json::to_string(&runtime::status(&store)?)?);
@@ -267,13 +267,25 @@ fn execute(cli: Cli) -> Result<i32> {
             runtime::cancel(&store, &RequestId(request))?;
             Ok(0)
         }
-        Action::Recover => {
+        Action::Recover { handoff_queued } => {
+            if handoff_queued {
+                let (state, _) = store.snapshot()?;
+                for request in state
+                    .requests
+                    .iter()
+                    .filter(|request| request.phase == model::Phase::Queued)
+                {
+                    runtime::handoff_worker(&store, &request.id)?;
+                }
+            }
             for id in runtime::recover(&store)? {
                 runtime::spawn_worker(&store, &id)?;
             }
+            scheduler::ensure(&store)?;
             println!("{}", serde_json::to_string(&runtime::status(&store)?)?);
             Ok(0)
         }
+        Action::Wait { request } => wait_and_report(&store, &RequestId(request), Vec::new()),
         Action::Prune => {
             println!("{}", runtime::prune(&store)?);
             Ok(0)
@@ -294,8 +306,15 @@ fn execute(cli: Cli) -> Result<i32> {
         Action::Policy { .. } => {
             unreachable!("policy commands handled before opening scheduler state")
         }
-        Action::Worker { request } => {
-            runtime::worker(&store, &RequestId(request))?;
+        Action::Worker {
+            request,
+            generation,
+        } => {
+            runtime::worker(&store, &RequestId(request), generation)?;
+            Ok(0)
+        }
+        Action::Scheduler => {
+            scheduler::run(&store)?;
             Ok(0)
         }
         Action::Watchdog {
@@ -306,6 +325,25 @@ fn execute(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn wait_and_report(
+    store: &store::Store,
+    id: &RequestId,
+    workers: Vec<std::process::Child>,
+) -> Result<i32> {
+    let (exit_code, _) = runtime::wait(store, id, workers)?;
+    let (state, _) = store.snapshot()?;
+    let request = state.find(id)?;
+    let failure = diagnostics::Failure {
+        request_id: id.0.clone(),
+        class: request.class.clone(),
+        diagnostic: request.trace.diagnostic.clone(),
+    };
+    if failure.diagnostic.code.is_some() {
+        let _ = failure.emit(&store.path);
+    }
+    Ok(exit_code)
 }
 
 fn valid_worktree_repository(repository: &str) -> bool {
@@ -684,20 +722,8 @@ fn inside_admitted_run(mut env: impl FnMut(&str) -> Option<String>) -> bool {
 }
 
 fn nested_real_cargo() -> Result<PathBuf> {
-    let explicit = std::env::var_os("LOCKED_BUILD_CONFIG").map(PathBuf::from);
-    let policy = explicit
-        .clone()
-        .or_else(|| Some(writable::shared_path().join("policy.json")));
-    if let Some(path) = policy {
-        match std::fs::File::open(&path) {
-            Ok(_) => {
-                if let Some(cargo) = config::Config::read(&path)?.real_cargo {
-                    return Ok(cargo);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && explicit.is_none() => {}
-            Err(error) => return Err(error.into()),
-        }
+    if let Some(path) = std::env::var_os("LOCKED_BUILD_REAL_CARGO") {
+        return Ok(PathBuf::from(path));
     }
     std::env::var_os("PATH")
         .as_deref()
@@ -715,7 +741,17 @@ fn main() {
         let code = match cargo_shim(&arguments) {
             Ok(code) => code,
             Err(error) => {
-                emit_error(&error, None);
+                if inside_admitted_run(|name| std::env::var(name).ok()) {
+                    // The admitted outer request owns the ledger. Even failure
+                    // to locate/exec Cargo must not touch a nested store.
+                    let failure =
+                        diagnostics::unscoped(&error, format!("nested-{}", std::process::id()));
+                    if let Some(message) = failure.diagnostic.message {
+                        eprintln!("{message}");
+                    }
+                } else {
+                    emit_error(&error, None);
+                }
                 2
             }
         };

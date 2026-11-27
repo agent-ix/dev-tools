@@ -210,6 +210,23 @@ struct Histogram {
 }
 
 impl MetricsState {
+    pub(crate) fn has_history(&self) -> bool {
+        !self.store_id.is_empty()
+    }
+    pub(crate) fn can_reconcile(&self, state: &State) -> bool {
+        let latest = state.next_event.saturating_sub(1);
+        if self.last_event_sequence > latest {
+            return false;
+        }
+        let missing = latest - self.last_event_sequence;
+        let retained: std::collections::BTreeSet<_> = state
+            .events
+            .iter()
+            .filter_map(|event| event_sequence(&event.event_id))
+            .filter(|sequence| *sequence > self.last_event_sequence && *sequence <= latest)
+            .collect();
+        u64::try_from(retained.len()).ok() == Some(missing)
+    }
     pub(crate) fn snapshot(
         &self,
         state: &State,

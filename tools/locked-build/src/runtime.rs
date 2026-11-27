@@ -584,7 +584,106 @@ pub(crate) fn priority_for_class(store: &Store, class: &str) -> Result<u32> {
     })
 }
 
-pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<Child> {
+pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<Option<Child>> {
+    spawn_worker_with(store, id, false, |claim, lease| {
+        launch_worker(store, claim, lease)
+    })
+}
+
+pub(crate) fn handoff_worker(store: &Store, id: &RequestId) -> Result<Option<Child>> {
+    if !cfg!(target_os = "linux") {
+        return Err(Error::new(
+            ErrorCode::Request,
+            "live queued-worker handoff requires Linux; drain legacy callers on other hosts",
+        ));
+    }
+    spawn_worker_with(store, id, true, |claim, lease| {
+        launch_worker(store, claim, lease)
+    })
+}
+
+fn spawn_worker_with<T>(
+    store: &Store,
+    id: &RequestId,
+    handoff: bool,
+    spawn: impl FnOnce(&crate::model::WorkerClaim, std::fs::File) -> Result<T>,
+) -> Result<Option<T>> {
+    let Some(lease) = store.try_lock_member(&format!("{}.spawn.lock", id.0))? else {
+        return Ok(None);
+    };
+    let launcher = Processes::self_identity()?;
+    let pid_namespace = crate::process::pid_namespace()?;
+    let claim = store.transaction(|state, _| {
+        let store_id = state.store_id.clone();
+        let request = state.find_mut(id)?;
+        if request.phase != Phase::Queued {
+            return Ok(None);
+        }
+        let previous = store.claim(id)?;
+        let claim_namespace = previous
+            .as_ref()
+            .filter(|claim| {
+                claim.store_id == store_id && claim.generation == request.worker_generation
+            })
+            .map(|claim| &claim.pid_namespace)
+            .unwrap_or(&request.pid_namespace);
+        let origin_namespace = if request.pid_namespace.is_some() {
+            &request.pid_namespace
+        } else {
+            claim_namespace
+        };
+        if origin_namespace != &pid_namespace {
+            return Ok(None);
+        }
+        let pending = previous.as_ref().is_some_and(|claim| {
+            claim.protocol == 1
+                && claim.store_id == store_id
+                && claim.request_id == *id
+                && claim.generation == request.worker_generation
+                && (claim.worker.is_none() || claim.worker.as_ref() != request.worker.as_ref())
+        });
+        if !pending
+            && request
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !group_absent(worker.pid))
+            && !handoff
+        {
+            return Ok(None);
+        }
+        request.worker_generation = request
+            .worker_generation
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorCode::State, "supervisor generation exhausted"))?;
+        // Until the child registers, the launcher owns the durable claim.
+        // Unknown namespace + a nonempty owner also prevents older Linux
+        // recovery loops from spawning into this pre-fork interval.
+        request.worker = Some(launcher.clone());
+        request.pid_namespace = None;
+        let claim = crate::model::WorkerClaim {
+            protocol: 1,
+            store_id,
+            request_id: id.clone(),
+            generation: request.worker_generation,
+            launcher: launcher.clone(),
+            pid_namespace: pid_namespace.clone(),
+            worker: None,
+        };
+        store.write_claim(&claim)?;
+        Ok(Some(claim))
+    })?;
+    let Some(claim) = claim else {
+        return Ok(None);
+    };
+    spawn(&claim, lease).map(Some)
+}
+
+fn launch_worker(
+    store: &Store,
+    claim: &crate::model::WorkerClaim,
+    lease: std::fs::File,
+) -> Result<Child> {
+    let id = &claim.request_id;
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -602,7 +701,8 @@ pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<Child> {
         .arg(&store.config_path)
         .arg("worker")
         .arg(&id.0)
-        .stdin(Stdio::null())
+        .arg(claim.generation.to_string())
+        .stdin(Stdio::from(lease))
         .stdout(stdout)
         .stderr(stderr)
         .process_group(0)
@@ -748,11 +848,21 @@ fn recover_with_boot(
             if request.phase.terminal() {
                 continue;
             }
-            if !rebooted && request.pid_namespace != pid_namespace {
-                if request.pid_namespace.is_none() && request.phase == Phase::Queued
+            let mut origin_namespace = request.pid_namespace.clone();
+            if request.phase == Phase::Queued && let Some(claim) = store.claim(&request.id)?
+                && claim.protocol == 1 && claim.store_id == state.store_id && claim.generation == request.worker_generation
+                && (claim.worker.is_none() || claim.worker.as_ref() != request.worker.as_ref()) {
+                if claim.pid_namespace == pid_namespace {
+                    respawn.push(request.id.clone());
+                    continue;
+                }
+                origin_namespace = claim.pid_namespace;
+            }
+            if !rebooted && origin_namespace != pid_namespace {
+                if origin_namespace.is_none() && request.phase == Phase::Queued
                     && request.worker.is_none() && request.watchdog.is_none() {
                     request.pid_namespace = pid_namespace.clone();
-                } else if request.pid_namespace.as_ref().is_some_and(|namespace|
+                } else if origin_namespace.as_ref().is_some_and(|namespace|
                     namespaces.as_ref().and_then(|snapshot| snapshot.alive(namespace)) == Some(false)) {
                     // An extinct PID namespace cannot retain live children.
                     request.worker = None; request.watchdog = None;
@@ -786,7 +896,7 @@ fn recover_with_boot(
                     if matches!(
                         identity,
                         None | Some(IdentityState::Absent | IdentityState::Different)
-                    ) {
+                    ) && request.worker.as_ref().is_none_or(|worker| group_absent(worker.pid)) {
                         request.worker = None;
                         respawn.push(request.id.clone());
                     }
@@ -851,90 +961,104 @@ fn status_at(store: &Store, now: u64, clock: u64) -> Result<Report> {
 
 fn status_with_clock(
     store: &Store,
-    read_clock: impl FnMut() -> Result<(u64, u64)>,
+    mut read_clock: impl FnMut() -> Result<(u64, u64)>,
 ) -> Result<Report> {
-    store.transaction_with_clock(read_clock, |state, config, now, clock| {
-        let processes = Processes::read();
-        let sample = config.sample(now);
-        let (sample, source_error) = match sample {
-            Ok(sample) => (Some(sample), None),
-            Err(error) => (None, Some(error.to_string())),
-        };
-        let positions = state.queue_positions(config, clock);
-        let free_budget = config
-            .memory_budget_bytes
-            .map(|budget| budget.saturating_sub(state.memory_used(config)));
-        let requests = state
-            .requests
-            .iter()
-            .map(|request| {
-                let ended_clock = request.ended_clock_ms.unwrap_or(clock);
-                let identity = request
-                    .worker
+    let (state, config) = store.snapshot()?;
+    let (now, clock) = read_clock()?;
+    let processes = state
+        .requests
+        .iter()
+        .any(|request| request.phase == Phase::Running && request.worker.is_some())
+        .then(|| {
+            Processes::read_workers(
+                &state
+                    .requests
+                    .iter()
+                    .filter(|request| request.phase == Phase::Running)
+                    .filter_map(|request| request.worker.as_ref().map(|worker| worker.pid))
+                    .collect::<Vec<_>>(),
+            )
+        });
+    let sample = config.sample(now);
+    let (sample, source_error) = match sample {
+        Ok(sample) => (Some(sample), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let positions = state.queue_positions(&config, clock);
+    let free_budget = config
+        .memory_budget_bytes
+        .map(|budget| budget.saturating_sub(state.memory_used(&config)));
+    let requests = state
+        .requests
+        .iter()
+        .map(|request| {
+            let ended_clock = request.ended_clock_ms.unwrap_or(clock);
+            let identity = request.worker.as_ref().and_then(|worker| {
+                processes
                     .as_ref()
-                    .map(|worker| processes.identity(worker, &request.id));
-                RequestReport {
-                    trace: {
-                        let mut trace = request.trace_snapshot(clock);
-                        if request.phase == Phase::Queued {
-                            trace.position = positions.get(&request.id.0).copied();
-                        }
-                        trace
-                    },
-                    memory_needed_bytes: request
-                        .memory_reservation_bytes
-                        .or(request.memory_cap_bytes),
-                    memory_free_budget_bytes: free_budget,
-                    pid_namespace: request.pid_namespace.clone(),
-                    request_id: request.id.clone(),
-                    memory_cap_bytes: request.memory_cap_bytes,
-                    owner: request.owner.clone(),
-                    ticket: request.ticket.clone(),
-                    state: phase_name(request.phase).to_owned(),
-                    units: request.units,
-                    priority: request.priority,
-                    class: request.class.clone(),
-                    enqueued_at_ms: request.enqueued_at_ms,
-                    started_at_ms: request.started_at_ms,
-                    ended_at_ms: request.ended_at_ms,
-                    wait_ms: request
-                        .started_clock_ms
-                        .unwrap_or(ended_clock)
-                        .saturating_sub(request.enqueued_clock_ms),
-                    hold_ms: request
-                        .started_clock_ms
-                        .map(|start| ended_clock.saturating_sub(start)),
-                    suspect: request.phase == Phase::Running
-                        && (identity != Some(IdentityState::Matching)
-                            || request.heartbeat_at_ms.is_none_or(|heartbeat| {
-                                now.saturating_sub(heartbeat) > crate::config::HEARTBEAT_MAX_AGE_MS
-                            })),
-                    reason: request.reason.clone(),
-                    exit_code: request.exit_code,
-                    signal: request.signal,
-                    lease_record: request.lease_record.clone(),
-                }
-            })
-            .collect();
-        let used = state.used();
-        Ok(Report {
-            metrics: state.metrics.snapshot(state, clock),
-            state_path: store.path.clone(),
-            schema_version: 1,
-            store_id: state.store_id.clone(),
-            host: state.host.clone(),
-            observed_at_ms: now,
-            capacity_units: config.capacity_units,
-            used_units: used,
-            free_units: config.capacity_units.saturating_sub(used),
-            overcommit_units: used.saturating_sub(config.capacity_units),
-            sample,
-            source_error,
-            requests,
-            events: state.events.clone(),
-            pruned_events: state.pruned_events,
-            next_event_sequence: state.next_event,
+                    .map(|processes| processes.identity(worker, &request.id))
+            });
+            RequestReport {
+                trace: {
+                    let mut trace = request.trace_snapshot(clock);
+                    if request.phase == Phase::Queued {
+                        trace.position = positions.get(&request.id.0).copied();
+                    }
+                    trace
+                },
+                memory_needed_bytes: request
+                    .memory_reservation_bytes
+                    .or(request.memory_cap_bytes),
+                memory_free_budget_bytes: free_budget,
+                pid_namespace: request.pid_namespace.clone(),
+                request_id: request.id.clone(),
+                memory_cap_bytes: request.memory_cap_bytes,
+                owner: request.owner.clone(),
+                ticket: request.ticket.clone(),
+                state: phase_name(request.phase).to_owned(),
+                units: request.units,
+                priority: request.priority,
+                class: request.class.clone(),
+                enqueued_at_ms: request.enqueued_at_ms,
+                started_at_ms: request.started_at_ms,
+                ended_at_ms: request.ended_at_ms,
+                wait_ms: request
+                    .started_clock_ms
+                    .unwrap_or(ended_clock)
+                    .saturating_sub(request.enqueued_clock_ms),
+                hold_ms: request
+                    .started_clock_ms
+                    .map(|start| ended_clock.saturating_sub(start)),
+                suspect: request.phase == Phase::Running
+                    && (identity != Some(IdentityState::Matching)
+                        || request.heartbeat_at_ms.is_none_or(|heartbeat| {
+                            now.saturating_sub(heartbeat) > crate::config::HEARTBEAT_MAX_AGE_MS
+                        })),
+                reason: request.reason.clone(),
+                exit_code: request.exit_code,
+                signal: request.signal,
+                lease_record: request.lease_record.clone(),
+            }
         })
+        .collect();
+    let used = state.used();
+    Ok(Report {
+        metrics: state.metrics.snapshot(&state, clock),
+        state_path: store.path.clone(),
+        schema_version: 1,
+        store_id: state.store_id.clone(),
+        host: state.host.clone(),
+        observed_at_ms: now,
+        capacity_units: config.capacity_units,
+        used_units: used,
+        free_units: config.capacity_units.saturating_sub(used),
+        overcommit_units: used.saturating_sub(config.capacity_units),
+        sample,
+        source_error,
+        requests,
+        events: state.events.clone(),
+        pruned_events: state.pruned_events,
+        next_event_sequence: state.next_event,
     })
 }
 
@@ -1009,6 +1133,8 @@ pub(crate) fn wait(
     id: &RequestId,
     mut workers: Vec<Child>,
 ) -> Result<(i32, Option<String>)> {
+    let mut last_snapshot = None;
+    let mut observed = None;
     loop {
         let mut active = Vec::new();
         for mut worker in workers {
@@ -1017,10 +1143,17 @@ pub(crate) fn wait(
             }
         }
         workers = active;
-        for missing in recover(store)? {
-            workers.push(spawn_worker(store, &missing)?);
-        }
-        let result = store.transaction(|state, _config| {
+        let notice = store.notice(id).ok().flatten();
+        let refresh = last_snapshot
+            .is_none_or(|last: std::time::Instant| last.elapsed() >= Duration::from_secs(2))
+            || notice.as_ref().is_none_or(|notice| notice.phase.terminal())
+            || observed.as_ref().is_none_or(|request: &Request| {
+                notice.as_ref().is_some_and(|notice| {
+                    notice.phase != request.phase || notice.generation != request.worker_generation
+                })
+            });
+        if refresh {
+            let (state, _) = store.snapshot()?;
             let request = state.find(id)?;
             let code = match request.phase {
                 Phase::Queued | Phase::Running => None,
@@ -1035,17 +1168,43 @@ pub(crate) fn wait(
                         .unwrap_or(1),
                 ),
             };
-            Ok((
-                code,
-                request.reason.clone(),
-                crate::config::POLL_INTERVAL_MS,
-            ))
-        })?;
-        if let Some(code) = result.0 {
-            return Ok((code, result.1));
+            if let Some(code) = code {
+                return Ok((code, request.reason.clone()));
+            }
+            observed = Some(request.clone());
+            last_snapshot = Some(std::time::Instant::now());
         }
-        std::thread::sleep(Duration::from_millis(result.2));
+        if observed
+            .as_ref()
+            .is_some_and(|request| request.phase == Phase::Queued)
+        {
+            if let Some(child) = spawn_worker(store, id)? {
+                workers.push(child);
+            }
+            crate::scheduler::ensure(store)?;
+        } else if let Some(request) = observed.as_ref() {
+            let missing = if store.claim(id)?.is_some() {
+                store
+                    .try_lock_member(&format!("{}.spawn.lock", id.0))?
+                    .is_some()
+            } else {
+                request.pid_namespace == crate::process::pid_namespace()?
+                    && request
+                        .worker
+                        .as_ref()
+                        .is_some_and(|worker| group_absent(worker.pid))
+            };
+            if missing {
+                crate::scheduler::ensure(store)?;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(wait_interval()));
     }
+}
+
+fn wait_interval() -> u64 {
+    let half = crate::config::POLL_INTERVAL_MS / 2;
+    half + u64::from(std::process::id()) % half.max(1)
 }
 
 #[derive(Clone)]
@@ -1093,12 +1252,154 @@ fn claim_worker(
     })
 }
 
-enum Admission {
-    Stopped,
-    Waiting(u64),
-    Granted(Box<Request>),
+fn claim_spawned_worker(
+    store: &Store,
+    id: &RequestId,
+    identity: &crate::model::ProcessIdentity,
+    generation: u64,
+) -> Result<Option<WorkerFence>> {
+    let namespace = crate::process::pid_namespace()?;
+    store.transaction(|state, _| {
+        let Some(mut claim) = store.claim(id)? else {
+            return Ok(None);
+        };
+        if claim.store_id != state.store_id {
+            return Ok(None);
+        }
+        let request = state.find_mut(id)?;
+        if claim.protocol != 1
+            || claim.pid_namespace != namespace
+            || claim.request_id != *id
+            || claim.generation != generation
+            || request.phase != Phase::Queued
+            || request.worker_generation != generation
+            || claim.worker.is_some()
+        {
+            return Ok(None);
+        }
+        request.worker = Some(identity.clone());
+        request.pid_namespace = namespace;
+        request.heartbeat_at_ms = Some(now_ms()?);
+        claim.worker = Some(identity.clone());
+        store.write_claim(&claim)?;
+        Ok(Some(WorkerFence {
+            identity: identity.clone(),
+            generation,
+        }))
+    })
 }
 
+pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
+    let (snapshot, _) = store.snapshot()?;
+    let claims: std::collections::BTreeMap<_, _> = snapshot
+        .requests
+        .iter()
+        .filter(|request| request.phase == Phase::Queued)
+        .filter_map(|request| {
+            store
+                .claim(&request.id)
+                .ok()
+                .flatten()
+                .filter(|_| {
+                    matches!(
+                        store.try_lock_member(&format!("{}.spawn.lock", request.id.0)),
+                        Ok(None)
+                    )
+                })
+                .map(|claim| (request.id.0.clone(), claim))
+        })
+        .collect();
+    store.transaction_with_clock(
+        || Ok((now_ms()?, clock_ms()?)),
+        |state, config, now, clock| {
+            let sample = config.sample(now).ok();
+            loop {
+                let positions = state.queue_positions(config, clock);
+                let mut ordered: Vec<_> = positions.iter().collect();
+                ordered.sort_by_key(|(_, position)| **position);
+                let mut candidate = None;
+                for (id, _) in ordered {
+                    let id = RequestId(id.clone());
+                    let request = state.find(&id)?;
+                    let ready = claims.get(&id.0).is_some_and(|claim| {
+                        claim.protocol == 1
+                            && claim.store_id == state.store_id
+                            && claim.request_id == id
+                            && claim.generation == request.worker_generation
+                            && claim.worker.is_some()
+                            && claim.worker.as_ref() == request.worker.as_ref()
+                    });
+                    if ready
+                        && request.stop.is_none()
+                        && state
+                            .admission_reason(&id, config, sample.as_ref(), now, clock)?
+                            .is_none()
+                    {
+                        candidate = Some(id);
+                        break;
+                    }
+                }
+                let Some(id) = candidate else {
+                    break;
+                };
+                grant_request(state, config, &id, now, clock)?;
+            }
+            let positions = state.queue_positions(config, clock);
+            let queued: Vec<_> = state
+                .requests
+                .iter()
+                .filter(|request| request.phase == Phase::Queued)
+                .map(|request| request.id.clone())
+                .collect();
+            for id in queued {
+                let reason = state.admission_reason(&id, config, sample.as_ref(), now, clock)?;
+                let blocks = state.block_observations(&id, config, sample.as_ref(), now, clock)?;
+                let request = state.find_mut(&id)?;
+                let changed = request.observe_blocks(blocks, clock);
+                request.trace.position = positions.get(&id.0).copied();
+                request.reason = reason.map(str::to_owned);
+                if request.worker.is_some() && !claims.contains_key(&id.0) {
+                    request.reason = Some("legacy_worker_requires_reattach".to_owned());
+                }
+                if changed {
+                    state.event(&id, config, now, clock)?;
+                    if let Some(event) = state.events.last_mut() {
+                        event.kind = "blocked".to_owned();
+                    }
+                }
+            }
+            let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
+            state.metrics.observe_block(blocked, now, clock)?;
+            Ok(())
+        },
+    )
+}
+
+fn grant_request(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    now: u64,
+    clock: u64,
+) -> Result<()> {
+    let request = state.find_mut(id)?;
+    request.observe_blocks(Vec::new(), clock);
+    request.phase = Phase::Running;
+    request.started_at_ms = Some(now);
+    request.started_clock_ms = Some(clock);
+    request.heartbeat_at_ms = Some(now);
+    request.reason = None;
+    state.event(id, config, now, clock)
+}
+
+#[cfg(test)]
+enum Admission {
+    Stopped,
+    Waiting,
+    Granted,
+}
+
+#[cfg(test)]
 fn admit_worker(
     store: &Store,
     id: &RequestId,
@@ -1135,6 +1436,7 @@ fn admit_worker_at(
     )
 }
 
+#[cfg(test)]
 fn admit_worker_with_clock(
     store: &Store,
     id: &RequestId,
@@ -1173,17 +1475,10 @@ fn admit_worker_with_clock(
                     event.kind = "blocked".to_owned();
                 }
             }
-            return Ok(Admission::Waiting(crate::config::POLL_INTERVAL_MS));
+            return Ok(Admission::Waiting);
         }
-        let admitted = {
-            let request = state.find_mut(id)?;
-            request.phase = Phase::Running;
-            request.started_at_ms = Some(now);
-            request.started_clock_ms = Some(clock);
-            request.clone()
-        };
-        state.event(id, config, now, clock)?;
-        Ok(Admission::Granted(Box::new(admitted)))
+        grant_request(state, config, id, now, clock)?;
+        Ok(Admission::Granted)
     })
 }
 
@@ -1205,20 +1500,71 @@ fn finish_owned(
     state.finish(id, completion, config, now_ms()?, clock_ms()?)
 }
 
-pub(crate) fn worker(store: &Store, id: &RequestId) -> Result<()> {
+pub(crate) fn worker(store: &Store, id: &RequestId, generation: Option<u64>) -> Result<()> {
+    let Some(_request_lease) = store.inherited_or_try_lock(&format!("{}.spawn.lock", id.0))? else {
+        return Ok(());
+    };
     let interrupted = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, interrupted.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, interrupted.clone())?;
-    let identity = Processes::read().current()?;
-    let Some(fence) = claim_worker(store, id, &identity)? else {
+    let identity = Processes::self_identity()?;
+    if u32::try_from(nix::unistd::getpgrp().as_raw()).ok() != Some(identity.pid) {
+        return Err(Error::new(
+            ErrorCode::State,
+            "supervisor must own an isolated process group",
+        ));
+    }
+    let fence = match generation {
+        Some(generation) => claim_spawned_worker(store, id, &identity, generation)?,
+        None => claim_worker(store, id, &identity)?,
+    };
+    let Some(fence) = fence else {
         return Ok(());
     };
+    if generation.is_none() {
+        store.transaction(|state, _| {
+            state.find_mut(id)?.pid_namespace = crate::process::pid_namespace()?;
+            store.write_claim(&crate::model::WorkerClaim {
+                protocol: 1,
+                store_id: state.store_id.clone(),
+                request_id: id.clone(),
+                generation: fence.generation,
+                launcher: identity.clone(),
+                pid_namespace: crate::process::pid_namespace()?,
+                worker: Some(identity.clone()),
+            })
+        })?;
+    }
+    let mut last_snapshot = None;
     let request = loop {
-        match admit_worker(store, id, &fence, &interrupted)? {
-            Admission::Stopped => return Ok(()),
-            Admission::Waiting(poll_ms) => std::thread::sleep(Duration::from_millis(poll_ms)),
-            Admission::Granted(request) => break *request,
+        if interrupted.load(Ordering::Relaxed) {
+            store.transaction(|state, config| {
+                if fence.owns(state.find(id)?) && state.find(id)?.phase == Phase::Queued {
+                    state.find_mut(id)?.stop = Some(StopReason::Cancelled);
+                    state.finish(id, Completion::default(), config, now_ms()?, clock_ms()?)?;
+                }
+                Ok(())
+            })?;
         }
+        let notice = store.notice(id).ok().flatten();
+        if last_snapshot
+            .is_none_or(|last: std::time::Instant| last.elapsed() >= Duration::from_secs(2))
+            || notice.as_ref().is_none_or(|notice| {
+                notice.phase != Phase::Queued || notice.generation != fence.generation
+            })
+        {
+            let (state, _) = store.snapshot()?;
+            let request = state.find(id)?;
+            if !fence.owns(request) || request.phase.terminal() {
+                return Ok(());
+            }
+            if request.phase == Phase::Running {
+                break request.clone();
+            }
+            last_snapshot = Some(std::time::Instant::now());
+        }
+        crate::scheduler::ensure(store)?;
+        std::thread::sleep(Duration::from_millis(wait_interval()));
     };
     let (watchdog, mut watchdog_child) =
         match crate::watchdog::launch(store, id, &identity, fence.generation) {
@@ -1570,7 +1916,9 @@ fn supervise_command_loop(
                     != IdentityState::Matching
             {
                 degraded = true;
-                current.reason = Some("supervision_degraded".to_owned());
+                if current.reason.as_deref() != Some("supervision_lost") {
+                    current.reason = Some("supervision_degraded".to_owned());
+                }
             }
             current.heartbeat_at_ms = Some(now_ms()?);
             if current.stop.is_none() {
@@ -1760,9 +2108,13 @@ fn start_command(
         );
         let mut command = Command::new(launch_spec.program);
         command
+            .stdin(std::process::Stdio::null())
             .args(launch_spec.arguments)
             .current_dir(&request.cwd)
             .process_group(group);
+        if let Some(real_cargo) = &config.real_cargo {
+            command.env("LOCKED_BUILD_REAL_CARGO", real_cargo);
+        }
         if let Some(value) = environment.cargo_build_jobs_env {
             command.env("CARGO_BUILD_JOBS", value);
         }
@@ -2506,7 +2858,13 @@ pub(crate) fn prune(store: &Store) -> Result<usize> {
         Ok(terminal)
     })?;
     for id in &terminal {
-        for extension in ["stdout", "stderr"] {
+        for extension in [
+            "stdout",
+            "stderr",
+            "notice.json",
+            "launch.json",
+            "spawn.lock",
+        ] {
             match std::fs::remove_file(store.path.join(format!("{}.{extension}", id.0))) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
