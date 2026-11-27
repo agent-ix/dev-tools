@@ -155,8 +155,9 @@ If watchdog or scope supervision disappears, the runner terminates the whole
 command group before returning and records `supervision_lost`. It sends TERM
 and escalates to SIGKILL after the configured grace period. Linux recovery uses
 the kernel boot UUID to distinguish a reboot from boot-timestamp drift.
-Recovery respects PID namespaces and retains leases whose process IDs belong
-to another namespace. The fallback watchdog counts only the command tree:
+Host-side recovery drains provably extinct PID namespaces and retains live or unverifiable leases.
+Use `recover --dry-run` to preview decisions and `recover --release <request-id> --reason <text>` for an authorized, audited operator release.
+The fallback watchdog counts only the command tree:
 Linux proportional anonymous memory (`Pss_Anon`) or macOS RSS. Its initial
 sample logs each contributing PID and bytes; cap diagnostics name the metric,
 measured bytes, and cap.

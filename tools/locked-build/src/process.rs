@@ -63,8 +63,10 @@ fn namespace_alive_at(root: &std::path::Path, namespace: &str) -> Result<bool> {
 
 pub(crate) fn namespaces_at(root: &std::path::Path) -> Result<NamespaceSnapshot> {
     use std::os::unix::fs::{DirEntryExt, MetadataExt};
-    // Absence is evidence only when every listed process identity can be read
-    // without a race. Permission failures are unknown, never proof of death.
+    // Every live foreign PID namespace has its original PID 1. Unlike ns/pid,
+    // status/NSpid is readable for other users' non-dumpable host processes.
+    // Host tasks and non-init members cannot hide a foreign namespace's init.
+    // An init cannot be replaced: its exit kills the namespace's members.
     let mut incomplete = false;
     let mut namespaces = BTreeSet::new();
     for entry in std::fs::read_dir(root)? {
@@ -73,19 +75,46 @@ pub(crate) fn namespaces_at(root: &std::path::Path) -> Result<NamespaceSnapshot>
             continue;
         }
         let listed_inode = entry.ino();
+        let foreign_init = std::fs::read_to_string(entry.path().join("status"))
+            .ok()
+            .and_then(|status| {
+                let values = status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("NSpid:"))?
+                    .split_whitespace()
+                    .map(str::parse::<u32>)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .ok()?;
+                (!values.is_empty() && values.iter().all(|pid| *pid > 0))
+                    .then(|| values.len() > 1 && values.last() == Some(&1))
+            });
+        let gone = || {
+            !entry.path().exists()
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .parse::<i32>()
+                    .is_ok_and(|pid| {
+                        getpgid(Some(Pid::from_raw(pid))) == Err(nix::errno::Errno::ESRCH)
+                    })
+        };
         let observed = std::fs::read_link(entry.path().join("ns/pid"));
         match observed {
             Ok(value) => {
                 namespaces.insert(value.to_string_lossy().into_owned());
             }
             Err(_) => {
-                incomplete = true;
+                if foreign_init != Some(false) && !gone() {
+                    incomplete = true;
+                }
             }
         }
         match std::fs::metadata(entry.path()) {
             Ok(metadata) if metadata.ino() == listed_inode => {}
             _ => {
-                incomplete = true;
+                if foreign_init != Some(false) && !gone() {
+                    incomplete = true;
+                }
             }
         }
     }
@@ -546,6 +575,28 @@ mod tests {
         std::fs::create_dir(root.path().join("22"))?;
         assert!(namespace_alive_at(root.path(), "pid:[extinct]").is_err());
         assert!(namespace_alive_at(root.path(), "pid:[host]")?);
+        Ok(())
+    }
+
+    /// Provenance: SWM-421. Trace: FR-005-AC-4
+    #[test]
+    fn host_tasks_without_readable_namespace_links_cannot_hide_a_foreign_namespace() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join("11"))?;
+        std::fs::write(
+            root.path().join("11/status"),
+            "Name:\thost-root\nNSpid:\t11\n",
+        )?;
+        std::fs::create_dir_all(root.path().join("22/ns"))?;
+        std::fs::write(
+            root.path().join("22/status"),
+            "Name:\tnamespace-init\nNSpid:\t22\t1\n",
+        )?;
+        std::os::unix::fs::symlink("pid:[live]", root.path().join("22/ns/pid"))?;
+        assert_eq!(namespaces_at(root.path())?.alive("pid:[dead]"), Some(false));
+        assert_eq!(namespaces_at(root.path())?.alive("pid:[live]"), Some(true));
+        std::fs::remove_file(root.path().join("22/ns/pid"))?;
+        assert_eq!(namespaces_at(root.path())?.alive("pid:[dead]"), None);
         Ok(())
     }
 

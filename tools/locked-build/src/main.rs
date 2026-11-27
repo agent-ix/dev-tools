@@ -11,6 +11,7 @@ mod install;
 mod metrics;
 mod model;
 mod process;
+mod recovery;
 mod runtime;
 mod sample;
 mod scheduler;
@@ -72,6 +73,15 @@ enum Action {
         /// Fence legacy queued workers after their owners reattach with `wait`.
         #[arg(long)]
         handoff_queued: bool,
+        /// Preview foreign leases without writing state, policy, aliases or logs.
+        #[arg(long, conflicts_with = "handoff_queued")]
+        dry_run: bool,
+        /// Explicitly release one uncertain lease after checking live evidence.
+        #[arg(long, requires = "reason", conflicts_with = "handoff_queued")]
+        release: Option<String>,
+        /// Auditable operator explanation for an explicit release.
+        #[arg(long, requires = "release")]
+        reason: Option<String>,
     },
     /// Reattach to an accepted request without submitting its command again.
     Wait { request: String },
@@ -251,6 +261,30 @@ fn execute(cli: Cli) -> Result<i32> {
             return Ok(0);
         }
     }
+    if let Action::Recover {
+        dry_run,
+        release,
+        reason,
+        ..
+    } = &cli.command
+        && (*dry_run || release.is_some())
+    {
+        // This path deliberately bypasses default-policy creation and aliases.
+        let state = cli
+            .state
+            .clone()
+            .or_else(|| std::env::var_os("LOCKED_BUILD_STATE").map(PathBuf::from))
+            .unwrap_or_else(writable::shared_path);
+        let config = cli
+            .config
+            .clone()
+            .or_else(|| std::env::var_os("LOCKED_BUILD_CONFIG").map(PathBuf::from))
+            .unwrap_or_else(|| state.join("policy.json"));
+        let store = store::Store::open_existing(&state, &config)?;
+        let report = recovery::run(&store, release.as_deref(), reason.as_deref(), *dry_run)?;
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(if report.refused() { 2 } else { 0 });
+    }
     let (state, config) = resolve_paths(cli.state.as_deref(), cli.config.as_deref(), |name| {
         std::env::var_os(name).map(PathBuf::from)
     })?;
@@ -308,7 +342,7 @@ fn execute(cli: Cli) -> Result<i32> {
             runtime::cancel(&store, &RequestId(request))?;
             Ok(0)
         }
-        Action::Recover { handoff_queued } => {
+        Action::Recover { handoff_queued, .. } => {
             if handoff_queued {
                 let (state, _) = store.snapshot()?;
                 for request in state
@@ -791,16 +825,22 @@ fn main() {
         };
         std::process::exit(code);
     }
+    let requested_dry_run = std::env::args_os()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == "--dry-run" || arg.as_encoded_bytes().starts_with(b"--dry-run="));
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) if error.use_stderr() => {
-            emit_error(
-                &error::Error::new(
-                    error::ErrorCode::Request,
-                    format!("invalid command line: {:?}", error.kind()),
-                ),
-                None,
+            let failure = error::Error::new(
+                error::ErrorCode::Request,
+                format!("invalid command line: {:?}", error.kind()),
             );
+            if requested_dry_run {
+                eprintln!("{failure}");
+            } else {
+                emit_error(&failure, None);
+            }
             std::process::exit(2);
         }
         Err(error) => {
@@ -809,10 +849,20 @@ fn main() {
         }
     };
     let state = cli.state.clone();
+    let read_only = matches!(&cli.command, Action::Recover { dry_run: true, .. });
     let code = match execute(cli) {
         Ok(code) => code,
         Err(error) => {
-            emit_error(&error, state.as_deref());
+            if read_only {
+                if let Some(message) = diagnostics::unscoped(&error, "dry-run".into())
+                    .diagnostic
+                    .message
+                {
+                    eprintln!("{message}");
+                }
+            } else {
+                emit_error(&error, state.as_deref());
+            }
             2
         }
     };
