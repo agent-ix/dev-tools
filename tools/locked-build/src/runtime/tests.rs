@@ -829,14 +829,15 @@ fn direct_test_binary_thread_limit_is_clamped_without_separator() {
 }
 
 #[test]
-fn caller_environment_overrides_are_recorded_and_preserved_without_policy_values() -> Result<()> {
+fn caller_environment_overrides_incremental_and_policy_target_values() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let id = queued(&store)?;
     let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
     policy.cargo_incremental = None;
-    policy.target_root = None;
+    let policy_target_root = root.path().join("policy-targets");
+    policy.target_root = Some(policy_target_root.clone());
     let mut request = request;
     request.caller_cargo_incremental = Some("1".to_owned());
     request.caller_cargo_target_dir = Some("/caller/target".to_owned());
@@ -870,6 +871,7 @@ fn caller_environment_overrides_are_recorded_and_preserved_without_policy_values
         Some(std::path::Path::new("/caller/target"))
     );
     assert!(!target_overwrote);
+    assert!(!policy_target_root.exists());
 
     let mut policy_override = policy;
     policy_override.cargo_incremental = Some(false);
@@ -1622,6 +1624,7 @@ fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Re
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
+    clear_caller_target_directory(&store, &id)?;
     let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     let target = target_directory(&policy, &request, true)?
         .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
@@ -1647,6 +1650,34 @@ fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Re
 }
 
 #[test]
+fn caller_target_directory_survives_lease_cleanup() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: Config = serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy.target_root = Some(root.path().join("policy-targets"));
+    policy.max_bytes = Some(1);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+
+    let caller_target = root.path().join("caller-target");
+    std::fs::create_dir(&caller_target)?;
+    let caller_artifact = caller_target.join("artifact");
+    std::fs::write(&caller_artifact, b"caller data")?;
+    let id = queued(&store)?;
+    store.transaction(|state, _| {
+        state.find_mut(&id)?.caller_cargo_target_dir =
+            Some(caller_target.to_string_lossy().into_owned());
+        Ok(())
+    })?;
+    finish_started_request(&store, &id)?;
+
+    cleanup_target(&store, &id)?;
+
+    assert_eq!(std::fs::read(caller_artifact)?, b"caller data");
+    assert!(!root.path().join("policy-targets").exists());
+    Ok(())
+}
+
+#[test]
 fn target_lifecycle_skips_symlinks_and_size_cleans_oversized_targets() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
@@ -1656,6 +1687,7 @@ fn target_lifecycle_skips_symlinks_and_size_cleans_oversized_targets() -> Result
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
+    clear_caller_target_directory(&store, &id)?;
     let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     let target = target_directory(&policy, &request, true)?
         .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
@@ -1693,6 +1725,13 @@ fn finish_started_request(store: &Store, id: &RequestId) -> Result<()> {
     })
 }
 
+fn clear_caller_target_directory(store: &Store, id: &RequestId) -> Result<()> {
+    store.transaction(|state, _| {
+        state.find_mut(id)?.caller_cargo_target_dir = None;
+        Ok(())
+    })
+}
+
 #[test]
 fn target_cleanup_treats_walk_bound_as_oversized_and_removes_symlink_tree() -> Result<()> {
     const TOO_MANY_ENTRIES: usize = 100_005;
@@ -1704,6 +1743,7 @@ fn target_cleanup_treats_walk_bound_as_oversized_and_removes_symlink_tree() -> R
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
+    clear_caller_target_directory(&store, &id)?;
     let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     let target = target_directory(&policy, &request, true)?
         .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;

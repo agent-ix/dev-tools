@@ -27,7 +27,8 @@ struct ToolManifest {
 struct ToolPin {
     name: String,
     executable: String,
-    version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -134,52 +135,11 @@ pub(crate) fn check_install(manifest_path: Option<&Path>) -> Result<i32> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let search_path = std::env::var_os("PATH");
     for pin in &manifest.tools {
-        let executable =
-            resolve_tool_executable(&pin.executable, search_path.as_deref(), home.as_deref());
-        let Some(executable) = executable else {
-            println!(
-                "mismatch {} expected={} unavailable=not-found",
-                pin.name, pin.version
-            );
-            mismatches = mismatches.saturating_add(1);
-            continue;
-        };
-        match Command::new(executable).arg("--version").output() {
-            Ok(output) if output.status.success() => {
-                let observed = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_owned();
-                if version_matches(&pin.name, &pin.version, &observed) {
-                    println!("ok {} {}", pin.name, pin.version);
-                } else {
-                    println!(
-                        "mismatch {} expected={} observed={}",
-                        pin.name, pin.version, observed
-                    );
-                    mismatches = mismatches.saturating_add(1);
-                }
-            }
-            Ok(output) => {
-                let detail = String::from_utf8_lossy(&output.stderr)
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_owned();
-                println!(
-                    "mismatch {} expected={} exit={} detail={}",
-                    pin.name, pin.version, output.status, detail
-                );
-                mismatches = mismatches.saturating_add(1);
-            }
-            Err(error) => {
-                println!(
-                    "mismatch {} expected={} unavailable={}",
-                    pin.name, pin.version, error
-                );
+        let expected = pin.version.as_deref().unwrap_or("present");
+        match check_tool(pin, search_path.as_deref(), home.as_deref()) {
+            Ok(observed) => println!("ok {} {observed}", pin.name),
+            Err(detail) => {
+                println!("mismatch {} expected={expected} {detail}", pin.name);
                 mismatches = mismatches.saturating_add(1);
             }
         }
@@ -195,11 +155,10 @@ fn read_manifest(contents: &str) -> Result<ToolManifest> {
         || manifest.tools.iter().any(|tool| {
             tool.name.is_empty()
                 || tool.executable.is_empty()
-                || tool.version.is_empty()
-                || !tool
-                    .version
-                    .chars()
-                    .any(|character| character.is_ascii_digit())
+                || tool.version.as_ref().is_some_and(|version| {
+                    version.is_empty()
+                        || !version.chars().any(|character| character.is_ascii_digit())
+                })
         })
     {
         return Err(Error::new(
@@ -208,6 +167,47 @@ fn read_manifest(contents: &str) -> Result<ToolManifest> {
         ));
     }
     Ok(manifest)
+}
+
+fn check_tool(
+    pin: &ToolPin,
+    search_path: Option<&OsStr>,
+    home: Option<&Path>,
+) -> std::result::Result<String, String> {
+    let executable = resolve_tool_executable(&pin.executable, search_path, home)
+        .ok_or_else(|| "unavailable=not-found".to_owned())?;
+    let argument = if pin.version.is_some() {
+        "--version"
+    } else {
+        "--help"
+    };
+    let output = Command::new(executable)
+        .arg(argument)
+        .output()
+        .map_err(|error| format!("unavailable={error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        return Err(format!("exit={} detail={detail}", output.status));
+    }
+    let Some(version) = pin.version.as_deref() else {
+        return Ok("present".to_owned());
+    };
+    let observed = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if version_matches(&pin.name, version, &observed) {
+        Ok(version.to_owned())
+    } else {
+        Err(format!("observed={observed}"))
+    }
 }
 
 fn version_matches(name: &str, expected: &str, observed: &str) -> bool {
@@ -350,16 +350,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_in_pins_have_hand_written_versions_and_executable_names() -> Result<()> {
+    fn checked_in_pins_have_hand_written_version_requirements_and_executable_names() -> Result<()> {
         let manifest = read_manifest(TOOL_MANIFEST)?;
         let expected = [
-            ("locked-build", "locked-build", "0.1.0"),
-            ("quire", "quire", "0.53.3"),
-            ("quoin", "quoin", "0.36.10"),
-            ("ix-board", "ix-board", "0.12.0"),
-            ("ix-trace-run", "ix-trace-run", "0.1.0"),
-            ("cargo", "cargo", "1.98.1"),
-            ("rustc", "rustc", "1.98.1"),
+            ("locked-build", "locked-build", Some("0.1.0")),
+            ("quire", "quire", Some("0.53.3")),
+            ("quoin", "quoin", Some("0.36.10")),
+            ("ix-board", "ix-board", Some("0.12.0")),
+            ("ix-trace-run", "ix-trace-run", None),
+            ("cargo", "cargo", Some("1.98.1")),
+            ("rustc", "rustc", Some("1.98.1")),
         ];
         let actual: Vec<_> = manifest
             .tools
@@ -368,11 +368,55 @@ mod tests {
                 (
                     tool.name.as_str(),
                     tool.executable.as_str(),
-                    tool.version.as_str(),
+                    tool.version.as_deref(),
                 )
             })
             .collect();
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn presence_only_manifest_pin_passes_when_help_succeeds() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir()?;
+        let executable = root.path().join("presence-tool");
+        symlink(std::env::current_exe()?, &executable)?;
+        let manifest = read_manifest(
+            r#"{"schema_version":1,"tools":[{"name":"presence-tool","executable":"presence-tool"}]}"#,
+        )?;
+        let search_path = std::env::join_paths([root.path()])
+            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        let pin = manifest.tools.first().ok_or_else(|| {
+            Error::new(
+                ErrorCode::Configuration,
+                "presence-only fixture pin missing",
+            )
+        })?;
+
+        assert_eq!(pin.version, None);
+        assert_eq!(
+            check_tool(pin, Some(&search_path), None),
+            Ok("present".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn presence_only_manifest_pin_mismatches_missing_executable() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let search_path = std::env::join_paths([root.path()])
+            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        let missing = ToolPin {
+            name: "presence-tool".to_owned(),
+            executable: "missing-tool".to_owned(),
+            version: None,
+        };
+        assert_eq!(
+            check_tool(&missing, Some(&search_path), None),
+            Err("unavailable=not-found".to_owned())
+        );
         Ok(())
     }
 

@@ -724,7 +724,11 @@ fn cancel_with_clock(
     })
 }
 
-pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Result<i32> {
+pub(crate) fn wait(
+    store: &Store,
+    id: &RequestId,
+    mut workers: Vec<Child>,
+) -> Result<(i32, Option<String>)> {
     loop {
         let mut active = Vec::new();
         for mut worker in workers {
@@ -751,12 +755,16 @@ pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Re
                         .unwrap_or(1),
                 ),
             };
-            Ok((code, crate::config::POLL_INTERVAL_MS))
+            Ok((
+                code,
+                request.reason.clone(),
+                crate::config::POLL_INTERVAL_MS,
+            ))
         })?;
         if let Some(code) = result.0 {
-            return Ok(code);
+            return Ok((code, result.1));
         }
-        std::thread::sleep(Duration::from_millis(result.1));
+        std::thread::sleep(Duration::from_millis(result.2));
     }
 }
 
@@ -1672,18 +1680,17 @@ fn apply_target_environment(
     config: &crate::config::Config,
     request: &Request,
 ) -> Result<(Option<std::path::PathBuf>, bool)> {
-    if let Some(target) = target_directory(config, request, true)? {
-        command.env("CARGO_TARGET_DIR", &target);
-        return Ok((Some(target), request.caller_cargo_target_dir.is_some()));
-    }
     if let Some(caller_value) = &request.caller_cargo_target_dir {
         let target = std::path::PathBuf::from(caller_value);
-        command.env("CARGO_TARGET_DIR", &target);
-        Ok((Some(target), false))
-    } else {
-        command.env_remove("CARGO_TARGET_DIR");
-        Ok((None, false))
+        command.env("CARGO_TARGET_DIR", caller_value);
+        return Ok((Some(target), false));
     }
+    if let Some(target) = target_directory(config, request, true)? {
+        command.env("CARGO_TARGET_DIR", &target);
+        return Ok((Some(target), false));
+    }
+    command.env_remove("CARGO_TARGET_DIR");
+    Ok((None, false))
 }
 
 fn owner_target_key(owner: &str) -> String {
@@ -1706,6 +1713,9 @@ fn owner_target_key(owner: &str) -> String {
 fn cleanup_target(store: &Store, id: &RequestId) -> Result<()> {
     let plan = store.transaction(|state, config| {
         let request = state.find(id)?;
+        if request.caller_cargo_target_dir.is_some() {
+            return Ok(None);
+        }
         let still_active = state
             .requests
             .iter()

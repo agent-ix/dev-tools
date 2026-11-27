@@ -105,6 +105,17 @@ impl Harness {
         release: &Path,
         units: u32,
     ) -> Result<Child, Box<dyn std::error::Error>> {
+        self.command_with_stderr(mode, marker, release, units, Stdio::null())
+    }
+
+    fn command_with_stderr(
+        &self,
+        mode: &str,
+        marker: &Path,
+        release: &Path,
+        units: u32,
+        stderr: Stdio,
+    ) -> Result<Child, Box<dyn std::error::Error>> {
         self.refresh_sample()?;
         Ok(self
             .cli()
@@ -127,7 +138,7 @@ impl Harness {
             .env("LOCKED_BUILD_FIXTURE_MARKER", marker)
             .env("LOCKED_BUILD_FIXTURE_RELEASE", release)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()?)
     }
 
@@ -397,20 +408,39 @@ fn queued_cancel_never_runs_the_command() -> TestResult {
 /// Trace: FR-005-AC-4
 #[test]
 fn hold_timeout_kills_the_group_before_releasing_capacity() -> TestResult {
-    let harness = Harness::new(1, 15000)?;
+    let harness = Harness::new(1, 3000)?;
     let marker = harness.root.path().join("started");
-    let mut child = harness.command(
+    let child = harness.command_with_stderr(
         "ignore-term",
         &marker,
         &harness.root.path().join("never-release"),
         1,
+        Stdio::piped(),
     )?;
     observed(|| marker.exists());
     let descendant = marker.with_extension("descendant");
     observed(|| descendant.exists());
     assert_eq!(harness.report()?["used_units"], 1);
-    assert_eq!(complete(&mut child)?.code(), Some(124));
+    let output = child.wait_with_output()?;
+    assert_eq!(output.status.code(), Some(124));
+    let run_output = String::from_utf8(output.stderr)?;
+    assert!(run_output.contains("hold_timeout"), "{run_output}");
+    assert!(run_output.contains("hold_ms=3000 ms"), "{run_output}");
+    assert!(
+        run_output.contains("change the limit in policy hold_ms"),
+        "{run_output}"
+    );
     assert_eq!(harness.request(0)?["state"], "timed_out");
+    let request = harness.request(0)?;
+    let reason = request["reason"]
+        .as_str()
+        .ok_or("reason missing")?
+        .to_owned();
+    assert!(reason.contains("hold_ms=3000 ms"), "{reason}");
+    assert!(
+        reason.contains("change the limit in policy hold_ms"),
+        "{reason}"
+    );
     assert_eq!(harness.report()?["used_units"], 0);
     assert!(!fixture_alive(&marker)?);
     assert!(!fixture_alive(&descendant)?);
@@ -667,7 +697,17 @@ fn hold_deadline_survives_supervisor_loss_and_stops_term_resistant_descendants()
         Some(124)
     );
     assert_eq!(harness.request(0)?["state"], "timed_out");
-    assert_eq!(harness.request(0)?["reason"], "hold_timeout");
+    let request = harness.request(0)?;
+    let reason = request["reason"]
+        .as_str()
+        .ok_or("reason missing")?
+        .to_owned();
+    assert!(reason.contains("hold_timeout"), "{reason}");
+    assert!(reason.contains("hold_ms=15000 ms"), "{reason}");
+    assert!(
+        reason.contains("change the limit in policy hold_ms"),
+        "{reason}"
+    );
     assert!(!fixture_alive(&marker)?);
     assert!(!fixture_alive(&descendant)?);
     assert_eq!(harness.report()?["used_units"], 0);

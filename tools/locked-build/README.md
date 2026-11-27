@@ -35,6 +35,9 @@ pin matches, 1 otherwise. Pins live in
 cores and RAM for draco (18), luna (8), titan (32), and terra (14). The
 installed policy is generated from each host's own measurements.
 
+The generated `hold_ms` policy default is 5,400,000 ms (90 minutes), the
+ceiling for any command. Tune `hold_ms` in the host policy for each host.
+
 ## Run a command
 
 ```sh
@@ -83,6 +86,7 @@ within the measured memory budget.
 If memory enforcement kills a command for exceeding its cap, status reports
 `rss_cap`. A required systemd scope that cannot start with
 `on_missing_cgroup=refuse` reports `memory_cap_unavailable` and does not launch
-the command.
+the command. When `hold_ms` ends a command, status and `run` output report the
+configured limit and identify policy `hold_ms` as the setting to change.
 See [reference.md](reference.md) for policy fields, telemetry, recovery, and
 host setup.

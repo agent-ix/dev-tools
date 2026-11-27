@@ -26,9 +26,18 @@ locked-build cancel REQUEST-ID
 
 `queued` means the request is accepted and waiting for admission. Its command has not started. `running` means it owns a lease and its command has started. Use the request id from status to cancel queued or running work.
 
+The generated `hold_ms` default is 5,400,000 ms (90 minutes), the ceiling for
+any command; tune it in each host's policy. If the limit ends a command,
+`locked-build status` and the `run` output name the limit and direct you to
+change policy `hold_ms`.
+
 `rss_cap` means memory enforcement killed the command for exceeding its cap. `memory_cap_unavailable` means policy required memory enforcement that the launcher could not establish, so the command was not launched.
 
 Use `locked-build policy show` to inspect the effective policy. `locked-build policy init --force` regenerates it.
+
+Tool manifest entries without `version` require executable presence; `check-install` runs `--help` and passes only when it exits successfully.
+
+An explicit `CARGO_TARGET_DIR` is preserved by `locked-build run` and the Cargo shim, is excluded from per-lease trimming, and is cleaned by worktree hygiene.
 
 ## Install and verify a host
 

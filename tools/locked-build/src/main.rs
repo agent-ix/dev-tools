@@ -236,7 +236,13 @@ fn execute(cli: Cli) -> Result<i32> {
             )?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let worker = runtime::spawn_worker(&store, &id)?;
-            runtime::wait(&store, &id, vec![worker])
+            let (exit_code, reason) = runtime::wait(&store, &id, vec![worker])?;
+            if exit_code == 124
+                && let Some(reason) = reason.filter(|reason| reason.starts_with("hold_timeout:"))
+            {
+                eprintln!("request={} reason={reason}", id.0);
+            }
+            Ok(exit_code)
         }
         Action::Status => {
             println!("{}", serde_json::to_string(&runtime::status(&store)?)?);
@@ -912,6 +918,11 @@ mod tests {
             ticket: DEFAULT_CARGO_TICKET,
             in_lease: false,
         })?;
+        assert!(
+            command
+                .get_envs()
+                .all(|(key, _)| key != OsStr::new("CARGO_TARGET_DIR"))
+        );
         let actual: Vec<_> = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())

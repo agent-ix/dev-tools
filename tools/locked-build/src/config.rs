@@ -127,7 +127,7 @@ impl Default for Config {
             disk_path: PathBuf::from("."),
             maximum_load: 8.0,
             aging_ms: 60_000,
-            hold_ms: 1_800_000,
+            hold_ms: 5_400_000,
             termination_grace_ms: 10_000,
             sample_file: None,
             cargo_build_jobs: None,
@@ -482,6 +482,11 @@ impl HostSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_policy_hold_limit_is_ninety_minutes() {
+        assert_eq!(Config::default().hold_ms, 5_400_000);
+    }
 
     fn config() -> Result<Config> {
         let mut config: Config = serde_json::from_str(include_str!("../policy.example.json"))?;

@@ -23,9 +23,11 @@ changes, generates a measured policy on first install, installs the `cargo`
 shim, and writes `~/.local/share/dev-tools/installed.json`. It places the shim
 directory before `~/.local/bin` in `.profile`, `.bashrc`, and `.zshrc`.
 `locked-build check-install` compares the checked-in
-[`tool-versions.json`](tool-versions.json) pins with each executable's
-`--version` output. It prints one `ok` or `mismatch` line per tool and exits 1
-when any tool is missing or differs.
+[`tool-versions.json`](tool-versions.json) pins with each executable. Entries
+with `version` run `--version` and compare the reported version; entries
+without `version` resolve the executable and run `--help`, passing only when it
+exits successfully. It prints one `ok` or `mismatch` line per tool and exits 1
+when any tool is missing, fails `--help`, or has a different pinned version.
 
 | Field | Meaning |
 |---|---|
@@ -50,8 +52,8 @@ when any tool is missing or differs.
 | `cargo_build_jobs` | Optional maximum Cargo jobs at one active leased unit. At spawn, divide by the total active leased units and clamp to at least one. |
 | `rust_test_threads` | Optional `RUST_TEST_THREADS` value set for each leased command. |
 | `cargo_incremental` | Optional incremental compilation setting; true sets `CARGO_INCREMENTAL=1`, false sets it to `0`. |
-| `target_root` | Optional root for owner-specific `CARGO_TARGET_DIR` directories. Relative paths resolve from the policy file. |
-| `max_bytes` | Optional target size limit; the target directory is deleted when it exceeds this many bytes at lease end. |
+| `target_root` | Optional root for owner-specific `CARGO_TARGET_DIR` directories, used only when the caller has not set `CARGO_TARGET_DIR`. Relative paths resolve from the policy file. |
+| `max_bytes` | Optional size limit for generated per-owner targets; caller-supplied `CARGO_TARGET_DIR` paths are never trimmed by lease cleanup. |
 | `priority_classes` | Mapping of `must-fix`, `point`, `block`, `periodic`, `arch-test`, and `kani` to numeric priorities. The largest value sets the accepted priority limit. |
 | `real_cargo` | Optional Cargo executable path used when this binary is invoked with `argv[0]` basename `cargo`. Relative paths resolve from the policy file. |
 
@@ -63,11 +65,14 @@ scaling applies only when the caller leaves `CARGO_BUILD_JOBS` unset. Active
 leased units include the command being started. The formula is
 `max(1, floor(configured_cargo_build_jobs / active_leased_units))`; for example,
 a policy value of 8 with 3 active units sets `CARGO_BUILD_JOBS=2`.
-When target lifecycle is enabled, each owner receives one directory under
-`target_root`. After the owner's final active lease, cleanup removes the whole
-directory when its measured size exceeds `max_bytes`. Symlink entries are skipped
-and never followed. Reaching the bounded walk's entry limit marks the target
-oversized and removes the whole directory.
+When the caller has not set `CARGO_TARGET_DIR` and target lifecycle is enabled,
+each owner receives one generated directory under `target_root`. After the
+owner's final active lease, cleanup removes that directory when its measured
+size exceeds `max_bytes`. A caller-supplied `CARGO_TARGET_DIR` takes precedence
+and is never trimmed by per-lease cleanup; worktree hygiene owns cleanup of a
+worktree's `target/`. Symlink entries are skipped and never followed. Reaching
+the bounded walk's entry limit marks a generated target oversized and removes
+the whole directory.
 `run --class NAME` looks up `NAME` in `priority_classes`; omitting class records
 class `periodic` and uses its configured priority, or zero when absent. Metrics
 use a `class` label with `must-fix`, `point`, `block`, `periodic`, `arch-test`,

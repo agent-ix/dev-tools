@@ -86,6 +86,14 @@ fn state(requests: Vec<Request>) -> State {
     }
 }
 
+#[test]
+fn hold_timeout_reason_names_limit_value_and_policy_field() {
+    assert_eq!(
+        hold_timeout_reason(5_400_000),
+        "hold_timeout: command exceeded policy hold_ms=5400000 ms; change the limit in policy hold_ms"
+    );
+}
+
 /// Trace: FR-005-AC-1, FR-005-AC-2
 #[test]
 fn equal_priority_is_fifo_and_priority_wins_before_reservation() {
