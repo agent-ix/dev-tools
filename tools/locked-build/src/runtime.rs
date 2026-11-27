@@ -1069,18 +1069,35 @@ fn status_with_clock(
     })
 }
 
+/// Collect using the deadline established before opening the metrics store.
+pub(crate) fn metrics_before(
+    store: &Store,
+    sampling_deadline: std::time::Instant,
+) -> Result<String> {
+    metrics_with_clock(store, || Ok((now_ms()?, clock_ms()?)), sampling_deadline)
+}
+
+#[cfg(test)]
 pub(crate) fn metrics(store: &Store) -> Result<String> {
-    metrics_with_clock(store, || Ok((now_ms()?, clock_ms()?)))
+    metrics_before(
+        store,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
 }
 
 #[cfg(test)]
 fn metrics_at(store: &Store, now: u64, clock: u64) -> Result<String> {
-    metrics_with_clock(store, || Ok((now, clock)))
+    metrics_with_clock(
+        store,
+        || Ok((now, clock)),
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
 }
 
 fn metrics_with_clock(
     store: &Store,
     mut read_clock: impl FnMut() -> Result<(u64, u64)>,
+    sampling_deadline: std::time::Instant,
 ) -> Result<String> {
     let (state, config) = store.snapshot()?;
     let (now, clock) = read_clock()?;
@@ -1143,6 +1160,7 @@ fn metrics_with_clock(
         &mut text,
         &state.host,
         &store.path.join("kache-metrics.json"),
+        sampling_deadline,
     );
     let checkpoint = crate::model::ExportCheckpoint {
         store_id: state.store_id.clone(),

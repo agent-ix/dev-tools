@@ -359,7 +359,7 @@
         },
         {
           "alert": "KacheEvictionThrash",
-          "expr": "(ix_kache:evicted_bytes_1h > ix_kache_store_limit_bytes) and (ix_kache_store_limit_bytes > 0)",
+          "expr": "(ix_kache:evicted_bytes_1h > ix_kache_store_limit_bytes) and (ix_kache_store_limit_bytes > 0) and (resets(ix_kache_gc_evicted_bytes_total[1h]) == 0)",
           "for": "15m",
           "labels": {
             "severity": "warning"

@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -19,6 +18,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 #[serde(deny_unknown_fields)]
 struct Ledger {
     epoch: String,
+    #[serde(default)]
+    daemon_seen: bool,
     gc_run: String,
     previous: BTreeMap<String, u64>,
     totals: BTreeMap<String, u64>,
@@ -43,9 +44,16 @@ pub(crate) fn executable() -> Option<PathBuf> {
 }
 
 /// Appends fail-open telemetry; cache errors never fail scheduler collection.
-pub(crate) fn append(text: &mut String, host: &str, ledger_path: &Path) {
+pub(crate) fn append(text: &mut String, host: &str, ledger_path: &Path, deadline: Instant) {
     let binary = executable();
-    append_with_binary(text, host, ledger_path, binary.as_deref());
+    append_for(
+        text,
+        host,
+        ledger_path,
+        binary.as_deref(),
+        expectation_override(),
+        deadline,
+    );
 }
 
 pub(super) fn append_with_binary(
@@ -59,9 +67,17 @@ pub(super) fn append_with_binary(
         host,
         ledger_path,
         binary,
-        std::env::var_os("IX_BUILD_KACHE_EXPECT_DAEMON").as_deref()
-            != Some(std::ffi::OsStr::new("0")),
+        expectation_override(),
+        Instant::now() + TIMEOUT,
     );
+}
+
+fn expectation_override() -> Option<bool> {
+    match std::env::var_os("IX_BUILD_KACHE_EXPECT_DAEMON").as_deref() {
+        Some(v) if v == "1" => Some(true),
+        Some(v) if v == "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn append_for(
@@ -69,13 +85,22 @@ fn append_for(
     host: &str,
     ledger_path: &Path,
     binary: Option<&Path>,
-    expected: bool,
+    expected: Option<bool>,
+    deadline: Instant,
 ) {
     let Some(binary) = binary else { return };
-    text.push_str(&format!("# HELP ix_kache_daemon_expected This host expects a kache daemon.\n# TYPE ix_kache_daemon_expected gauge\nix_kache_daemon_expected{{host=\"{}\"}} {}\n", crate::metrics::escape_label(host), u8::from(expected)));
+    let mut daemon_seen = false;
     let mut known_store = "";
     let mut observed = String::new();
-    match observe(binary, host, ledger_path, &mut observed, &mut known_store) {
+    match observe(
+        binary,
+        host,
+        ledger_path,
+        &mut observed,
+        &mut known_store,
+        &mut daemon_seen,
+        deadline,
+    ) {
         Ok(()) => text.push_str(&observed),
         Err(_) => {
             // Config may be unreadable: omit the store label until it is known.
@@ -83,17 +108,20 @@ fn append_for(
             emit(text, "scrape_error", "gauge", host, known_store, "", 1);
         }
     }
+    text.push_str(&format!("# HELP ix_kache_daemon_expected This host expects a kache daemon.\n# TYPE ix_kache_daemon_expected gauge\nix_kache_daemon_expected{{host=\"{}\"}} {}\n", crate::metrics::escape_label(host), u8::from(expected.unwrap_or(daemon_seen))));
 }
 
 fn command(binary: &Path, args: &[&str], deadline: Instant) -> Result<Value> {
+    if Instant::now() >= deadline {
+        return Err(unavailable());
+    }
     let mut command = Command::new(binary);
     command
         .args(args)
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
     // Only kache's location/configuration environment crosses this boundary.
     for key in [
         "HOME",
@@ -153,13 +181,9 @@ fn command(binary: &Path, args: &[&str], deadline: Instant) -> Result<Value> {
         }
     })();
     if result.is_err() && !reaped {
-        // This child still owns its fresh process group, including any pipe holders.
-        if let Ok(pid) = i32::try_from(child.id()) {
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGKILL,
-            );
-        }
+        // Keep probe children in the publisher group so its outer deadline
+        // also covers them. This Child has not been reaped and owns its PID.
+        let _ = child.kill();
         std::thread::spawn(move || {
             let _ = child.wait();
         });
@@ -185,12 +209,14 @@ fn observe(
     path: &Path,
     text: &mut String,
     known_store: &mut &'static str,
+    daemon_seen: &mut bool,
+    deadline: Instant,
 ) -> Result<()> {
     if !binary.is_absolute() {
         return Err(unavailable());
     }
     let (_lock, mut ledger) = read_ledger(path)?;
-    let deadline = Instant::now() + TIMEOUT;
+    *daemon_seen = ledger.daemon_seen;
     let config = command(binary, &["config", "list", "--json"], deadline)?;
     *known_store = store_label(&config["values"])?;
     let stats = command(
@@ -198,8 +224,15 @@ fn observe(
         &["stats", "--json", "--since", "1000000h"],
         deadline,
     )?;
+    // Remember a verified connection even if another source later fails.
+    if stats["command"] == "stats" && stats["daemon_connected"] == true && !ledger.daemon_seen {
+        ledger.daemon_seen = true;
+        *daemon_seen = true;
+        crate::metrics::write_atomic(path, &serde_json::to_string(&ledger)?)?;
+    }
     let explain = command(binary, &["explain", "--all", "--json"], deadline)?;
     render(&stats, &config, &explain, host, &mut ledger, text)?;
+    *daemon_seen = ledger.daemon_seen;
     crate::metrics::write_atomic(path, &serde_json::to_string(&ledger)?)?;
     Ok(())
 }
@@ -313,8 +346,7 @@ fn render(
         (
             "hits_total",
             number(stats, "local_hits")?
-                .checked_add(number(stats, "readonly_hits")?)
-                .and_then(|v| v.checked_add(stats["prefetch_hits"].as_u64()?))
+                .checked_add(number(stats, "prefetch_hits")?)
                 .and_then(|v| v.checked_add(stats["remote_hits"].as_u64()?))
                 .ok_or_else(unavailable)?,
             false,
@@ -323,7 +355,7 @@ fn render(
         ("remote_hits_total", number(stats, "remote_hits")?, false),
         (
             "hit_compile_seconds_total",
-            number(&stats["lifetime"], "hit_compile_time_ms")?,
+            number(stats, "time_saved_ms")?,
             true,
         ),
         (
@@ -350,7 +382,7 @@ fn render(
         }
     }
     let gc = &stats["gc"];
-    if !gc.is_null() {
+    if !gc.is_null() && !gc["last_run"].is_null() {
         let run = string(gc, "last_run")?;
         emit(
             text,
@@ -361,7 +393,12 @@ fn render(
             "",
             timestamp(run)?,
         );
-        if ledger.gc_run != run {
+        // v2.4.0 cli.rs reads report::read_gc_stats; write_last_gc_run
+        // replaces this per-run snapshot, not a cumulative history total.
+        if ledger.gc_run.is_empty()
+            || chrono::DateTime::parse_from_rfc3339(run).map_err(|_| unavailable())?
+                > chrono::DateTime::parse_from_rfc3339(&ledger.gc_run).map_err(|_| unavailable())?
+        {
             ledger.add("gc_evicted_entries_total", number(gc, "entries_evicted")?)?;
             ledger.add("gc_evicted_bytes_total", number(gc, "bytes_freed")?)?;
             ledger.gc_run = run.into();
@@ -408,6 +445,7 @@ fn render(
         text.push_str(&format!("ix_kache_passthrough_total{{host=\"{}\",store=\"{store}\",reason=\"{reason}\"}} {count}\n", crate::metrics::escape_label(host)));
     }
     ledger.epoch = epoch.into();
+    ledger.daemon_seen |= connected;
     Ok(())
 }
 
@@ -421,7 +459,7 @@ fn store_label(config: &Value) -> Result<&'static str> {
         _ => return Err(unavailable()),
     };
     Ok(
-        if !local_only && config.get("remote").is_some_and(|r| !r.is_null()) {
+        if !local_only && config["cache"].get("remote").is_some_and(|r| !r.is_null()) {
             "shared"
         } else {
             "local"
@@ -436,17 +474,15 @@ impl Ledger {
         Ok(*total)
     }
     fn advance(&mut self, name: &str, raw: u64, new_epoch: bool) -> Result<u64> {
-        let previous = self.previous.insert(name.into(), raw).unwrap_or(0);
-        // A changed lifetime epoch or a truncated retained history starts a new
-        // source baseline. Accumulated exporter totals remain monotonic.
-        self.add(
-            name,
-            if new_epoch {
-                raw
-            } else {
-                raw.saturating_sub(previous)
-            },
-        )
+        let previous = self.previous.insert(name.into(), raw);
+        // These are retained-history fields, not daemon-lifetime counters.
+        // Epoch changes replace the baseline without replaying retained work.
+        let delta = match previous {
+            None => raw,
+            Some(_) if new_epoch => 0,
+            Some(previous) => raw.saturating_sub(previous),
+        };
+        self.add(name, delta)
     }
 }
 

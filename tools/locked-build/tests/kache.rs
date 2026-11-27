@@ -58,7 +58,10 @@ fn kache_luna_exporter_latency() -> Result<(), Box<dyn std::error::Error>> {
         text = std::fs::read_to_string(&output)?;
         assert!(text.contains("ix_kache_up{host=\"luna\",store=\"local\"} 1"));
         assert!(text.contains("ix_build_export_error{host=\"luna\"} 0"));
-        assert!(text.lines().filter(|l| l.starts_with("ix_kache_")).count() <= 60);
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("ix_kache_")).count(),
+            21
+        );
     }
     durations.sort_by(f64::total_cmp);
     let p95 = durations.get(37).copied().ok_or("missing p95")?;
@@ -103,5 +106,87 @@ fn kache_luna_exporter_latency() -> Result<(), Box<dyn std::error::Error>> {
             "luna node_exporter pilot: real ix_kache_up=1 ingested; temporary pilot file removed"
         );
     }
+    Ok(())
+}
+
+/// Provenance: SWM-416 review; a slow first call cannot give the next call five more seconds.
+#[test]
+#[ignore = "process deadline acceptance; requires IX_BUILD_KACHE_TEST_BINARY fixture example"]
+fn kache_sequential_slow_calls_fail_open_inside_publisher_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let source = std::env::var_os("IX_BUILD_KACHE_TEST_BINARY")
+        .ok_or("IX_BUILD_KACHE_TEST_BINARY required")?;
+    let fixture = root.path().join("kache-fixture");
+    std::fs::copy(source, &fixture)?;
+    let state = root.path().join("state");
+    let config = root.path().join("policy.json");
+    let output = root.path().join("metrics.prom");
+    let invoke = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_locked-build"))
+            .arg("--state")
+            .arg(&state)
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .env("IX_BUILD_KACHE", &fixture)
+            .env("IX_BUILD_KACHE_EXPECT_DAEMON", "0")
+            .env_remove("LOCKED_BUILD_LEASE")
+            .env_remove("LOCKED_BUILD_STATE")
+            .env_remove("LOCKED_BUILD_CONFIG")
+            .output()
+    };
+    assert!(
+        invoke(&["run", "--class", "point", "--", "/usr/bin/true"])?
+            .status
+            .success()
+    );
+    let start = Instant::now();
+    let result = invoke(&[
+        "metrics",
+        "--output",
+        output.to_str().ok_or("non-UTF8 output")?,
+    ])?;
+    let elapsed = start.elapsed();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = std::fs::read_to_string(output)?;
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("ix_build_export_error{") && l.ends_with(" 0"))
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("ix_kache_up{") && l.ends_with(" 0"))
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("ix_kache_scrape_error{") && l.ends_with(" 1"))
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(6),
+        "shared source deadline exceeded: {elapsed:?}"
+    );
+    let pids = std::fs::read_to_string(root.path().join("probe-pids"))?;
+    assert_eq!(
+        pids.lines().count(),
+        2,
+        "config and stats must both be attempted"
+    );
+    for pid in pids.lines() {
+        let pid = nix::unistd::Pid::from_raw(pid.parse()?);
+        assert_eq!(
+            nix::sys::signal::kill(pid, None),
+            Err(nix::errno::Errno::ESRCH),
+            "source process remains: {pid}"
+        );
+    }
+    println!(
+        "slow config (4s) + stalled stats: exporter succeeded with source error in {:.6}s; both source processes reaped",
+        elapsed.as_secs_f64()
+    );
     Ok(())
 }

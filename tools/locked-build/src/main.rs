@@ -246,8 +246,9 @@ fn execute(cli: Cli) -> Result<i32> {
             return Ok(0);
         }
         if matches!(&cli.command, Action::MetricsCollect) {
+            let sampling_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             let store = store::Store::open_existing(&state, &config)?;
-            print!("{}", runtime::metrics(&store)?);
+            print!("{}", runtime::metrics_before(&store, sampling_deadline)?);
             return Ok(0);
         }
     }

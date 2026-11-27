@@ -909,6 +909,10 @@
         {
           "series": "ix_kache_up{host=\"luna\",store=\"local\"}",
           "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_daemon_expected{host=\"luna\"}",
+          "values": "0+0x120"
         }
       ],
       "alert_rule_test": [
@@ -1004,6 +1008,64 @@
         {
           "eval_time": "90m",
           "alertname": "KachePermitWaitHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "kache second per-run GC crosses capacity; counter reset suppresses thrash",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x9 60+0x9 120+0x50"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x70"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "19m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "36m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache evicted more than one store capacity in an hour"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "kache ledger counter reset cannot create eviction thrash",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "1000+0x19 0+0x9 10+0x40"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "5+0x70"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "50m",
+          "alertname": "KacheEvictionThrash",
           "exp_alerts": []
         }
       ]

@@ -124,15 +124,22 @@ The scheduled service needs the same `HOME` and configuration location as its ka
 The probe preserves only home, XDG location variables, `KACHE_CONFIG`, and `KACHE_DIR` in its child environment.
 
 Collection runs `config list --json`, `stats --json --since 1000000h`, and `explain --all --json` directly.
-All three commands share a five-second deadline and each output is limited to one MiB.
+The three subprocesses run sequentially and each output is limited to one MiB.
+In scheduled metrics, their shared deadline is five seconds after metrics collection begins; earlier scheduler observations consume that budget.
+The collector has a six-second bound, and the publisher group has an eight-second bound covering publication and fallback I/O.
+Probe children inherit the publisher group. Standalone `sample` gives the probe five seconds after its other host observations.
 An absent executable emits no kache series. A failed probe emits `ix_kache_up=0` and `ix_kache_scrape_error=1` while other telemetry continues.
 When configuration is unreadable, those failure series omit `store` until its classification is known.
 
-Successful observations use `host` and `store` labels. `store` is `shared` when the effective configuration contains `remote` and disables `cache.local_only`; otherwise it is `local`.
+Successful observations use `host` and `store` labels. `store` is `shared` when the selected file contains `cache.remote` and sets `cache.local_only` to false; otherwise it is `local`.
+The upstream [configuration reference](https://ninja.kunobi.com/docs/kache/getting-started/configuration) defines the nested key.
+File inspection excludes environment overrides and daemon-effective configuration.
 The label describes the host's cache mode; remote capacity is unavailable from the local stats report.
 Raw paths, crate names, remote URLs, and error messages never become labels.
 `ix_kache_info{version}` identifies the connected daemon version.
-`ix_kache_daemon_expected{host}` defaults to one when kache is discovered; set `IX_BUILD_KACHE_EXPECT_DAEMON=0` for intentional daemon absence.
+`ix_kache_daemon_expected{host}` defaults to zero until the ledger records a connected daemon.
+A recorded connection keeps the expectation enabled across subsequent scrape failures.
+Set `IX_BUILD_KACHE_EXPECT_DAEMON=1` to require a daemon explicitly, or `0` to disable that expectation.
 
 These metric families describe the observed data:
 
@@ -156,16 +163,21 @@ Each ledger has a nonblocking lock and atomic publication. A malformed ledger fa
 Back up this ledger with scheduler state. Deleting it resets exporter counters.
 
 The long stats window avoids treating the default sliding 24-hour view as a cumulative counter.
-Counter differences accumulate in the ledger; a changed `lifetime.since` starts a new source epoch and adds its initial counts.
+All compile counters use fields from the same retained event-history window, including `time_saved_ms` for hit compile savings.
+`readonly_hits` is included in `local_hits`; the total adds only local, prefetch, and remote hits.
+Counter differences accumulate in the ledger; a changed `lifetime.since` replaces the source baseline without adding retained counts again.
 A decreasing source count starts a new baseline. Retained-history deletion can lose accuracy because the ledger counts only observed changes.
-GC reports describe the latest run. Each distinct `last_run` contributes once, even across exporter restarts.
+GC reports describe the latest run, as confirmed by the upstream [snapshot writer](https://github.com/kunobi-ninja/kache/blob/v2.4.0/src/report.rs#L202).
+Each newer `last_run` contributes its per-run counts once, even across exporter restarts.
+A null `last_run` contributes nothing and leaves scrape availability unchanged.
 Multiple GC runs between observations cannot be recovered from that snapshot.
 Passthrough reasons use three bounded buckets: `not_a_compile`, `unsupported`, and `other`.
-A successful host emits 21 series, below the tested budget of 60.
+Rendering emits 20 series with store labels. The complete probe adds one host daemon-expectation series: 21 total, below the tested budget of 60.
 
 The dashboard adds cache hit ratio, store fill, hourly evictions, permit wait share, and scrape availability.
 Hit-ratio and permit-wait alerts require at least ten observed compiler results in an hour.
 Capacity, eviction, and scrape alerts require fifteen minutes of sustained failure.
+Eviction alerts suppress windows containing exporter counter resets.
 Scrape alerts require `daemon_expected=1`; an undiscovered executable emits no expectation series.
 
 Kache reports an activity session identifier, but a session may span Cargo commands. Observed events expose roots and timestamps without a locked-build request identifier.
