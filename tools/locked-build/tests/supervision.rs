@@ -697,9 +697,11 @@ fn hold_deadline_survives_supervisor_loss_and_stops_term_resistant_descendants()
         Some(124)
     );
     assert_eq!(harness.request(0)?["state"], "timed_out");
-    let reason = harness.request(0)?["reason"]
+    let request = harness.request(0)?;
+    let reason = request["reason"]
         .as_str()
-        .ok_or("reason missing")?;
+        .ok_or("reason missing")?
+        .to_owned();
     assert!(reason.contains("hold_timeout"), "{reason}");
     assert!(reason.contains("hold_ms=15000 ms"), "{reason}");
     assert!(
