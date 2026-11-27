@@ -176,7 +176,8 @@ SHA256, UTC install milliseconds and ownership-transfer history. Use
 `locked-build install-tools --owner <new> --transfer-from <recorded-owner>` for
 an explicit transfer. `check-install` prints these values and fails if a direct
 binary write changed the installed artifact. Git builds embed HEAD; source
-archives need `LOCKED_BUILD_SOURCE_COMMIT=<full-sha>` at build time.
+archives need `IX_BUILD_COMMIT=<full-sha> IX_BUILD_DIRTY=false` at build time
+after verifying that the source archive is clean.
 
 `max_queued_per_owner` is a positive policy override. The default is
 `ceil(maximum_units/4)`, minimum one. Over-cap submissions get `LB_REFUSED_QUEUE`

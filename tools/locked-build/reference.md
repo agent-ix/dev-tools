@@ -94,7 +94,8 @@ installed binary hash mismatch. The record contains `schema_version: u32`,
 `transfers: [{from: string, to: string, at_ms: u64}]`. An exclusive install lock
 rejects concurrent writers; only the recorded owner may install. An explicit
 `install-tools --owner <new> --transfer-from <old>` records ownership transfer.
-Git builds embed HEAD; archive builds require `IX_BUILD_COMMIT`.
+Git builds embed HEAD and working-tree status. Verified clean source archives
+require `IX_BUILD_COMMIT=<full-sha> IX_BUILD_DIRTY=false`.
 
 | Field | Meaning |
 |---|---|

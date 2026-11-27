@@ -41,7 +41,8 @@ Installs are serialized and another owner is refused. Transfer explicitly with
 `locked-build install-tools --owner <new> --transfer-from <recorded-owner>`.
 `check-install` prints provenance and fails if the installed binary hash differs
 from its recorded artifact. Source archives must be built with
-`IX_BUILD_COMMIT=<full-sha>`; Git builds embed their source HEAD.
+`IX_BUILD_COMMIT=<full-sha> IX_BUILD_DIRTY=false` from a verified clean source
+archive; Git builds embed their source HEAD and working-tree status.
 
 Each owner may queue `ceil(maximum_units/4)` requests (minimum one), with a
 positive `max_queued_per_owner` policy override. Extra submissions receive
