@@ -386,6 +386,13 @@ impl Store {
             }
         }
         let mut processes = None;
+        let store_id = state.store_id.clone();
+        let queued_workers: Vec<_> = state
+            .requests
+            .iter()
+            .filter(|request| request.phase == crate::model::Phase::Queued)
+            .filter_map(|request| request.worker.as_ref().map(|worker| worker.pid))
+            .collect();
         state.metrics.expire_stale_block(
             &state.requests,
             now,
@@ -395,7 +402,19 @@ impl Store {
                 let Some(worker) = request.worker.as_ref() else {
                     return false;
                 };
-                let current_processes = processes.get_or_insert_with(Processes::read);
+                if self.claim(&request.id).ok().flatten().is_some_and(|claim| {
+                    claim.protocol == 1
+                        && claim.store_id == store_id
+                        && claim.generation == request.worker_generation
+                        && claim.worker.as_ref() == Some(worker)
+                }) && matches!(
+                    self.try_lock_member(&format!("{}.spawn.lock", request.id.0)),
+                    Ok(None)
+                ) {
+                    return true;
+                }
+                let current_processes =
+                    processes.get_or_insert_with(|| Processes::read_workers(&queued_workers));
                 matches!(
                     current_processes.identity(worker, &request.id),
                     IdentityState::Matching | IdentityState::Unavailable

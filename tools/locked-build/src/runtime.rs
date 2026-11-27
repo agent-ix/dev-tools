@@ -1352,9 +1352,27 @@ pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
                 .map(|request| request.id.clone())
                 .collect();
             for id in queued {
+                let registered = claims.get(&id.0).is_some_and(|claim| {
+                    state.find(&id).is_ok_and(|request| {
+                        claim.protocol == 1
+                            && claim.store_id == state.store_id
+                            && claim.generation == request.worker_generation
+                            && claim.worker.is_some()
+                            && claim.worker.as_ref() == request.worker.as_ref()
+                    })
+                });
                 let reason = state.admission_reason(&id, config, sample.as_ref(), now, clock)?;
                 let blocks = state.block_observations(&id, config, sample.as_ref(), now, clock)?;
                 let request = state.find_mut(&id)?;
+                // The worker-only lifetime lock is its queued liveness signal.
+                // Keep telemetry fresh without asking every worker to write.
+                if registered
+                    && request
+                        .heartbeat_at_ms
+                        .is_none_or(|last| now.saturating_sub(last) >= 1_000)
+                {
+                    request.heartbeat_at_ms = Some(now);
+                }
                 let changed = request.observe_blocks(blocks, clock);
                 request.trace.position = positions.get(&id.0).copied();
                 request.reason = reason.map(str::to_owned);

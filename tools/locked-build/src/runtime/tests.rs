@@ -10,6 +10,7 @@ use crate::model::ProcessIdentity;
 
 /// Provenance: SWM-391. Trace: FR-005-AC-1, FR-005-AC-4
 #[test]
+#[ignore = "explicit 300-request release performance lane; set IX_BUILD_LOCKED_BUILD_BIN"]
 fn three_hundred_launches_claim_before_spawn_and_wait_without_the_state_lock() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
@@ -87,12 +88,28 @@ fn three_hundred_launches_claim_before_spawn_and_wait_without_the_state_lock() -
     }
     drop(lock);
     let identity = Processes::self_identity()?;
-    for id in &ids {
+    for id in ids.iter().take(1) {
         let claim = store
             .claim(id)?
             .ok_or_else(|| Error::new(ErrorCode::State, "claim absent"))?;
         claim_spawned_worker(&store, id, &identity, claim.generation)?;
     }
+    // Register the rest as fixture preparation in one commit; generation
+    // registration itself is exercised above and by the failed-fork tests.
+    store.transaction(|state, _| {
+        for id in ids.iter().skip(1) {
+            let mut claim = store
+                .claim(id)?
+                .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+            claim.worker = Some(identity.clone());
+            store.write_claim(&claim)?;
+            let request = state.find_mut(id)?;
+            request.worker = Some(identity.clone());
+            request.pid_namespace = crate::process::pid_namespace()?;
+            request.heartbeat_at_ms = Some(now_ms()?);
+        }
+        Ok(())
+    })?;
     let started = std::time::Instant::now();
     let config = Config::read(&store.config_path)?;
     let sample = HostSample {
@@ -109,6 +126,7 @@ fn three_hundred_launches_claim_before_spawn_and_wait_without_the_state_lock() -
         serde_json::to_vec(&sample)?,
     )?;
     schedule_queue(&store)?;
+    eprintln!("300-request batch admission: {:?}", started.elapsed());
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "batch admission stalled"
@@ -153,6 +171,43 @@ fn failed_fork_releases_launch_claim_and_fences_the_stale_child() -> Result<()> 
 
 /// Provenance: SWM-391. Trace: FR-005-AC-4
 #[test]
+fn concurrent_waiters_claim_before_spawning_exactly_one_worker() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let barrier = std::sync::Barrier::new(8);
+    let leases = std::thread::scope(|scope| -> Result<Vec<Option<File>>> {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    spawn_worker_with(&store, &id, false, |claim, lease| {
+                        let state = store.snapshot()?.0;
+                        assert_eq!(state.find(&id)?.worker_generation, claim.generation);
+                        assert_eq!(
+                            store.claim(&id)?.map(|row| row.generation),
+                            Some(claim.generation)
+                        );
+                        Ok(lease)
+                    })
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| Error::new(ErrorCode::State, "launch fixture panicked"))?
+            })
+            .collect()
+    })?;
+    assert_eq!(leases.iter().filter(|lease| lease.is_some()).count(), 1);
+    Ok(())
+}
+
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[test]
 fn dead_registered_worker_cannot_be_admitted_from_its_stale_claim() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
@@ -165,6 +220,59 @@ fn dead_registered_worker_cannot_be_admitted_from_its_stale_claim() -> Result<()
     drop(lease);
     schedule_queue(&store)?;
     assert_eq!(store.snapshot()?.0.find(&id)?.phase, Phase::Queued);
+    Ok(())
+}
+
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
+fn queued_handoff_preserves_age_and_ids_and_never_replaces_running_workers() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let running = queued(&store)?;
+    let waiting = queued(&store)?;
+    let mut legacy_process = Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()?;
+    let group = legacy_process.id();
+    let legacy = ProcessIdentity {
+        pid: group,
+        started_seconds: 1,
+    };
+    let live_fence = claim_worker(&store, &running, &legacy)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "running claim missing"))?;
+    let old_fence = claim_worker(&store, &waiting, &legacy)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "queued claim missing"))?;
+    store.transaction(|state, config| {
+        grant_request(state, config, &running, now_ms()?, clock_ms()?)
+    })?;
+    let before = store.snapshot()?.0.find(&waiting)?.clone();
+    assert!(
+        spawn_worker_with(&store, &waiting, false, |_, _| -> Result<()> {
+            panic!("legacy worker duplicated")
+        })?
+        .is_none()
+    );
+    assert!(
+        spawn_worker_with(&store, &running, true, |_, _| -> Result<()> {
+            panic!("running worker replaced")
+        })?
+        .is_none()
+    );
+    let (_claim, _lease) = spawn_worker_with(&store, &waiting, true, |claim, lease| {
+        Ok((claim.clone(), lease))
+    })?
+    .ok_or_else(|| Error::new(ErrorCode::State, "handoff missing"))?;
+    let state = store.snapshot()?.0;
+    let after = state.find(&waiting)?;
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.enqueued_at_ms, before.enqueued_at_ms);
+    assert_eq!(after.enqueued_clock_ms, before.enqueued_clock_ms);
+    assert!(!old_fence.owns(after));
+    assert!(live_fence.owns(state.find(&running)?));
+    assert_eq!(state.find(&running)?.phase, Phase::Running);
+    stop_child_group(&mut legacy_process)?;
     Ok(())
 }
 

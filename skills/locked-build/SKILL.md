@@ -33,8 +33,8 @@ least every two seconds. Status reads an atomic snapshot without taking the
 state write lock. `wait` reattaches to an accepted request without enqueueing.
 
 For a live Linux queue upgrade with an unchanged policy schema, stop only legacy
-queued `run` callers, fence queued workers using `recover --handoff-queued` in
-their owning PID namespace, and reattach those request ids using `wait`.
+queued `run` callers. Fence queued workers using `recover --handoff-queued` in
+their owning PID namespace. Reattach those request ids using `wait`.
 Request ids and queue age survive. Keep running commands and their callers
 alive. Other hosts require a drained legacy queue. Policy migrations retain
 the installer's drain requirement. See the [queue reference](../../tools/locked-build/reference.md#queue-coordination).
