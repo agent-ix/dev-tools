@@ -344,13 +344,13 @@ impl MetricsState {
                 seconds(committed.saturating_add(self.active_elapsed(clock, reason)))
             ));
         }
+        config.cache.append_info(&mut output, &state.host);
         crate::telemetry::render(
             &self
                 .snapshot_with_policy(state, config, now, clock)?
                 .telemetry,
             &mut output,
         );
-        config.cache.append_info(&mut output, &state.host);
         Ok(output)
     }
     fn active_elapsed(&self, clock_ms: u64, reason: BlockReason) -> u64 {
