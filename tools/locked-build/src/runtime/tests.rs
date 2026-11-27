@@ -234,7 +234,7 @@ fn recovery_adopts_a_legacy_workerless_queued_request() -> Result<()> {
         state.find_mut(&id)?.pid_namespace = None;
         Ok(())
     })?;
-    assert_eq!(recover(&store)?, [id.clone()]);
+    assert_eq!(recover(&store)?.as_slice(), std::slice::from_ref(&id));
     store.transaction(|state, _| {
         assert_eq!(
             state.find(&id)?.pid_namespace,

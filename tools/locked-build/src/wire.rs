@@ -229,9 +229,9 @@ pub struct RequestTrace {
     pub requested_jobs: Option<u32>,
     /// Actual numeric jobs at command start.
     pub granted_jobs: Option<u32>,
-    /// Requested admission memory estimate.
+    /// Requested hard memory limit; this legacy name is not a reservation.
     pub requested_memory_bytes: Option<u64>,
-    /// Reserved/admitted memory cap.
+    /// Granted hard memory limit; this legacy name is not a reservation.
     pub granted_memory_bytes: Option<u64>,
     /// Requested admission reservation, separate from the hard-cap aliases.
     pub requested_memory_reservation_bytes: Option<u64>,
