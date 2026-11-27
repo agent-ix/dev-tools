@@ -68,13 +68,17 @@ impl Failure {
     }
 }
 
-pub(crate) fn process(request: &Request, refused: bool) -> String {
-    let name = request
+fn command_name(request: &Request) -> String {
+    request
         .command
         .first()
         .and_then(|command| Path::new(command).file_name())
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "command".to_owned());
+        .unwrap_or_else(|| "command".to_owned())
+}
+
+pub(crate) fn process(request: &Request, refused: bool) -> String {
+    let name = command_name(request);
     if refused {
         return format!("not-started/{name}");
     }
@@ -119,6 +123,16 @@ pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Dia
                 .is_some_and(|record| record.memory_enforcement == MemoryEnforcement::Refused),
     );
     let finish = |code, key: &str, limit: Value, value: Value, what: &str| {
+        let killed = if code == Code::OomKilled {
+            request
+                .lease_record
+                .as_ref()
+                .and_then(|record| record.memory_scope.as_ref())
+                .map(|scope| format!("scope:{scope}/{}", command_name(request)))
+                .unwrap_or_else(|| killed.clone())
+        } else {
+            killed.clone()
+        };
         let detail = if code == Code::SupervisionLost {
             request
                 .supervision_detail
@@ -140,7 +154,7 @@ pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Dia
     if let Some(record) = request
         .lease_record
         .as_ref()
-        .filter(|record| record.oom_kill_count > 0)
+        .filter(|record| record.oom_kill_count > 0 || record.scope_oom_killed)
     {
         return finish(
             Code::OomKilled,
@@ -151,7 +165,11 @@ pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Dia
                 .map_or_else(|| Value::from("unavailable"), Value::from),
             &format!(
                 "rss_bytes; cgroup_oom_kill={}; cgroup_memory_peak_bytes={}",
-                record.oom_kill_count,
+                if record.oom_kill_count > 0 {
+                    record.oom_kill_count.to_string()
+                } else {
+                    "unavailable; source=systemd.Result=oom-kill".to_owned()
+                },
                 record
                     .memory_sample
                     .as_ref()

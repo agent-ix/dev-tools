@@ -2079,13 +2079,14 @@ fn supervise_command_loop(
         .lease_record
         .as_ref()
         .and_then(|record| record.memory_scope.clone());
-    let mut cgroup_oom_evidence = CgroupOomEvidence::default();
-    cgroup_oom_evidence.scope = scope.clone();
+    let mut cgroup_oom_evidence = CgroupOomEvidence {
+        scope: scope.clone(),
+        ..Default::default()
+    };
     let mut status = None;
     let mut degraded = false;
     let mut stop_degraded_group = false;
     let mut watchdog_reaped = false;
-    let mut memory_identity_logged = false;
     let grace = Config::read(&store.config_path)?.termination_grace_ms;
     loop {
         let watchdog_exited =
@@ -2093,31 +2094,14 @@ fn supervise_command_loop(
         let mut scope_rss = None;
         if enforcement == Some(MemoryEnforcement::SystemdScope) {
             let processes = Processes::read();
-            if !memory_identity_logged {
-                eprintln!(
-                    "scope_identity request={} root={command_root:?} observed={:?}",
-                    request.id.0,
-                    command_root
-                        .as_ref()
-                        .and_then(|root| processes.member_identity(root.pid))
-                );
-                memory_identity_logged = true;
-            }
             scope_rss = command_root
                 .as_ref()
                 .and_then(|root| processes.command_rss_bytes(root));
             if let Some(root) = &command_root {
-                let first = cgroup_oom_evidence.event_files.is_empty();
                 cgroup_oom_evidence
                     .event_files
                     .extend(processes.command_memory_events_files(root));
                 cgroup_oom_evidence.retain_owned_scope();
-                if first && !cgroup_oom_evidence.event_files.is_empty() {
-                    eprintln!(
-                        "scope_evidence request={} files={:?}",
-                        request.id.0, cgroup_oom_evidence.event_files
-                    );
-                }
             }
             observe_oom(&mut cgroup_oom_evidence, &processes, watchdog.pid);
         }
@@ -2170,7 +2154,12 @@ fn supervise_command_loop(
             }
             // Persist OOM evidence before publishing command_finished. The
             // watchdog may win finalization as soon as that outcome is visible.
-            record_scope_oom(current, enforcement, cgroup_oom_evidence.oom_kill_count);
+            record_scope_oom(
+                current,
+                enforcement,
+                cgroup_oom_evidence.oom_kill_count,
+                cgroup_oom_evidence.scope_oom_killed,
+            );
             record_scope_peak(current, &cgroup_oom_evidence);
             if let Some(outcome) = status {
                 current.command_finished = Some(CommandOutcome {
@@ -2219,6 +2208,7 @@ fn supervise_command_loop(
                         state.find_mut(&request.id)?,
                         enforcement,
                         cgroup_oom_evidence.oom_kill_count,
+                        cgroup_oom_evidence.scope_oom_killed,
                     );
                     record_scope_peak(state.find_mut(&request.id)?, &cgroup_oom_evidence);
                 }
@@ -2636,11 +2626,19 @@ fn cgroup_cap_kill_reason(
     (enforcement == Some(MemoryEnforcement::SystemdScope) && oom_kill_observed).then_some("rss_cap")
 }
 
-fn record_scope_oom(request: &mut Request, enforcement: Option<MemoryEnforcement>, count: u64) {
+fn record_scope_oom(
+    request: &mut Request,
+    enforcement: Option<MemoryEnforcement>,
+    count: u64,
+    scope_oom_killed: bool,
+) {
     if let Some(record) = &mut request.lease_record {
         record.oom_kill_count = record.oom_kill_count.max(count);
+        record.scope_oom_killed |= scope_oom_killed;
     }
-    if request.stop.is_none() && cgroup_cap_kill_reason(enforcement, count > 0).is_some() {
+    if request.stop.is_none()
+        && cgroup_cap_kill_reason(enforcement, count > 0 || scope_oom_killed).is_some()
+    {
         request.stop = Some(StopReason::MemoryCap);
     }
 }
@@ -2657,6 +2655,7 @@ fn record_scope_peak(request: &mut Request, evidence: &CgroupOomEvidence) {
 
 #[derive(Default)]
 struct CgroupOomEvidence {
+    scope_oom_killed: bool,
     scope: Option<String>,
     oom_kill_count: u64,
     event_files: std::collections::BTreeSet<std::path::PathBuf>,
@@ -2709,7 +2708,7 @@ impl CgroupOomEvidence {
 
     fn observe_scope_text(&mut self, text: &str) {
         if text.lines().any(|line| line == "Result=oom-kill") {
-            self.oom_kill_count = self.oom_kill_count.max(1);
+            self.scope_oom_killed = true;
             self.detected = true;
             if let Some(peak) = text
                 .lines()

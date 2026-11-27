@@ -92,7 +92,7 @@ locked-build: <CODE> request=<id> limit=<policy key>=<value> measured=<value> (<
 | Code | Limit source and measurement |
 |---|---|
 | `LB_RSS_CAP` | `policy.memory_limit_per_job_bytes*parallelism` (or the class override); measured command-tree `pss_anon` bytes on Linux, RSS on macOS |
-| `LB_OOM_KILLED` | The same memory cap; evidence from the scope's `memory.events` `oom_kill` counter |
+| `LB_OOM_KILLED` | The same memory cap; the owned scope's `memory.events` counter or retained systemd `Result=oom-kill`. Reports sampled RSS and the actual counter, or counter unavailable with the Result source. `killed` names the owned scope when recorded. |
 | `LB_HOLD_TIMEOUT` | `policy.hold_ms`; elapsed lease milliseconds |
 | `LB_SUPERVISION_LOST` | Built-in `policy.supervision_required=true`; worker/watchdog evidence, or degraded supervision with observed exit 0 |
 | `LB_REFUSED_MEMORY_BUDGET` | `policy.memory_budget_bytes`; requested admission reservation bytes |
@@ -198,7 +198,7 @@ oversized requests get `LB_REFUSED_CLASS_CAP` naming that key. Absolute
 `memory_cap_by_class` and the host budget remain authoritative. Status/events
 show requested/granted hard memory and reservation bytes; an explicit cap's
 diagnostic limit source is `request.memory_bytes`. The status metrics and
-Prometheus gauges `ix_build_memory_reserved_bytes` / `ix_build_memory_limit_bytes`
+Prometheus gauges `ix_build_active_memory_reserved_bytes` / `ix_build_active_memory_limit_bytes`
 sum active sizes by `{host,class,state}`, where state is queued or running.
 
 ## Wrapper migration map

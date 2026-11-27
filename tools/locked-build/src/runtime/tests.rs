@@ -8,6 +8,41 @@ use super::*;
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
 
+/// Provenance: SWM-400. Trace: FR-005-AC-4
+#[test]
+fn owned_oom_result_does_not_invent_a_memory_events_counter() -> Result<()> {
+    for (count, result, counter, scope, killed) in [
+        (
+            0,
+            true,
+            "unavailable; source=systemd.Result=oom-kill",
+            Some("owned.scope"),
+            "scope:owned.scope/true",
+        ),
+        (3, false, "3", None, "pgid:42/true"),
+        (3, true, "3", Some("owned.scope"), "scope:owned.scope/true"),
+    ] {
+        let root = tempfile::tempdir()?;
+        let store = store(root.path())?;
+        let id = queued(&store)?;
+        store.transaction(|state, config| {
+            let request = state.find_mut(&id)?;
+            request.memory_cap_bytes = Some(67_108_864);
+            request.memory_limit_key = Some("policy.memory_limit_per_job_bytes*parallelism".into());
+            request.measured_memory_bytes = Some(12_345_678);
+            request.watchdog = Some(ProcessIdentity {pid:42,started_seconds:7});
+            request.lease_record = Some(LeaseRecord {memory_scope:scope.map(str::to_owned),memory_enforcement:MemoryEnforcement::SystemdScope,..Default::default()});
+            record_scope_oom(request, Some(MemoryEnforcement::SystemdScope), count, result);
+            state.finish(&id, Completion {signal:Some(9),..Completion::default()}, config, now_ms()?, clock_ms()?)?;
+            assert_eq!(state.find(&id)?.trace.diagnostic.message, Some(format!("locked-build: LB_OOM_KILLED request={} limit=policy.memory_limit_per_job_bytes*parallelism=67108864 measured=12345678 (rss_bytes; cgroup_oom_kill={counter}; cgroup_memory_peak_bytes=unavailable) killed={killed}", id.0)));
+            assert_eq!(state.find(&id)?.lease_record.as_ref().map(|record|record.oom_kill_count), Some(count));
+            assert_eq!(state.find(&id)?.reason.as_deref(), Some("rss_cap"));
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 /// Provenance: SWM-400, OOM proof. Trace: FR-005-AC-4
 #[test]
 fn only_owned_scope_evidence_can_identify_a_kernel_memory_kill() {
@@ -29,7 +64,8 @@ fn only_owned_scope_evidence_can_identify_a_kernel_memory_kill() {
     assert!(!evidence.detected());
     evidence.observe_scope_text("Result=oom-kill\nMemoryPeak=67112960\n");
     assert!(evidence.detected());
-    assert_eq!(evidence.oom_kill_count, 1);
+    assert_eq!(evidence.oom_kill_count, 0);
+    assert!(evidence.scope_oom_killed);
     assert_eq!(evidence.peak_bytes, Some(67_112_960));
 }
 
@@ -163,7 +199,7 @@ fn explicit_memory_is_reserved_enforced_bounded_and_budget_authoritative() -> Re
         Some(17_179_869_184)
     );
     let scrape = metrics(&store)?;
-    assert!(scrape.contains("ix_build_memory_reserved_bytes{host=\"your-build-host\",class=\"periodic\",state=\"running\"} 34359738368"), "{scrape}");
+    assert!(scrape.contains("ix_build_active_memory_reserved_bytes{host=\"your-build-host\",class=\"periodic\",state=\"running\"} 34359738368"), "{scrape}");
     let mut policy = Config::read(&store.config_path)?;
     policy.max_request_memory = Some(68_719_476_736);
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
@@ -2759,6 +2795,7 @@ fn scope_oom_evidence_survives_watchdog_finalizing_first() -> Result<()> {
             request,
             Some(MemoryEnforcement::SystemdScope),
             evidence.oom_kill_count,
+            evidence.scope_oom_killed,
         );
         request.command_finished = Some(CommandOutcome {
             code: None,

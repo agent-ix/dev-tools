@@ -56,7 +56,7 @@ Requests above that ceiling receive `LB_REFUSED_CLASS_CAP`. Absolute class
 caps and the total admission budget still apply. This option requires
 `lease_accounted` mode and leaves class defaults and job counts unchanged.
 Status/events retain requested and granted memory and reservations. Status and
-Prometheus expose `ix_build_memory_reserved_bytes` and `ix_build_memory_limit_bytes`,
+Prometheus expose `ix_build_active_memory_reserved_bytes` and `ix_build_active_memory_limit_bytes`,
 summed by `{host,class,state}` (`queued` or `running`).
 
 All lanes use `/tmp/locked-build-<uid>` and its `policy.json`, independent of

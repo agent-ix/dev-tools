@@ -135,6 +135,9 @@ pub struct LeaseRecord {
     /// Observed kernel OOM-kill counter for this command's memory scope.
     #[serde(default)]
     pub oom_kill_count: u64,
+    /// The owned systemd unit reported Result=oom-kill; not a counter sample.
+    #[serde(default)]
+    pub scope_oom_killed: bool,
     /// Identity of the launched command; memory accounting starts here.
     #[serde(default)]
     pub command: Option<ProcessIdentity>,
