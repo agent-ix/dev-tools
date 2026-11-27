@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{Disks, System};
+use sysinfo::{Disks, MemoryRefreshKind, System};
 
 use crate::error::{Error, ErrorCode, Result};
 
@@ -109,8 +109,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let mut system = System::new_all();
-        system.refresh_memory();
+        let system = memory_system();
         let total_memory = system.total_memory();
         let memory_reserve_bytes = total_memory / 4;
         let memory_budget_bytes = memory_budget_after_reserve(total_memory, memory_reserve_bytes);
@@ -404,6 +403,14 @@ impl Config {
     }
 
     pub(crate) fn sample(&self, now: u64) -> Result<HostSample> {
+        self.sample_with_memory(now, available_memory)
+    }
+
+    fn sample_with_memory(
+        &self,
+        now: u64,
+        read_memory: impl FnOnce() -> Result<u64>,
+    ) -> Result<HostSample> {
         if let Some(path) = &self.sample_file {
             let sample: HostSample =
                 serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path)?))?;
@@ -417,10 +424,7 @@ impl Config {
             .filter(|disk| path.starts_with(disk.mount_point()))
             .max_by_key(|disk| disk.mount_point().components().count())
             .ok_or_else(|| Error::new(ErrorCode::Configuration, "disk telemetry unavailable"))?;
-        let memory_available_bytes = match self.memory_admission {
-            MemoryAdmissionMode::LiveAvailable => System::new_all().available_memory(),
-            MemoryAdmissionMode::LeaseAccounted => u64::MAX,
-        };
+        let memory_available_bytes = read_memory()?;
         Ok(HostSample {
             host: self.host.clone(),
             observed_at_ms: now,
@@ -429,6 +433,25 @@ impl Config {
             load_one: System::load_average().one,
         })
     }
+}
+
+fn memory_system() -> System {
+    // Policy deserialization also calls Default while holding the state lock.
+    // Neither it nor local sampling needs a host-wide process enumeration.
+    let mut system = System::new();
+    system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+    system
+}
+
+fn available_memory() -> Result<u64> {
+    let system = memory_system();
+    if system.total_memory() == 0 {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "memory telemetry unavailable",
+        ));
+    }
+    Ok(system.available_memory())
 }
 
 /// Host-agent sample accepted by the same path as local measurements.
@@ -554,6 +577,99 @@ mod tests {
         let mut config: Config = serde_json::from_str(include_str!("../policy.example.json"))?;
         config.memory_admission = MemoryAdmissionMode::LiveAvailable;
         Ok(config)
+    }
+
+    /// Provenance: SWM-396. Trace: FR-005-AC-1
+    #[test]
+    fn local_lease_sample_reports_available_memory_within_real_host_ram() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let mut policy = config()?;
+        policy.memory_admission = MemoryAdmissionMode::LeaseAccounted;
+        policy.disk_path = root.path().to_path_buf();
+        policy.sample_file = None;
+        let mut memory = System::new();
+        memory.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+        assert!(memory.total_memory() > 0);
+        let sample = policy.sample(100)?;
+        assert!(
+            sample.memory_available_bytes <= memory.total_memory(),
+            "available memory must be a host measurement, got {}",
+            sample.memory_available_bytes
+        );
+        Ok(())
+    }
+
+    /// Provenance: SWM-396. Trace: FR-005-AC-1
+    #[test]
+    fn memory_reader_does_not_populate_a_host_process_table() {
+        let memory = memory_system();
+        assert!(memory.total_memory() > 0);
+        assert!(memory.processes().is_empty());
+    }
+
+    /// Provenance: SWM-396. Trace: FR-005-AC-1
+    #[test]
+    fn measured_available_memory_is_reported_without_changing_reservation_admission() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        for (mode, blocked) in [
+            (MemoryAdmissionMode::LeaseAccounted, None),
+            (MemoryAdmissionMode::LiveAvailable, Some("memory_reserve")),
+        ] {
+            let mut policy = config()?;
+            policy.disk_path = root.path().to_path_buf();
+            policy.sample_file = None;
+            policy.disk_reserve_bytes = 0;
+            policy.maximum_load = 1_000_000.0;
+            policy.memory_reserve_bytes = 100;
+            policy.memory_per_unit_bytes = 100;
+            policy.memory_admission = mode;
+            let sample = policy.sample_with_memory(100, || Ok(23))?;
+            assert_eq!(sample.memory_available_bytes, 23);
+            assert_eq!(sample.block_reason(&policy, 100, 0, 1), blocked);
+        }
+        Ok(())
+    }
+
+    /// Provenance: SWM-396. Trace: FR-005-AC-1
+    #[test]
+    fn unavailable_memory_is_an_error_instead_of_a_fabricated_availability() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let mut policy = config()?;
+        policy.disk_path = root.path().to_path_buf();
+        policy.memory_admission = MemoryAdmissionMode::LeaseAccounted;
+        let error = policy
+            .sample_with_memory(100, || {
+                Err(Error::new(
+                    ErrorCode::Configuration,
+                    "injected missing memory",
+                ))
+            })
+            .err()
+            .ok_or_else(|| Error::new(ErrorCode::State, "unavailable telemetry was accepted"))?;
+        assert_eq!(error.code, ErrorCode::Configuration);
+        assert_eq!(error.message.as_ref(), "injected missing memory");
+        Ok(())
+    }
+
+    /// Provenance: SWM-396. Trace: FR-005-AC-1
+    #[test]
+    fn external_sample_preserves_its_measurement_without_reading_local_memory() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("sample.json");
+        std::fs::write(&path, br#"{"host":"fixture","observed_at_ms":100,"memory_available_bytes":23,"disk_available_bytes":1000,"load_one":0}"#)?;
+        let mut policy = config()?;
+        policy.sample_file = Some(path);
+        let sample = policy.sample_with_memory(100, || {
+            Err(Error::new(
+                ErrorCode::State,
+                "local memory must not be read",
+            ))
+        })?;
+        assert_eq!(sample.host, "fixture");
+        assert_eq!(sample.observed_at_ms, 100);
+        assert_eq!(sample.memory_available_bytes, 23);
+        Ok(())
     }
 
     #[test]

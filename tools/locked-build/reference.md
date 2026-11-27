@@ -71,7 +71,7 @@ when a tool is missing, version output is unavailable, or its version is older.
 | `maximum_units` | Largest feasible request; temporary shrink preserves queue age. |
 | `memory_per_unit_bytes` | RAM budget charged per requested unit in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_reserve_bytes` | RAM retained outside build leases in `live_available` mode; optional in `lease_accounted` mode. |
-| `memory_admission` | `lease_accounted` (default) sums fixed leases against `memory_budget_bytes` without reading live available memory; `live_available` compares `MemAvailable` with lease-unit charges. |
+| `memory_admission` | `lease_accounted` (default) checks reservations against `memory_budget_bytes`; `live_available` checks measured available RAM. |
 | `memory_budget_bytes` | Total memory available to concurrent leases in `lease_accounted` mode. |
 | `memory_reserve_per_job_bytes` | Admission reservation per effective worker; default 3 GB. |
 | `memory_limit_per_job_bytes` | Enforced hard cap per effective worker; default 8 GB. |
@@ -182,6 +182,11 @@ An external sample includes exactly these fields:
 ```
 
 The host must match the policy; stale or future samples block admission.
+
+Status reports measured `memory_available_bytes` in both admission modes.
+Local sampling reads RAM counters without enumerating host processes.
+Lease-accounted admission uses reservations and the configured budget;
+low available RAM does not add a memory-pressure admission gate.
 Missing measurements remain unavailable.
 
 ## Read-only sampler
