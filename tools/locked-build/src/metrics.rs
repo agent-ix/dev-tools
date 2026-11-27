@@ -849,13 +849,13 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
-    fn policy() -> Result<Config> {
+    pub(super) fn policy() -> Result<Config> {
         Ok(serde_json::from_str(include_str!(
             "../policy.example.json"
         ))?)
     }
 
-    fn state(requests: Vec<crate::model::Request>) -> State {
+    pub(super) fn state(requests: Vec<crate::model::Request>) -> State {
         State {
             schema_version: 1,
             store_id: "0123456789abcdef0123456789abcdef".to_owned(),
@@ -872,7 +872,7 @@ mod tests {
         }
     }
 
-    fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
+    pub(super) fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
         Request {
             supervision_detail: None,
             trace: Default::default(),
@@ -1430,7 +1430,7 @@ mod tests {
             .collect()
     }
 
-    fn event(sequence: u64, phase: &str, priority: u32, wait_ms: u64) -> Event {
+    pub(super) fn event(sequence: u64, phase: &str, priority: u32, wait_ms: u64) -> Event {
         Event {
             correction: false,
             trace: Default::default(),
@@ -1549,3 +1549,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "metrics/telemetry_tests.rs"]
+mod telemetry_tests;
