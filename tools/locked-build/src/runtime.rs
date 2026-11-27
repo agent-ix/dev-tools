@@ -66,6 +66,7 @@ pub(crate) fn enqueue(
         ));
     }
     let cwd = std::env::current_dir()?;
+    let telemetry = crate::telemetry::EventTelemetry::identity(&cwd, command);
     let caller_cargo_build_jobs = std::env::var("CARGO_BUILD_JOBS").ok();
     let caller_rust_test_threads = std::env::var("RUST_TEST_THREADS").ok();
     let caller_cargo_incremental = std::env::var("CARGO_INCREMENTAL").ok();
@@ -164,6 +165,7 @@ pub(crate) fn enqueue(
                 .map(|_| estimate_memory_reservation(config, class_name, memory_parallelism))
                 .transpose()?;
             state.requests.push(Request {
+                telemetry: telemetry.clone(),
                 supervision_detail: None,
                 pid_namespace: crate::process::pid_namespace()?,
                 trace: locked_build::wire::RequestTrace {
@@ -238,6 +240,7 @@ pub(crate) fn enqueue(
                 *message = message.replace("request=pending ", &format!("request={} ", id.0));
             }
             state.events.push(Event {
+                telemetry: telemetry.clone(),
                 correction: false,
                 trace: locked_build::wire::RequestTrace {
                     diagnostic: failure.diagnostic.clone(),
@@ -830,6 +833,7 @@ fn recover_with_boot(
         // backends get the same 120-second tolerance; Linux uses the UUID.
         let rebooted = state.rebooted(boot_id.as_deref(), boot_time);
         if rebooted {
+            state.system_event("boot_changed", config, now)?;
             let new_boot_ms = boot_time.saturating_mul(1_000);
             for request in state
                 .requests
@@ -943,6 +947,7 @@ fn recover_with_boot(
                 now,
                 clock,
             )?;
+            state.system_event("recovered", config, now)?;
         }
         state.boot_time = boot_time;
         state.boot_id = boot_id;
@@ -1043,7 +1048,9 @@ fn status_with_clock(
         .collect();
     let used = state.used();
     Ok(Report {
-        metrics: state.metrics.snapshot(&state, clock),
+        metrics: state
+            .metrics
+            .snapshot_with_policy(&state, &config, now, clock),
         state_path: store.path.clone(),
         schema_version: 1,
         store_id: state.store_id.clone(),
@@ -1235,7 +1242,7 @@ fn claim_worker(
     id: &RequestId,
     identity: &crate::model::ProcessIdentity,
 ) -> Result<Option<WorkerFence>> {
-    store.transaction(|state, _| {
+    store.transaction(|state, config| {
         let request = state.find_mut(id)?;
         if request.phase != Phase::Queued || request.worker.is_some() {
             return Ok(None);
@@ -1245,10 +1252,15 @@ fn claim_worker(
             .checked_add(1)
             .ok_or_else(|| Error::new(ErrorCode::State, "supervisor generation exhausted"))?;
         request.worker = Some(identity.clone());
-        Ok(Some(WorkerFence {
+        let fence = WorkerFence {
             identity: identity.clone(),
             generation: request.worker_generation,
-        }))
+        };
+        if fence.generation > 1 {
+            state.system_event("supervisor_restart", config, now_ms()?)?;
+            state.system_event("recovered", config, now_ms()?)?;
+        }
+        Ok(Some(fence))
     })
 }
 
@@ -1259,7 +1271,7 @@ fn claim_spawned_worker(
     generation: u64,
 ) -> Result<Option<WorkerFence>> {
     let namespace = crate::process::pid_namespace()?;
-    store.transaction(|state, _| {
+    store.transaction(|state, config| {
         let Some(mut claim) = store.claim(id)? else {
             return Ok(None);
         };
@@ -1282,6 +1294,10 @@ fn claim_spawned_worker(
         request.heartbeat_at_ms = Some(now_ms()?);
         claim.worker = Some(identity.clone());
         store.write_claim(&claim)?;
+        if generation > 1 {
+            state.system_event("supervisor_restart", config, now_ms()?)?;
+            state.system_event("recovered", config, now_ms()?)?;
+        }
         Ok(Some(WorkerFence {
             identity: identity.clone(),
             generation,
@@ -2366,9 +2382,7 @@ fn record_scope_oom(request: &mut Request, enforcement: Option<MemoryEnforcement
 }
 
 fn record_scope_peak(request: &mut Request, evidence: &CgroupOomEvidence) {
-    if evidence.detected()
-        && let (Some(record), Some(bytes)) = (&mut request.lease_record, evidence.peak_bytes)
-    {
+    if let (Some(record), Some(bytes)) = (&mut request.lease_record, evidence.peak_bytes) {
         record.memory_sample = Some(crate::model::MemorySample {
             contributors: Vec::new(),
             bytes,
@@ -2867,9 +2881,13 @@ pub(crate) fn prune(store: &Store) -> Result<usize> {
             .collect();
         state.requests.retain(|request| !request.phase.terminal());
         let previous_events = state.events.len();
-        state
-            .events
-            .retain(|event| !terminal.contains(&event.request_id));
+        state.events.retain(|event| {
+            !terminal.contains(&event.request_id)
+                && !matches!(
+                    event.kind.as_str(),
+                    "supervisor_restart" | "recovered" | "boot_changed"
+                )
+        });
         state.pruned_events = state
             .pruned_events
             .checked_add(

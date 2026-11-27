@@ -309,7 +309,11 @@ pub(crate) fn observe_memory_sample(
             );
             record.memory_sample = Some(sample.clone());
         }
-        if sample.bytes > cap {
+        if record
+            .memory_sample
+            .as_ref()
+            .is_none_or(|old| sample.bytes > old.bytes)
+        {
             record.memory_sample = Some(sample.clone());
         }
     }

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.agent-ix.locked-build-metrics</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/peter/.local/bin/locked-build</string>
+    <string>--state</string><string>/Users/peter/.local/state/locked-build</string>
+    <string>--config</string><string>/Users/peter/.local/state/locked-build/policy.json</string>
+    <string>metrics</string>
+    <string>--output</string><string>/Users/peter/.local/share/node_exporter/textfile_collector/locked-build.prom</string>
+  </array>
+  <key>StartInterval</key><integer>15</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>/Users/peter/.local/share/node_exporter/locked-build-metrics.stderr</string>
+</dict>
+</plist>

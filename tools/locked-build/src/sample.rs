@@ -893,7 +893,10 @@ fn argv0_matches(argument: Option<&OsString>, command_name: &str) -> bool {
         .is_some_and(|name| name == OsStr::new(command_name))
 }
 
-fn cargo_subcommand<'a>(arguments: &'a [OsString], command_name: &str) -> Option<&'a str> {
+pub(crate) fn cargo_subcommand<'a>(
+    arguments: &'a [OsString],
+    command_name: &str,
+) -> Option<&'a str> {
     if !argv0_matches(arguments.first(), command_name) {
         return None;
     }

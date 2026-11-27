@@ -1,0 +1,6 @@
+[Unit]
+Description=Export locked-build Prometheus telemetry
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/locked-build --state %h/.local/state/locked-build --config %h/.local/state/locked-build/policy.json metrics --output %h/.local/share/node_exporter/textfile_collector/locked-build.prom
