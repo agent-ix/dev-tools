@@ -534,15 +534,33 @@ impl Ledger {
             }
         };
         let mut active_memory = BTreeMap::<(&str, &str), (u64, u64)>::new();
-        for request in state.requests.iter().filter(|request| !request.phase.terminal()) {
-            let phase = if request.phase == Phase::Queued { "queued" } else { "running" };
-            let row = active_memory.entry((class(&request.class), phase)).or_default();
+        for request in state
+            .requests
+            .iter()
+            .filter(|request| !request.phase.terminal())
+        {
+            let phase = if request.phase == Phase::Queued {
+                "queued"
+            } else {
+                "running"
+            };
+            let row = active_memory
+                .entry((class(&request.class), phase))
+                .or_default();
             row.0 = row.0.saturating_add(request.reservation_bytes());
             row.1 = row.1.saturating_add(request.memory_cap_bytes.unwrap_or(0));
         }
         for ((class, phase), (reserved, limit)) in active_memory {
-            for (name, value) in [("ix_build_active_memory_reserved_bytes", reserved), ("ix_build_active_memory_limit_bytes", limit)] {
-                gauge(name, "Aggregate active request memory by class and lifecycle state.", labels(&[("class", class), ("state", phase)]), value as f64);
+            for (name, value) in [
+                ("ix_build_active_memory_reserved_bytes", reserved),
+                ("ix_build_active_memory_limit_bytes", limit),
+            ] {
+                gauge(
+                    name,
+                    "Aggregate active request memory by class and lifecycle state.",
+                    labels(&[("class", class), ("state", phase)]),
+                    value as f64,
+                );
             }
         }
         for (name, value) in [

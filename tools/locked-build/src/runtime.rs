@@ -2386,8 +2386,7 @@ fn start_command(
         let mut command = Command::new(launch_spec.program);
         if enforcement == MemoryEnforcement::SystemdScope {
             let scope = format!("locked-build-{}.scope", crate::store::random_id()?);
-            command
-                .arg(format!("--unit={scope}"));
+            command.arg(format!("--unit={scope}"));
             lease_record.memory_scope = Some(scope);
         }
         command

@@ -71,7 +71,13 @@ pub(crate) fn install_tools(
         || install_npm_packages(&read_manifest(TOOL_MANIFEST)?),
         || {
             let shared = crate::writable::shared_root()?;
-            install_monitoring(home, &home.join(".local/bin/locked-build"), &shared, &shared.join("policy.json"), &detect_textfile_directory()?)?;
+            install_monitoring(
+                home,
+                &home.join(".local/bin/locked-build"),
+                &shared,
+                &shared.join("policy.json"),
+                &detect_textfile_directory()?,
+            )?;
             activate_monitoring(home)
         },
     )

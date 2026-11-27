@@ -232,7 +232,11 @@ fn telemetry_generated_full_budget_is_below_1500_series() -> Result<()> {
     let mut active = Vec::new();
     for class in PriorityClass::ALL {
         for phase in [Phase::Queued, Phase::Running] {
-            let mut row = request(u64::try_from(active.len()).unwrap_or(0) + 1, "draco:tooling:active".into(), phase);
+            let mut row = request(
+                u64::try_from(active.len()).unwrap_or(0) + 1,
+                "draco:tooling:active".into(),
+                phase,
+            );
             row.class = class.label().into();
             row.memory_reservation_bytes = Some(42);
             row.memory_cap_bytes = Some(64);
@@ -242,8 +246,22 @@ fn telemetry_generated_full_budget_is_below_1500_series() -> Result<()> {
     let text = metrics.exposition(&state(active), &policy()?, 0, 0)?;
     for class in PriorityClass::ALL {
         for phase in ["queued", "running"] {
-            assert_eq!(sample(&text, "ix_build_active_memory_reserved_bytes", &[("class", class.label()), ("state", phase)]), 42.);
-            assert_eq!(sample(&text, "ix_build_active_memory_limit_bytes", &[("class", class.label()), ("state", phase)]), 64.);
+            assert_eq!(
+                sample(
+                    &text,
+                    "ix_build_active_memory_reserved_bytes",
+                    &[("class", class.label()), ("state", phase)]
+                ),
+                42.
+            );
+            assert_eq!(
+                sample(
+                    &text,
+                    "ix_build_active_memory_limit_bytes",
+                    &[("class", class.label()), ("state", phase)]
+                ),
+                64.
+            );
         }
     }
     let series = text

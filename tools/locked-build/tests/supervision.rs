@@ -213,6 +213,22 @@ fn unshare_recovery_drains_only_the_extinct_namespace() -> TestResult {
 #[ignore = "namespace recovery subprocess"]
 fn namespace_recovery_fixture() -> TestResult {
     let marker = std::env::var_os("LOCKED_BUILD_FIXTURE_MARKER").ok_or("marker missing")?;
+    let invalid = PathBuf::from(&marker).with_extension("invalid-policy.json");
+    fs::write(&invalid, "{")?;
+    let refused = Command::new(env!("CARGO_BIN_EXE_locked-build"))
+        .arg("--state")
+        .arg(std::env::var_os("IX_BUILD_RECOVERY_STATE").ok_or("state missing")?)
+        .arg("--config")
+        .arg(invalid)
+        .arg("status")
+        .output()?;
+    assert_eq!(refused.status.code(), Some(2));
+    let diagnostic = String::from_utf8_lossy(&refused.stderr);
+    assert!(diagnostic.contains("LB_STATE_UNAVAILABLE"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("(Configuration: EOF while parsing an object at line 1 column 1)"),
+        "{diagnostic}"
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_locked-build"))
         .arg("--state")
         .arg(std::env::var_os("IX_BUILD_RECOVERY_STATE").ok_or("state missing")?)
@@ -386,6 +402,14 @@ fn deliberate_scope_oom_reports_limit_and_measured_memory() -> TestResult {
     let row = harness.request(0)?;
     let line = row["message"].as_str().ok_or("missing message")?;
     eprintln!("CONTROLLED_OOM: {line}");
+    if row["code"] == "LB_REFUSED_CAP_UNAVAILABLE" {
+        assert_eq!(row["lease_record"]["memory_enforcement"], "refused");
+        assert!(row["lease_record"]["command"].is_null());
+        assert!(row["running_at_ms"].is_null());
+        assert_eq!(harness.report()?["used_units"], 0);
+        eprintln!("exact scope options unavailable: refusal prevented command launch");
+        return Ok(());
+    }
     if row["code"] != "LB_OOM_KILLED" {
         let worker_log = harness.state.join(format!(
             "{}.stderr",
@@ -411,6 +435,43 @@ fn deliberate_scope_oom_reports_limit_and_measured_memory() -> TestResult {
             .any(|actual| actual == line)
     );
     assert_eq!(harness.report()?["used_units"], 0);
+    Ok(())
+}
+
+/// Provenance: SWM-421. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "native Linux exact scope probe and RSS fallback enforcement"]
+fn scope_probe_failure_uses_rss_fallback_and_enforces_the_cap() -> TestResult {
+    let harness = Harness::new(1, 120000)?;
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["memory_admission"] = json!("lease_accounted");
+    policy["memory_budget_bytes"] = json!(1_000_000_000_u64);
+    policy["memory_reserve_per_job_bytes"] = json!(1_000_000);
+    policy["memory_limit_per_job_bytes"] = json!(67_108_864);
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let mut child = harness.command(
+        "oom",
+        &harness.root.path().join("oom"),
+        &harness.root.path().join("unused"),
+        1,
+    )?;
+    assert!(!complete_before(&mut child, Duration::from_secs(60))?.success());
+    let row = harness.request(0)?;
+    match row["lease_record"]["memory_enforcement"].as_str() {
+        Some("rss_watchdog") => {
+            assert_eq!(row["code"], "LB_RSS_CAP", "{row}");
+            assert!(
+                row["measured_value"]
+                    .as_u64()
+                    .is_some_and(|bytes| bytes > 67_108_864)
+            );
+        }
+        Some("systemd_scope") => assert_eq!(row["code"], "LB_OOM_KILLED", "{row}"),
+        _ => panic!("required memory enforcement was not established: {row}"),
+    }
+    assert_eq!(harness.report()?["used_units"], 0);
+    eprintln!("scope/RSS cap: {}", row["message"]);
     Ok(())
 }
 

@@ -10,8 +10,27 @@ use super::*;
 #[test]
 fn scope_probe_and_launch_require_the_same_oom_policy() {
     let spec = lease_command_spec(LauncherPlatform::Linux, "/usr/bin/true", &[], Some(64));
-    let args: Vec<_> = spec.arguments.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
-    assert_eq!(args, ["--user", "--scope", "--quiet", "-p", "MemoryMax=64", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=stop", "--", "/usr/bin/true"]);
+    let args: Vec<_> = spec
+        .arguments
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "--user",
+            "--scope",
+            "--quiet",
+            "-p",
+            "MemoryMax=64",
+            "-p",
+            "MemorySwapMax=0",
+            "-p",
+            "OOMPolicy=stop",
+            "--",
+            "/usr/bin/true"
+        ]
+    );
 }
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
