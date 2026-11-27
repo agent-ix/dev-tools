@@ -724,7 +724,11 @@ fn cancel_with_clock(
     })
 }
 
-pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Result<i32> {
+pub(crate) fn wait(
+    store: &Store,
+    id: &RequestId,
+    mut workers: Vec<Child>,
+) -> Result<(i32, Option<String>)> {
     loop {
         let mut active = Vec::new();
         for mut worker in workers {
@@ -751,12 +755,16 @@ pub(crate) fn wait(store: &Store, id: &RequestId, mut workers: Vec<Child>) -> Re
                         .unwrap_or(1),
                 ),
             };
-            Ok((code, crate::config::POLL_INTERVAL_MS))
+            Ok((
+                code,
+                request.reason.clone(),
+                crate::config::POLL_INTERVAL_MS,
+            ))
         })?;
         if let Some(code) = result.0 {
-            return Ok(code);
+            return Ok((code, result.1));
         }
-        std::thread::sleep(Duration::from_millis(result.1));
+        std::thread::sleep(Duration::from_millis(result.2));
     }
 }
 

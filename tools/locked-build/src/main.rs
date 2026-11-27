@@ -236,13 +236,9 @@ fn execute(cli: Cli) -> Result<i32> {
             )?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let worker = runtime::spawn_worker(&store, &id)?;
-            let exit_code = runtime::wait(&store, &id, vec![worker])?;
-            if let Some(reason) = runtime::status(&store)?
-                .requests
-                .into_iter()
-                .find(|request| request.request_id == id)
-                .filter(|request| request.state == "timed_out")
-                .and_then(|request| request.reason)
+            let (exit_code, reason) = runtime::wait(&store, &id, vec![worker])?;
+            if exit_code == 124
+                && let Some(reason) = reason
             {
                 eprintln!("request={} reason={reason}", id.0);
             }
