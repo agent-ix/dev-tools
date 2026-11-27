@@ -131,7 +131,9 @@ Probe children inherit the publisher group. Standalone `sample` gives the probe 
 An absent executable emits no kache series. A failed probe emits `ix_kache_up=0` and `ix_kache_scrape_error=1` while other telemetry continues.
 When configuration is unreadable, those failure series omit `store` until its classification is known.
 
-Successful observations use `host` and `store` labels. `store` is `shared` when the selected file contains `cache.remote` and sets `cache.local_only` to false; otherwise it is `local`.
+Successful observations use `host` and `store` labels. Physical inventory stays labelled `store=local`; remote observations use `store=shared`.
+`cache=store_0` through `store_3` identify the first four stores sorted by their reported paths; extra stores are counted by `store_inventory_truncated`.
+The configured remote has `cache=remote` and a verified `backend` label.
 The upstream [configuration reference](https://ninja.kunobi.com/docs/kache/getting-started/configuration) defines the nested key.
 File inspection excludes environment overrides and daemon-effective configuration.
 The label describes the host's cache mode; remote capacity is unavailable from the local stats report.
@@ -172,7 +174,8 @@ Each newer `last_run` contributes its per-run counts once, even across exporter 
 A null `last_run` contributes nothing and leaves scrape availability unchanged.
 Multiple GC runs between observations cannot be recovered from that snapshot.
 Passthrough reasons use three bounded buckets: `not_a_compile`, `unsupported`, and `other`.
-Rendering emits 20 series with store labels. The complete probe adds one host daemon-expectation series: 21 total, below the tested budget of 60.
+A single local store renders 24 cache series, with one host daemon-expectation series added by the complete probe: 25 cache series.
+Policy metadata adds one separate build-family series. All configurations stay within the tested budget of 60 cache series.
 
 The dashboard adds cache hit ratio, store fill, hourly evictions, permit wait share, and scrape availability.
 Hit-ratio and permit-wait alerts require at least ten observed compiler results in an hour.
@@ -182,3 +185,31 @@ Scrape alerts require `daemon_expected=1`; an undiscovered executable emits no e
 
 Kache reports an activity session identifier, but a session may span Cargo commands. Observed events expose roots and timestamps without a locked-build request identifier.
 Per-build cache attribution requires an identifier shared with the admission request; host counters remain independent of build ownership.
+
+## Shared-cache policy and observations
+
+`cache.mode` accepts `local`, `shared`, or `both`. The default permits local reuse and sets `KACHE_LOCAL_ONLY=true` for each admitted command.
+Shared modes explicitly permit the configured remote and retain local fallback; the wrapper rollout is separate.
+`cache.cache_role` defaults to `client`; set `server` for a cache-serving host.
+`ix_build_cache_policy_info{host,cache_role,cache_mode}` supports host joins for future disk/network panels.
+No host is classified by its name.
+
+Remote configuration fixtures cover the source-declared `cache.remote.type` values `s3`, `gcs`, `filesystem`, and `oci`.
+These fixtures validate the installed release schema; no live remote backend was provisioned or contacted.
+Local and remote hit counters are separate: `local_hits_total` includes local and prefetched restores, and `remote_hits_total` describes remote hits.
+The existing `hits_total` remains the total cache-hit count for compatibility.
+
+With shared policy enabled, an optional bounded full stats call supplies `remote_push_total`, `remote_pull_total`, transfer bytes, transfer errors, and download mean/p95 latency.
+Full report output is capped at eight MiB and shares the collection deadline. Failure only clears `remote_observation_available`; local observations remain valid.
+A recent full report file can instead be supplied through `cache.remote_report_file`.
+`cache.remote_status_file` accepts a recent doctor JSON snapshot whose Remote check supplies `remote_reachable`: zero, one, or minus one for unknown.
+Snapshots expire after 120 seconds. The exporter never runs doctor because its store probes can write temporary files.
+A missing source remains unknown, never a successful remote health check.
+
+The unreachable-remote fixture reports reachability zero, errors, and available local fallback while local stats and an admitted command remain successful.
+`local_fallback` summarizes retained local hits and a recent failed remote check; it attributes no particular build.
+Remote lookup misses, push latency, remote physical capacity, and cache-server client counts have no verified read-only JSON source in this release.
+They are omitted. Live backend reachability, authentication, and real compiler fallback need the rollout pilot.
+
+Per-store `store_inventory_bytes` uses `blob_stats.total_blob_size` for physical payload bytes; it is omitted when that source is unavailable.
+The aggregate `store_bytes` remains the physical disk gauge.

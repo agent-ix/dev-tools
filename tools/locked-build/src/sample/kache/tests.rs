@@ -40,7 +40,7 @@ fn kache_real_local_fixture_has_hand_written_values_and_bounded_series() -> Resu
     assert!(text.contains("reason=\"not_a_compile\"} 12"));
     assert!(text.contains("reason=\"unsupported\"} 8"));
     let series = text.lines().filter(|s| !s.starts_with('#')).count();
-    assert_eq!(series, 20);
+    assert_eq!(series, 24);
     assert!(series <= 60);
     Ok(())
 }
@@ -63,7 +63,7 @@ fn kache_shared_fixture_remote_hits_and_unbounded_reasons_stay_within_budget() -
     )?;
     assert_eq!(value(&text, "remote_hits_total")?, 25.);
     assert_eq!(value(&text, "hits_total")?, 498.);
-    assert!(text.contains("store=\"shared\""));
+    assert!(text.contains("ix_kache_remote_hits_total{host=\"luna\",store=\"shared\"}"));
     assert!(text.contains("reason=\"other\"} 1000"));
     assert!(!text.contains("unbounded"));
     assert!(text.lines().filter(|s| !s.starts_with('#')).count() <= 60);
@@ -236,6 +236,7 @@ fn kache_ledger_lock_is_nonblocking_and_held_until_commit() -> Result<()> {
     ledger.advance("hits_total", 100, true)?;
     crate::metrics::write_atomic(&path, &serde_json::to_string(&ledger)?)?;
     assert!(read_ledger(&path).is_err());
+    guard.unlock()?;
     drop(guard);
     let (_next, restored) = read_ledger(&path)?;
     assert_eq!(restored.totals.get("hits_total"), Some(&100));
@@ -428,5 +429,208 @@ fn kache_counter_fields_share_the_same_event_history_window() -> Result<()> {
     assert_eq!(value(&text, "misses_total")?, 0.);
     assert_eq!(value(&text, "hit_compile_seconds_total")?, 0.);
     assert_eq!(value(&text, "miss_compile_seconds_total")?, 0.);
+    Ok(())
+}
+
+/// Provenance: SWM-416 addition; all remote kinds verified against v2.4.0 RemoteFileConfig.
+#[test]
+fn kache_verified_remote_kinds_and_outage_leave_local_observations_available() -> Result<()> {
+    for (kind, document) in [
+        ("s3", include_str!("../fixtures/s3-config.json")),
+        ("gcs", include_str!("../fixtures/gcs-config.json")),
+        (
+            "filesystem",
+            include_str!("../fixtures/filesystem-config.json"),
+        ),
+        ("oci", include_str!("../fixtures/oci-config.json")),
+    ] {
+        let config: Value = serde_json::from_str(document)?;
+        assert_eq!(remote::backend(&config), Some(kind));
+        assert_eq!(store_label(&config["values"])?, "shared");
+    }
+    let (stats, _, explain) = fixtures()?;
+    let config: Value = serde_json::from_str(include_str!("../fixtures/filesystem-config.json"))?;
+    let root = tempfile::tempdir()?;
+    let report = root.path().join("report.json");
+    let status = root.path().join("doctor.json");
+    std::fs::write(&report, include_str!("../fixtures/remote-report.json"))?;
+    std::fs::write(&status, include_str!("../fixtures/unreachable-doctor.json"))?;
+    let policy = crate::config::CachePolicy {
+        mode: crate::config::CacheMode::Both,
+        remote_report_file: Some(report),
+        remote_status_file: Some(status),
+        ..Default::default()
+    };
+    let mut text = String::new();
+    let mut ledger = Ledger::default();
+    render(&stats, &config, &explain, "luna", &mut ledger, &mut text)?;
+    remote::observe(
+        Path::new("/missing/kache"),
+        &stats,
+        &config,
+        "luna",
+        &mut ledger,
+        &mut text,
+        Instant::now() + TIMEOUT,
+        &policy,
+    );
+    assert_eq!(value(&text, "up")?, 1.);
+    assert_eq!(value(&text, "local_hits_total")?, 473.);
+    assert_eq!(value(&text, "remote_reachable")?, 0.);
+    assert_eq!(value(&text, "local_fallback")?, 1.);
+    assert_eq!(value(&text, "remote_push_total")?, 7.);
+    assert_eq!(value(&text, "remote_pull_total")?, 11.);
+    assert_eq!(value(&text, "remote_push_bytes_total")?, 123456.);
+    assert_eq!(value(&text, "remote_pull_bytes_total")?, 456789.);
+    assert_eq!(value(&text, "remote_pull_errors_total")?, 3.);
+    assert_eq!(value(&text, "remote_pull_latency_p95_seconds")?, 0.25);
+    assert!(text.lines().filter(|s| !s.starts_with('#')).count() <= 60);
+    // Remote telemetry and permission are not a dependency of command execution.
+    let mut build = std::process::Command::new("/usr/bin/true");
+    policy.apply(&mut build);
+    assert!(build.status()?.success());
+    Ok(())
+}
+
+/// Provenance: SWM-416 addition; default-on local permission, explicit shared switch and server role.
+#[test]
+fn kache_policy_defaults_local_and_does_not_enable_a_wrapper() -> Result<()> {
+    let policy: crate::config::CachePolicy = serde_json::from_str("{}")?;
+    assert!(!policy.shared_enabled());
+    let mut command = std::process::Command::new("/usr/bin/true");
+    policy.apply(&mut command);
+    let environment = command.get_envs().collect::<Vec<_>>();
+    assert!(environment.contains(&(
+        std::ffi::OsStr::new("KACHE_LOCAL_ONLY"),
+        Some(std::ffi::OsStr::new("true"))
+    )));
+    assert!(!environment.iter().any(|(key, _)| *key == "RUSTC_WRAPPER"));
+    let server: crate::config::CachePolicy =
+        serde_json::from_str(r#"{"mode":"both","cache_role":"server"}"#)?;
+    assert!(server.shared_enabled());
+    let mut text = String::new();
+    server.append_info(&mut text, "future-server");
+    assert!(text.contains("cache_role=\"server\",cache_mode=\"both\""));
+    assert!(serde_json::from_str::<crate::config::CachePolicy>(r#"{"mode":"invented"}"#).is_err());
+    Ok(())
+}
+
+/// Provenance: SWM-416 addition; remote errors and a maximum inventory stay within the host budget.
+#[test]
+fn kache_shared_maximum_inventory_budget_and_missing_remote_data_are_fail_open() -> Result<()> {
+    let (mut stats, _, explain) = fixtures()?;
+    stats["stores"] = (0..8)
+        .map(|i| {
+            let mut store = stats["stores"][0].clone();
+            store["path"] = format!("/redacted/{i}").into();
+            store
+        })
+        .collect();
+    let config: Value = serde_json::from_str(include_str!("../fixtures/s3-config.json"))?;
+    let policy = crate::config::CachePolicy {
+        mode: crate::config::CacheMode::Both,
+        ..Default::default()
+    };
+    let mut text = String::new();
+    let mut ledger = Ledger::default();
+    render(&stats, &config, &explain, "luna", &mut ledger, &mut text)?;
+    remote::observe(
+        Path::new("/missing/kache"),
+        &stats,
+        &config,
+        "luna",
+        &mut ledger,
+        &mut text,
+        Instant::now(),
+        &policy,
+    );
+    assert_eq!(value(&text, "up")?, 1.);
+    assert_eq!(value(&text, "remote_observation_available")?, 0.);
+    assert_eq!(value(&text, "remote_reachable")?, -1.);
+    assert_eq!(value(&text, "store_inventory_truncated")?, 4.);
+    assert!(text.lines().filter(|l| l.starts_with("ix_kache_")).count() < 60);
+    Ok(())
+}
+
+/// Provenance: SWM-416 shared addition; role insertion respects quoted label braces.
+#[test]
+fn kache_role_label_preserves_host_braces() {
+    let mut text = String::new();
+    emit(&mut text, "up", "gauge", "a}b", "local", "", 1);
+    assert!(
+        with_role(&text, "server")
+            .contains("ix_kache_up{host=\"a}b\",store=\"local\",cache_role=\"server\"} 1")
+    );
+}
+
+/// Provenance: SWM-416 shared addition; backend switches and subsecond epochs do not replay transfers.
+#[test]
+fn kache_remote_epoch_is_exact_and_report_backend_must_match() -> Result<()> {
+    let (mut stats, _, _) = fixtures()?;
+    let report: Value = serde_json::from_str(include_str!("../fixtures/remote-report.json"))?;
+    let mut ledger = Ledger::default();
+    remote::render(
+        &report,
+        &stats,
+        "luna",
+        "",
+        "filesystem",
+        &mut ledger,
+        &mut String::new(),
+    )?;
+    let totals = ledger.totals.clone();
+    stats["lifetime"]["since"] = "2026-11-27T19:52:20.999999999Z".into();
+    let mut newer = report.clone();
+    newer["network"]["uploads_ok"] = 100.into();
+    remote::render(
+        &newer,
+        &stats,
+        "luna",
+        "",
+        "filesystem",
+        &mut ledger,
+        &mut String::new(),
+    )?;
+    assert_eq!(ledger.totals, totals);
+    assert!(
+        remote::render(
+            &report,
+            &stats,
+            "luna",
+            "",
+            "s3",
+            &mut ledger,
+            &mut String::new()
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+/// Provenance: SWM-416 shared addition; a late failure discards every partial family.
+#[test]
+fn kache_late_source_failure_publishes_only_failure_metrics() -> Result<()> {
+    let mut partial = String::new();
+    emit(&mut partial, "up", "gauge", "luna", "local", "", 1);
+    emit(
+        &mut partial,
+        "hits_total",
+        "counter",
+        "luna",
+        "local",
+        "",
+        999,
+    );
+    settle_observation(&mut partial, Err(unavailable()), "luna", "local");
+    assert_eq!(value(&partial, "up")?, 0.);
+    assert_eq!(
+        partial
+            .lines()
+            .filter(|l| l.starts_with("ix_kache_up{"))
+            .count(),
+        1
+    );
+    assert!(!partial.contains("hits_total"));
+    assert_eq!(value(&partial, "scrape_error")?, 1.);
     Ok(())
 }

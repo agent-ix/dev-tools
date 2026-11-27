@@ -34,6 +34,8 @@ struct SamplerConfig {
     schema_version: u32,
     host: String,
     #[serde(default)]
+    cache: crate::config::CachePolicy,
+    #[serde(default)]
     capacity_units: Option<u32>,
     busy_source: BusySource,
     #[serde(default)]
@@ -509,7 +511,11 @@ fn run_with_kache(config_path: &Path, output_path: &Path, binary: Option<&Path>)
         &config.host,
         &output_path.with_extension("kache.json"),
         binary,
+        &config.cache,
     );
+    config
+        .cache
+        .append_info(&mut sampled.exposition, &config.host);
     for (source, reason) in &sampled.failures {
         eprintln!("locked-build sample: source={source} unavailable: {reason}");
     }
@@ -1437,6 +1443,7 @@ mod tests {
         let config = SamplerConfig {
             schema_version: 1,
             host: "luna".into(),
+            cache: crate::config::CachePolicy::default(),
             capacity_units: None,
             busy_source: BusySource::CargoProcessTrees {
                 proc_root: PathBuf::from("/missing/proc"),
@@ -1876,6 +1883,7 @@ mod tests {
         let config = SamplerConfig {
             schema_version: 1,
             host: "titan".into(),
+            cache: crate::config::CachePolicy::default(),
             capacity_units: None,
             busy_source: BusySource::TitanBuildWrappersAndArchLocks {
                 proc_root: root.path().to_path_buf(),
@@ -2035,6 +2043,7 @@ mod tests {
         let config = SamplerConfig {
             schema_version: 1,
             host: "terra".into(),
+            cache: crate::config::CachePolicy::default(),
             capacity_units: Some(12),
             busy_source: BusySource::TerraWrapperFdinfo {
                 proc_root: root.path().join("missing-proc"),

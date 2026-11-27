@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Optional, bounded kache observations. No compiler or daemon mutation.
+mod remote;
 use crate::error::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,13 +15,15 @@ use std::time::{Duration, Instant};
 const LIMIT: u64 = 1_048_576;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Ledger {
     epoch: String,
     #[serde(default)]
     daemon_seen: bool,
     gc_run: String,
+    #[serde(default)]
+    remote_epoch: String,
     previous: BTreeMap<String, u64>,
     totals: BTreeMap<String, u64>,
 }
@@ -44,15 +47,22 @@ pub(crate) fn executable() -> Option<PathBuf> {
 }
 
 /// Appends fail-open telemetry; cache errors never fail scheduler collection.
-pub(crate) fn append(text: &mut String, host: &str, ledger_path: &Path, deadline: Instant) {
+pub(crate) fn append(
+    text: &mut String,
+    host: &str,
+    ledger_path: &Path,
+    deadline: Instant,
+    policy: &crate::config::CachePolicy,
+) {
     let binary = executable();
-    append_for(
+    append_for_policy(
         text,
         host,
         ledger_path,
         binary.as_deref(),
         expectation_override(),
         deadline,
+        policy,
     );
 }
 
@@ -61,14 +71,16 @@ pub(super) fn append_with_binary(
     host: &str,
     ledger_path: &Path,
     binary: Option<&Path>,
+    policy: &crate::config::CachePolicy,
 ) {
-    append_for(
+    append_for_policy(
         text,
         host,
         ledger_path,
         binary,
         expectation_override(),
         Instant::now() + TIMEOUT,
+        policy,
     );
 }
 
@@ -80,19 +92,20 @@ fn expectation_override() -> Option<bool> {
     }
 }
 
-fn append_for(
+fn append_for_policy(
     text: &mut String,
     host: &str,
     ledger_path: &Path,
     binary: Option<&Path>,
     expected: Option<bool>,
     deadline: Instant,
+    policy: &crate::config::CachePolicy,
 ) {
     let Some(binary) = binary else { return };
     let mut daemon_seen = false;
     let mut known_store = "";
     let mut observed = String::new();
-    match observe(
+    let result = observe(
         binary,
         host,
         ledger_path,
@@ -100,15 +113,53 @@ fn append_for(
         &mut known_store,
         &mut daemon_seen,
         deadline,
-    ) {
-        Ok(()) => text.push_str(&observed),
-        Err(_) => {
-            // Config may be unreadable: omit the store label until it is known.
-            emit(text, "up", "gauge", host, known_store, "", 0);
-            emit(text, "scrape_error", "gauge", host, known_store, "", 1);
-        }
-    }
+        policy,
+    );
+    settle_observation(&mut observed, result, host, known_store);
+    text.push_str(&with_role(&observed, policy.role_label()));
     text.push_str(&format!("# HELP ix_kache_daemon_expected This host expects a kache daemon.\n# TYPE ix_kache_daemon_expected gauge\nix_kache_daemon_expected{{host=\"{}\"}} {}\n", crate::metrics::escape_label(host), u8::from(expected.unwrap_or(daemon_seen))));
+}
+
+fn settle_observation(observed: &mut String, result: Result<()>, host: &str, store: &str) {
+    if result.is_err() {
+        observed.clear();
+        emit(observed, "up", "gauge", host, store, "", 0);
+        emit(observed, "scrape_error", "gauge", host, store, "", 1);
+    }
+}
+
+fn with_role(observed: &str, role: &str) -> String {
+    observed
+        .lines()
+        .map(|line| {
+            if line.starts_with("ix_kache_")
+                && let Some((labels, value)) = line.rsplit_once('}')
+            {
+                return format!("{labels},cache_role=\"{role}\"}}{value}\n");
+            }
+            format!("{line}\n")
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn append_for(
+    text: &mut String,
+    host: &str,
+    path: &Path,
+    binary: Option<&Path>,
+    expected: Option<bool>,
+    deadline: Instant,
+) {
+    append_for_policy(
+        text,
+        host,
+        path,
+        binary,
+        expected,
+        deadline,
+        &crate::config::CachePolicy::default(),
+    );
 }
 
 fn command(binary: &Path, args: &[&str], deadline: Instant) -> Result<Value> {
@@ -169,7 +220,13 @@ fn command(binary: &Path, args: &[&str], deadline: Instant) -> Result<Value> {
                 }
                 Ok(count) => {
                     bytes.extend_from_slice(&buffer[..count]);
-                    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LIMIT {
+                    if u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+                        > if args.contains(&"--full") {
+                            8 * LIMIT
+                        } else {
+                            LIMIT
+                        }
+                    {
                         return Err(unavailable());
                     }
                     continue;
@@ -203,6 +260,7 @@ fn timestamp(value: &str) -> Result<i64> {
         .map_err(|_| unavailable())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn observe(
     binary: &Path,
     host: &str,
@@ -211,6 +269,7 @@ fn observe(
     known_store: &mut &'static str,
     daemon_seen: &mut bool,
     deadline: Instant,
+    policy: &crate::config::CachePolicy,
 ) -> Result<()> {
     if !binary.is_absolute() {
         return Err(unavailable());
@@ -232,6 +291,16 @@ fn observe(
     }
     let explain = command(binary, &["explain", "--all", "--json"], deadline)?;
     render(&stats, &config, &explain, host, &mut ledger, text)?;
+    remote::observe(
+        binary,
+        &stats,
+        &config,
+        host,
+        &mut ledger,
+        text,
+        deadline,
+        policy,
+    );
     *daemon_seen = ledger.daemon_seen;
     crate::metrics::write_atomic(path, &serde_json::to_string(&ledger)?)?;
     Ok(())
@@ -283,7 +352,8 @@ fn render(
     {
         return Err(unavailable());
     }
-    let store = store_label(&config["values"])?;
+    let store = "local";
+    store_label(&config["values"])?;
     let epoch = string(&stats["lifetime"], "since")?;
     let epoch_timestamp = timestamp(epoch)?;
     let version = string(stats, "daemon_version")?;
@@ -375,6 +445,11 @@ fn render(
         ),
     ] {
         let value = ledger.advance(name, raw, new_epoch)?;
+        let store = if name == "remote_hits_total" {
+            "shared"
+        } else {
+            store
+        };
         if seconds {
             emit(text, name, "counter", host, store, "", value as f64 / 1000.);
         } else {
@@ -444,6 +519,20 @@ fn render(
         let count = ledger.advance(&format!("passthrough_{reason}"), raw, new_epoch)?;
         text.push_str(&format!("ix_kache_passthrough_total{{host=\"{}\",store=\"{store}\",reason=\"{reason}\"}} {count}\n", crate::metrics::escape_label(host)));
     }
+    let local_hits = number(stats, "local_hits")?
+        .checked_add(number(stats, "prefetch_hits")?)
+        .ok_or_else(unavailable)?;
+    let value = ledger.advance("local_hits_total", local_hits, new_epoch)?;
+    emit(
+        text,
+        "local_hits_total",
+        "counter",
+        host,
+        "local",
+        "",
+        value,
+    );
+    remote::inventory(stats, host, text)?;
     ledger.epoch = epoch.into();
     ledger.daemon_seen |= connected;
     Ok(())
@@ -501,7 +590,15 @@ fn emit(
     } else {
         format!(",store=\"{store}\"")
     };
-    text.push_str(&format!("# HELP {name} Kache observed {suffix}.\n# TYPE {name} {kind}\n{name}{{host=\"{}\"{store_label}{extra}}} {value}\n", crate::metrics::escape_label(host)));
+    if !text.contains(&format!("# TYPE {name} ")) {
+        text.push_str(&format!(
+            "# HELP {name} Kache observed {suffix}.\n# TYPE {name} {kind}\n"
+        ));
+    }
+    text.push_str(&format!(
+        "{name}{{host=\"{}\"{store_label}{extra}}} {value}\n",
+        crate::metrics::escape_label(host)
+    ));
 }
 
 #[cfg(test)]

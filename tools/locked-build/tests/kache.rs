@@ -56,11 +56,13 @@ fn kache_luna_exporter_latency() -> Result<(), Box<dyn std::error::Error>> {
             String::from_utf8_lossy(&result.stderr)
         );
         text = std::fs::read_to_string(&output)?;
-        assert!(text.contains("ix_kache_up{host=\"luna\",store=\"local\"} 1"));
+        assert!(
+            text.contains("ix_kache_up{host=\"luna\",store=\"local\",cache_role=\"client\"} 1")
+        );
         assert!(text.contains("ix_build_export_error{host=\"luna\"} 0"));
         assert_eq!(
             text.lines().filter(|l| l.starts_with("ix_kache_")).count(),
-            21
+            25
         );
     }
     durations.sort_by(f64::total_cmp);
@@ -101,7 +103,11 @@ fn kache_luna_exporter_latency() -> Result<(), Box<dyn std::error::Error>> {
         let scrape = scrape?;
         assert!(scrape.status.success());
         let scrape = String::from_utf8(scrape.stdout)?;
-        assert!(scrape.contains("ix_kache_up{host=\"luna\",store=\"local\"} 1"));
+        assert!(scrape.lines().any(|l| l.starts_with("ix_kache_up{")
+            && l.contains("host=\"luna\"")
+            && l.contains("store=\"local\"")
+            && l.contains("cache_role=\"client\"")
+            && l.ends_with(" 1")));
         println!(
             "luna node_exporter pilot: real ix_kache_up=1 ingested; temporary pilot file removed"
         );

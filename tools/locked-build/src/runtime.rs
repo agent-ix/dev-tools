@@ -1156,11 +1156,13 @@ fn metrics_with_clock(
         &host,
         size as f64,
     );
+    config.cache.append_info(&mut text, &state.host);
     crate::sample::kache::append(
         &mut text,
         &state.host,
         &store.path.join("kache-metrics.json"),
         sampling_deadline,
+        &config.cache,
     );
     let checkpoint = crate::model::ExportCheckpoint {
         store_id: state.store_id.clone(),
@@ -2251,6 +2253,7 @@ fn start_command(
         lease_record.cargo_incremental_overwrote_caller = incremental_overwrote_caller;
         lease_record.cargo_target_dir = target_dir;
         lease_record.cargo_target_dir_overwrote_caller = target_overwrote_caller;
+        config.cache.apply(&mut command);
         let child = command.spawn()?;
         lease_record.command = Processes::read().member_identity(child.id());
         state.find_mut(&request.id)?.lease_record = Some(lease_record);

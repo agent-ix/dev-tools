@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "command": "doctor",
+  "success": true,
+  "checks": [
+    {
+      "label": "Remote",
+      "pass": false,
+      "optional": false,
+      "detail": "unreachable fixture: connection refused",
+      "fix": null
+    }
+  ]
+}
