@@ -1,6 +1,6 @@
 {
   "name": "dev-tools",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Code and Rust reviews, test-writing guidance, backporting, security audits, project scaffolding, and documentation figures.",
   "author": {
     "name": "Agent IX",
