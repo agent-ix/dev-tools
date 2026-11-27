@@ -154,7 +154,7 @@ impl Store {
         // Read metrics first, then the atomic state file, and reconcile only
         // when all intervening events remain available (including pruning).
         for _ in 0..3 {
-            let mut metrics = load_metrics(&self.path.join(METRICS_FILE));
+            let mut metrics = load_metrics(&self.path.join(METRICS_FILE))?;
             let history = metrics.has_history();
             let mut state = match self.read_member::<State>("state.json", STATE_LIMIT)? {
                 Some(state) => state,
@@ -177,6 +177,12 @@ impl Store {
                 return Err(Error::new(
                     ErrorCode::State,
                     "unsupported schema or different host/configuration",
+                ));
+            }
+            if !history && state.pruned_events > 0 {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "metrics ledger missing after pruning; restore metrics.json from backup",
                 ));
             }
             metrics.bind_store(&state.store_id);
@@ -335,9 +341,15 @@ impl Store {
         let policy_path_changed = state.config_path != self.config_path;
         state.config_path = self.config_path.clone();
         let metrics_path = self.path.join(METRICS_FILE);
-        state.metrics = load_metrics(&metrics_path);
+        state.metrics = load_metrics(&metrics_path)?;
         let metrics_before = serde_json::to_vec(&state.metrics)?;
         let metrics_identity_changed = state.metrics.bind_store(&state.store_id);
+        if !state.metrics.can_reconcile(&state) {
+            return Err(Error::new(
+                ErrorCode::State,
+                "metrics ledger has a gap; restore metrics.json from backup",
+            ));
+        }
         if state.rebooted(
             crate::process::boot_id().as_deref(),
             sysinfo::System::boot_time(),
@@ -558,26 +570,18 @@ fn validate_state_directory(path: &Path) -> Result<PathBuf> {
     path.canonicalize().map_err(Into::into)
 }
 
-fn load_metrics(path: &Path) -> crate::metrics::MetricsState {
-    let result = (|| -> Result<crate::metrics::MetricsState> {
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(crate::metrics::MetricsState::default());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if !metadata.is_file() || metadata.len() > STATE_LIMIT {
-            return Err(Error::new(ErrorCode::State, "invalid metrics sidecar file"));
-        }
-        let file = File::open(path)?;
-        serde_json::from_reader(BufReader::new(file.take(STATE_LIMIT))).map_err(Into::into)
-    })();
-    match result {
-        Ok(metrics) => metrics,
-        Err(error) => {
-            eprintln!("locked-build: ignoring invalid metrics sidecar: {error}");
-            crate::metrics::MetricsState::default()
-        }
+fn load_metrics(path: &Path) -> Result<crate::metrics::MetricsState> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.len() > STATE_LIMIT {
+        return Err(Error::new(
+            ErrorCode::State,
+            "invalid metrics ledger file; restore metrics.json from backup",
+        ));
     }
+    let file = File::open(path)?;
+    serde_json::from_reader(BufReader::new(file.take(STATE_LIMIT))).map_err(Into::into)
 }

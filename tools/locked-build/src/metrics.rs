@@ -12,7 +12,6 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Event, Request, State};
 
 const BUCKETS_SECONDS: [u64; 12] = [1, 5, 10, 30, 60, 120, 300, 600, 1_200, 1_800, 3_600, 7_200];
-const MAX_LANE_LABELS: usize = 64;
 
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
@@ -161,6 +160,8 @@ impl BlockReason {
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub(crate) struct MetricsState {
     #[serde(default)]
+    telemetry: crate::telemetry::Ledger,
+    #[serde(default)]
     requests: BTreeMap<String, BTreeMap<String, u64>>,
     #[serde(default)]
     terminations: BTreeMap<String, BTreeMap<String, u64>>,
@@ -210,6 +211,18 @@ struct Histogram {
 }
 
 impl MetricsState {
+    pub(crate) fn snapshot_with_policy(
+        &self,
+        state: &State,
+        config: &Config,
+        now: u64,
+        clock: u64,
+    ) -> locked_build::wire::MetricsSnapshot {
+        let mut snapshot = self.snapshot(state, clock);
+        snapshot.telemetry = self.telemetry.snapshot(state, config, now, clock);
+        snapshot
+    }
+
     pub(crate) fn has_history(&self) -> bool {
         !self.store_id.is_empty()
     }
@@ -356,7 +369,17 @@ impl MetricsState {
             .collect();
         ordered.sort_by_key(|(sequence, _)| *sequence);
         for (sequence, event) in ordered {
-            if event.correction || event.kind == "blocked" || event.kind == "command_started" {
+            self.telemetry.observe(event)?;
+            if event.correction
+                || matches!(
+                    event.kind.as_str(),
+                    "blocked"
+                        | "command_started"
+                        | "supervisor_restart"
+                        | "recovered"
+                        | "boot_changed"
+                )
+            {
                 self.last_event_sequence = sequence;
                 continue;
             }
@@ -569,7 +592,7 @@ impl MetricsState {
         &self,
         state: &State,
         config: &Config,
-        _now_ms: u64,
+        now_ms: u64,
         clock_ms: u64,
     ) -> Result<String> {
         let mut output = String::new();
@@ -640,36 +663,16 @@ impl MetricsState {
             "gauge",
             "Running build requests by bounded owner lane address.",
         );
-        let mut lane_counts = BTreeMap::<String, usize>::new();
-        for request in state
-            .requests
-            .iter()
-            .filter(|request| request.phase == crate::model::Phase::Running)
+        for (lane, count) in self
+            .telemetry
+            .owner_counts(state, crate::model::Phase::Running)
         {
-            let lane = if is_lane_address(&request.owner) {
-                request.owner.as_str()
-            } else {
-                "other"
-            };
-            *lane_counts.entry(lane.to_owned()).or_default() += 1;
-        }
-        let mut other = 0_usize;
-        let mut emitted_lanes = 0_usize;
-        for (lane, count) in lane_counts {
-            if lane == "other" || emitted_lanes == MAX_LANE_LABELS {
-                other += count;
-            } else {
+            if count > 0 {
                 output.push_str(&format!(
                     "ix_build_lane_running{{host=\"{host}\",lane=\"{}\"}} {count}\n",
                     escape_label(&lane)
                 ));
-                emitted_lanes += 1;
             }
-        }
-        if other > 0 {
-            output.push_str(&format!(
-                "ix_build_lane_running{{host=\"{host}\",lane=\"other\"}} {other}\n"
-            ));
         }
 
         metric_header(
@@ -760,6 +763,10 @@ impl MetricsState {
                 seconds(committed.saturating_add(active))
             ));
         }
+        crate::telemetry::render(
+            &self.telemetry.snapshot(state, config, now_ms, clock_ms),
+            &mut output,
+        );
         Ok(output)
     }
 
@@ -772,15 +779,6 @@ impl MetricsState {
         }
         clock_ms.saturating_sub(started)
     }
-}
-
-fn is_lane_address(owner: &str) -> bool {
-    let mut segments = owner.split(':');
-    matches!(
-        (segments.next(), segments.next(), segments.next(), segments.next()),
-        (Some(server), Some(workspace), Some(tab), None)
-            if !server.is_empty() && !workspace.is_empty() && !tab.is_empty()
-    )
 }
 
 fn event_sequence(event_id: &str) -> Option<u64> {
@@ -874,6 +872,7 @@ mod tests {
 
     pub(super) fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
         Request {
+            telemetry: Default::default(),
             supervision_detail: None,
             trace: Default::default(),
             command_started_clock_ms: None,
@@ -952,7 +951,7 @@ mod tests {
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
         assert_eq!(
-            names,
+            &names[..10],
             [
                 "ix_build_requests_total",
                 "ix_build_terminations_total",
@@ -1333,6 +1332,7 @@ mod tests {
     #[test]
     fn exposition_excludes_ticket_request_command_and_environment_values() -> Result<()> {
         let mut request = crate::model::Request {
+            telemetry: Default::default(),
             supervision_detail: None,
             trace: Default::default(),
             command_started_clock_ms: None,
@@ -1432,6 +1432,7 @@ mod tests {
 
     pub(super) fn event(sequence: u64, phase: &str, priority: u32, wait_ms: u64) -> Event {
         Event {
+            telemetry: Default::default(),
             correction: false,
             trace: Default::default(),
             kind: "transition".to_owned(),

@@ -196,6 +196,8 @@ pub enum MemoryEnforcement {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Request {
     #[serde(default)]
+    pub telemetry: crate::telemetry::EventTelemetry,
+    #[serde(default)]
     pub supervision_detail: Option<String>,
     #[serde(default, flatten)]
     pub trace: locked_build::wire::RequestTrace,
@@ -302,6 +304,9 @@ where
 /// Stable transition evidence; command arguments and environment are excluded.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Event {
+    /// Frozen build measurements and bounded identity inputs.
+    #[serde(default)]
+    pub(crate) telemetry: crate::telemetry::EventTelemetry,
     /// Repairs a previously published outcome without counting a new attempt.
     #[serde(default)]
     pub correction: bool,
@@ -454,6 +459,36 @@ impl Request {
 }
 
 impl State {
+    pub(crate) fn system_event(&mut self, kind: &str, config: &Config, now: u64) -> Result<()> {
+        let event = Event {
+            telemetry: Default::default(),
+            correction: false,
+            trace: Default::default(),
+            kind: kind.to_owned(),
+            schema_version: 1,
+            event_id: format!("{}:e{}", self.store_id, self.next_event),
+            request_id: RequestId(format!("{}:system", self.store_id)),
+            host: self.host.clone(),
+            owner: String::new(),
+            ticket: String::new(),
+            observed_at_ms: now,
+            state: Phase::Queued,
+            units: 0,
+            priority: 0,
+            class: "periodic".to_owned(),
+            capacity_units: config.capacity_units,
+            free_units: config.capacity_units.saturating_sub(self.used()),
+            wait_ms: 0,
+            hold_ms: None,
+            reason: None,
+        };
+        self.next_event = self
+            .next_event
+            .checked_add(1)
+            .ok_or_else(|| Error::new(ErrorCode::State, "event sequence exhausted"))?;
+        self.events.push(event);
+        Ok(())
+    }
     pub(crate) fn rebooted(&self, boot_id: Option<&str>, boot_time: u64) -> bool {
         match (self.boot_id.as_deref(), boot_id) {
             (Some(previous), Some(current)) => previous != current,
@@ -581,6 +616,7 @@ impl State {
             .unwrap_or(clock)
             .saturating_sub(request.enqueued_clock_ms);
         let event = Event {
+            telemetry: crate::telemetry::EventTelemetry::for_request(request, config),
             correction: false,
             trace: request.trace_snapshot(clock),
             kind: transition_kind(),

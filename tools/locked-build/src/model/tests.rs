@@ -47,6 +47,7 @@ fn sample() -> HostSample {
 
 fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
     Request {
+        telemetry: Default::default(),
         supervision_detail: None,
         trace: Default::default(),
         command_started_clock_ms: None,

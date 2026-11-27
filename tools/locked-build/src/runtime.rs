@@ -66,6 +66,7 @@ pub(crate) fn enqueue(
         ));
     }
     let cwd = std::env::current_dir()?;
+    let telemetry = crate::telemetry::EventTelemetry::identity(&cwd, command);
     let caller_cargo_build_jobs = std::env::var("CARGO_BUILD_JOBS").ok();
     let caller_rust_test_threads = std::env::var("RUST_TEST_THREADS").ok();
     let caller_cargo_incremental = std::env::var("CARGO_INCREMENTAL").ok();
@@ -164,6 +165,7 @@ pub(crate) fn enqueue(
                 .map(|_| estimate_memory_reservation(config, class_name, memory_parallelism))
                 .transpose()?;
             state.requests.push(Request {
+                telemetry: telemetry.clone(),
                 supervision_detail: None,
                 pid_namespace: crate::process::pid_namespace()?,
                 trace: locked_build::wire::RequestTrace {
@@ -238,6 +240,7 @@ pub(crate) fn enqueue(
                 *message = message.replace("request=pending ", &format!("request={} ", id.0));
             }
             state.events.push(Event {
+                telemetry: telemetry.clone(),
                 correction: false,
                 trace: locked_build::wire::RequestTrace {
                     diagnostic: failure.diagnostic.clone(),
@@ -613,7 +616,7 @@ fn spawn_worker_with<T>(
     };
     let launcher = Processes::self_identity()?;
     let pid_namespace = crate::process::pid_namespace()?;
-    let claim = store.transaction(|state, _| {
+    let claim = store.transaction(|state, config| {
         let store_id = state.store_id.clone();
         let request = state.find_mut(id)?;
         if request.phase != Phase::Queued {
@@ -670,6 +673,9 @@ fn spawn_worker_with<T>(
             worker: None,
         };
         store.write_claim(&claim)?;
+        if claim.generation > 1 {
+            state.system_event("supervisor_restart", config, now_ms()?)?;
+        }
         Ok(Some(claim))
     })?;
     let Some(claim) = claim else {
@@ -830,6 +836,7 @@ fn recover_with_boot(
         // backends get the same 120-second tolerance; Linux uses the UUID.
         let rebooted = state.rebooted(boot_id.as_deref(), boot_time);
         if rebooted {
+            state.system_event("boot_changed", config, now)?;
             let new_boot_ms = boot_time.saturating_mul(1_000);
             for request in state
                 .requests
@@ -924,6 +931,11 @@ fn recover_with_boot(
         }
         finish.sort_by(|left, right| left.0.cmp(&right.0));
         finish.dedup();
+        // Count actual repaired requests, not idle recover invocations.
+        let recovered = finish.iter().chain(&respawn).filter(|id| state.find(id).is_ok_and(|request| rebooted || request.worker_generation > 0)).count();
+        for _ in 0..recovered {
+            state.system_event("recovered", config, now)?;
+        }
         for id in finish {
             let outcome = state.find(&id)?.command_finished.as_ref();
             let code = outcome.and_then(|outcome| outcome.code);
@@ -1043,7 +1055,9 @@ fn status_with_clock(
         .collect();
     let used = state.used();
     Ok(Report {
-        metrics: state.metrics.snapshot(&state, clock),
+        metrics: state
+            .metrics
+            .snapshot_with_policy(&state, &config, now, clock),
         state_path: store.path.clone(),
         schema_version: 1,
         store_id: state.store_id.clone(),
@@ -2366,9 +2380,7 @@ fn record_scope_oom(request: &mut Request, enforcement: Option<MemoryEnforcement
 }
 
 fn record_scope_peak(request: &mut Request, evidence: &CgroupOomEvidence) {
-    if evidence.detected()
-        && let (Some(record), Some(bytes)) = (&mut request.lease_record, evidence.peak_bytes)
-    {
+    if let (Some(record), Some(bytes)) = (&mut request.lease_record, evidence.peak_bytes) {
         record.memory_sample = Some(crate::model::MemorySample {
             contributors: Vec::new(),
             bytes,
@@ -2867,9 +2879,13 @@ pub(crate) fn prune(store: &Store) -> Result<usize> {
             .collect();
         state.requests.retain(|request| !request.phase.terminal());
         let previous_events = state.events.len();
-        state
-            .events
-            .retain(|event| !terminal.contains(&event.request_id));
+        state.events.retain(|event| {
+            !terminal.contains(&event.request_id)
+                && !matches!(
+                    event.kind.as_str(),
+                    "supervisor_restart" | "recovered" | "boot_changed"
+                )
+        });
         state.pruned_events = state
             .pruned_events
             .checked_add(

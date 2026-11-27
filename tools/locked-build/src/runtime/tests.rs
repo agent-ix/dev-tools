@@ -3015,14 +3015,15 @@ fn legacy_embedded_metrics_field_is_ignored_without_breaking_state_decode() -> R
 
 /// Trace: FR-015-AC-10
 #[test]
-fn missing_metrics_sidecar_does_not_abort_build_state_transaction() -> Result<()> {
+fn corrupt_metrics_ledger_is_reported_without_replacing_history() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     std::fs::write(store.path.join("metrics.json"), "{broken")?;
-    let id = queued(&store)?;
+    assert!(queued(&store).is_err());
+    assert!(metrics(&store).is_err());
     assert_eq!(
-        store.transaction(|state, _| Ok(state.find(&id)?.phase))?,
-        Phase::Queued
+        std::fs::read_to_string(store.path.join("metrics.json"))?,
+        "{broken"
     );
     Ok(())
 }
@@ -3168,7 +3169,16 @@ fn concurrent_textfile_exports_are_serialized_and_leave_a_complete_document() ->
         }
         Ok(())
     })?;
-    assert_eq!(std::fs::read_to_string(&output)?, metrics(&store)?);
+    let without_refresh = |text: String| {
+        text.lines()
+            .filter(|line| !line.starts_with("ix_build_export_timestamp_seconds{"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        without_refresh(std::fs::read_to_string(&output)?),
+        without_refresh(metrics(&store)?)
+    );
     let leftovers = std::fs::read_dir(root.path())?
         .filter_map(std::result::Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
@@ -3430,12 +3440,22 @@ fn outcome_counters_survive_store_reopen_and_prune() -> Result<()> {
         state.boot_id = Some("previous-kernel-boot".to_owned());
         Ok(())
     })?;
-    recover(&store)?;
+    recover_with_boot(
+        &store,
+        Processes::read,
+        Some("current-kernel-boot".into()),
+        2,
+    )?;
     let after_first_recovery = metric_outcome_lines(&metrics(&store)?);
     drop(store);
 
     let reopened = Store::open(&root.path().join("queue"), &root.path().join("policy.json"))?;
-    recover(&reopened)?;
+    recover_with_boot(
+        &reopened,
+        Processes::read,
+        Some("current-kernel-boot".into()),
+        2,
+    )?;
     let before_prune = metric_outcome_lines(&metrics(&reopened)?);
     assert_eq!(after_first_recovery, before_prune);
     assert_eq!(prune(&reopened)?, 2);
@@ -3458,4 +3478,78 @@ fn metric_outcome_lines(text: &str) -> Vec<String> {
         .filter(|line| line.starts_with("ix_build_builds_total{"))
         .map(str::to_owned)
         .collect()
+}
+
+/// Trace: FR-015-AC-3, FR-015-AC-10
+/// Provenance: SWM-405
+#[test]
+fn missing_ledger_after_pruning_cannot_publish_a_counter_reset() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    cancel(&store, &id)?;
+    prune(&store)?;
+    let path = store.path.join("metrics.json");
+    let ledger = std::fs::read(&path)?;
+    let output = root.path().join("collector.prom");
+    metrics_to_file(&store, &output)?;
+    let before = std::fs::read(&output)?;
+    std::fs::remove_file(&path)?;
+    assert!(metrics_to_file(&store, &output).is_err());
+    assert!(status(&store).is_err());
+    assert_eq!(std::fs::read(&output)?, before);
+    std::fs::write(&path, ledger)?;
+    assert!(metrics(&store)?.contains("outcome=\"cancelled\"} 1"));
+    Ok(())
+}
+
+/// Trace: FR-005-AC-8, FR-015-AC-1
+/// Provenance: SWM-405
+#[test]
+fn scope_peak_records_success_and_watchdog_keeps_the_highest_sample() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    store.transaction(|state, _| {
+        let request = state.find_mut(&id)?;
+        request.lease_record = Some(LeaseRecord::default());
+        for bytes in [100, 150, 110] {
+            crate::watchdog::observe_memory_sample(
+                request,
+                crate::model::MemorySample {
+                    contributors: vec![],
+                    bytes,
+                    metric: crate::model::MemoryMetric::Rss,
+                },
+                200,
+            );
+        }
+        assert_eq!(
+            request
+                .lease_record
+                .as_ref()
+                .and_then(|r| r.memory_sample.as_ref())
+                .map(|s| s.bytes),
+            Some(150)
+        );
+        record_scope_peak(
+            request,
+            &CgroupOomEvidence {
+                peak_bytes: Some(180),
+                ..Default::default()
+            },
+        );
+        let sample = request
+            .lease_record
+            .as_ref()
+            .and_then(|r| r.memory_sample.as_ref())
+            .ok_or_else(|| Error::new(ErrorCode::State, "peak missing"))?;
+        assert_eq!(sample.bytes, 180);
+        assert!(matches!(
+            sample.metric,
+            crate::model::MemoryMetric::CgroupMemoryPeak
+        ));
+        assert_eq!(request.stop, None);
+        Ok(())
+    })
 }

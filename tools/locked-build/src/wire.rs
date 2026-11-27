@@ -310,6 +310,8 @@ pub struct QueueHistogram {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MetricsSnapshot {
+    /// Durable build telemetry and current capacity/policy gauges.
+    pub telemetry: Vec<MetricFamily>,
     /// Completed/refused attempts by outcome.
     pub ix_build_requests_total: Vec<OutcomeCounter>,
     /// Abnormal attempts by stable code.
@@ -538,4 +540,67 @@ mod tests {
             serde_json::from_str::<StatusProjection>(r#"{"requests":[],"events":[],"future":42}"#);
         assert!(status.is_ok());
     }
+}
+
+/// Numeric Prometheus sample, preserving integer counters in the durable ledger.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MetricValue {
+    /// Exact durable count.
+    Integer(u64),
+    /// Finite measured value.
+    Number(f64),
+}
+impl std::fmt::Display for MetricValue {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Integer(n) => n.fmt(out),
+            Self::Number(n) => n.fmt(out),
+        }
+    }
+}
+/// Prometheus metric family type.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricKind {
+    /// Monotonic cumulative count.
+    Counter,
+    /// Snapshot measurement.
+    Gauge,
+    /// Cumulative buckets, sum and count.
+    Histogram,
+}
+impl MetricKind {
+    /// Prometheus text spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Counter => "counter",
+            Self::Gauge => "gauge",
+            Self::Histogram => "histogram",
+        }
+    }
+}
+/// One sample of a family, shared by status, persistence and the exporter.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricSample {
+    /// Empty for scalar families, or _bucket, _sum, _count for histograms.
+    pub suffix: String,
+    /// Bounded label values. Request IDs and commands are excluded.
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Sample value.
+    pub value: MetricValue,
+}
+/// A complete additional telemetry family in status JSON.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricFamily {
+    /// Stable ix_build_* name.
+    pub name: String,
+    /// Prometheus HELP text.
+    pub help: String,
+    /// Sample semantics.
+    pub kind: MetricKind,
+    /// Scalar samples or histogram bucket/sum/count samples.
+    pub samples: Vec<MetricSample>,
 }

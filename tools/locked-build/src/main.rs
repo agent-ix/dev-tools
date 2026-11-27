@@ -13,6 +13,7 @@ mod runtime;
 mod sample;
 mod scheduler;
 mod store;
+mod telemetry;
 mod watchdog;
 mod writable;
 
