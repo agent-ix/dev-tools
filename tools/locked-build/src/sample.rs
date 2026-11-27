@@ -237,13 +237,30 @@ impl SamplerConfig {
                 format!("sampler config cannot be read safely: {}", error.kind()),
             )
         })?;
-        let config: Self = serde_json::from_slice(&bytes)
+        let mut config: Self = serde_json::from_slice(&bytes)
             .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        config.validate_cache_paths()?;
+        config
+            .cache
+            .resolve_paths(path.parent().unwrap_or_else(|| Path::new(".")))?;
         config.validate()?;
         Ok(config)
     }
 
+    fn validate_cache_paths(&self) -> Result<()> {
+        for (name, path) in [
+            ("cache.remote_report_file", &self.cache.remote_report_file),
+            ("cache.remote_status_file", &self.cache.remote_status_file),
+        ] {
+            if let Some(path) = path {
+                validate_absolute(path, name)?;
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
+        self.validate_cache_paths()?;
         if self.schema_version != 1 || self.host.is_empty() || self.host.len() > 128 {
             return Err(Error::new(
                 ErrorCode::Configuration,
@@ -2151,5 +2168,31 @@ mod lease_tests {
             lease_health_from_processes(&state(vec![running]), &rows, Some("pid:[22]")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod cache_path_tests {
+    use super::*;
+    /// Provenance: SWM-409 delta review; standalone snapshot files must be absolute at input.
+    #[test]
+    fn sample_rejects_relative_remote_snapshot_paths()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("sampler.json");
+        for key in ["remote_report_file", "remote_status_file"] {
+            fs::write(
+                &path,
+                serde_json::to_vec(
+                    &serde_json::json!({"schema_version":1,"host":"luna","busy_source":{"kind":"cargo_process_trees","proc_root":"/proc","owner_uid":1000,"cargo_command_name":"cargo","build_test_commands":["build"]},"cache":{(key):"relative.json"}}),
+                )?,
+            )?;
+            let error = SamplerConfig::read(&path)
+                .err()
+                .ok_or("relative path accepted")?;
+            assert!(error.to_string().contains(key));
+            assert!(error.to_string().contains("absolute"));
+        }
+        Ok(())
     }
 }

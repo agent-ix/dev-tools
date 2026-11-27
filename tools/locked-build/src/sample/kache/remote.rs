@@ -10,12 +10,43 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub(super) fn backend(config: &Value) -> Option<&'static str> {
-    match config["values"]["cache"]["remote"]["type"].as_str()? {
-        "s3" => Some("s3"),
-        "gcs" => Some("gcs"),
-        "filesystem" | "fs" => Some("filesystem"),
-        "oci" => Some("oci"),
-        _ => None,
+    let remote = config["values"]["cache"]["remote"].as_object()?;
+    let kind = match remote.get("type") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => {
+            let value = value.trim().to_ascii_lowercase();
+            (!value.is_empty()).then_some(value)
+        }
+        _ => return None,
+    };
+    let nonempty = |key: &str| {
+        remote
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    match kind.as_deref() {
+        Some("s3") => Some("s3"),
+        Some("gcs") => Some("gcs"),
+        Some("filesystem" | "fs") => Some("filesystem"),
+        Some("oci") => Some("oci"),
+        Some(_) => None,
+        None => {
+            if remote.get("repository").is_some_and(|v| !v.is_null())
+                || remote.get("insecure").is_some_and(|v| !v.is_null())
+            {
+                return None;
+            }
+            let s3 = ["bucket", "endpoint", "region", "profile", "user_agent"]
+                .into_iter()
+                .any(nonempty);
+            let filesystem = ["path", "atomic_write_dir"].into_iter().any(nonempty);
+            match (s3, filesystem) {
+                (true, true) | (false, false) => None,
+                (true, false) => Some("s3"),
+                (false, true) => Some("filesystem"),
+            }
+        }
     }
 }
 

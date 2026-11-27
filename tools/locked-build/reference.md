@@ -405,3 +405,38 @@ Collection reads atomic state snapshots without taking the scheduler write lock.
 
 See [metric semantics](monitoring/metrics.md) for the family inventory, label bounds, duration clocks, and upgrade behavior.
 See [scrape build telemetry](monitoring/README.md) for host installation and monitoring configuration.
+
+## Kache wrapper policy
+
+Kache is selected per admitted request when its executable is present and answers `--version` successfully with a kache version.
+The version subprocess has a 500 ms response deadline and a four KiB output limit. It starts outside the command-start transaction lock.
+The health check does not compile, restart a daemon, or edit a kache or Cargo configuration file.
+
+`cache.enabled` defaults to true. Set it to false to disable the wrapper on that host.
+`cache.executable` optionally selects a binary relative to the policy file; otherwise discovery uses the configured telemetry executable or PATH.
+A policy executable takes precedence over PATH for both wrapper selection and telemetry.
+The executable is passed as an absolute `RUSTC_WRAPPER` value to the admitted command.
+Disabled, missing, unhealthy, or changed-policy selections set an empty value, which also disables an inherited Cargo-config wrapper.
+A skipped cache never refuses the command.
+
+`cache.mode` defaults to local permission. Shared mode permits the already configured remote while retaining local fallback.
+The input spelling both is a compatibility alias of shared; both serialize and report as shared.
+Local mode preserves the caller's existing KACHE_LOCAL_ONLY=true or1 value without replacing it.
+They do not provision a remote endpoint. Existing jobs, test threads, memory leases, and target-directory limits remain unchanged.
+The lease record stores `cache_wrapper` and `cache_wrapper_status` beside duration and memory evidence.
+Old records default to an unrecorded decision. Cache observations remain host-level; activity sessions cannot be joined reliably to individual lease IDs.
+
+## Cache and target cleanup
+
+Kache owns its content-addressed store and store garbage collection. Locked-build does not delete cache entries or invoke kache clean.
+The build-lane owner and minder own idle target cleanup after checking processes and active leases.
+Point locked-build target limits at owner target directories, never the kache store.
+Use kache's target cleanup only on idle targets; avoid simultaneous target cleanup by two owners.
+Store garbage collection and target deletion reclaim different references to cloned files, so their reported byte totals must not be added as physical disk savings.
+
+## Build provenance
+
+`--version` includes the commit and dirty state captured at compilation. `ix_build_info` carries the same commit and dirty labels.
+The build reads Git metadata or accepts `IX_BUILD_COMMIT` and `IX_BUILD_DIRTY` from the build environment.
+Use a full commit SHA and true/false dirty value for release builds. Unavailable or invalid commit provenance becomes unknown and dirty=true.
+The installed executable performs no Git call for provenance. Version-skew detection compares compiled commit, dirty state, and package version.

@@ -54,7 +54,7 @@ pub(crate) fn append(
     deadline: Instant,
     policy: &crate::config::CachePolicy,
 ) {
-    let binary = executable();
+    let binary = policy.executable_or(executable);
     append_for_policy(
         text,
         host,
@@ -73,11 +73,12 @@ pub(super) fn append_with_binary(
     binary: Option<&Path>,
     policy: &crate::config::CachePolicy,
 ) {
+    let binary = policy.executable_or(|| binary.map(Path::to_path_buf));
     append_for_policy(
         text,
         host,
         ledger_path,
-        binary,
+        binary.as_deref(),
         expectation_override(),
         Instant::now() + TIMEOUT,
         policy,

@@ -81,7 +81,7 @@ Scrapes project an open interval without changing persisted state.
 - `ix_build_recover_events_total`: registered replacements and completed orphan finalizations.
 - `ix_build_boot_changes_total`: detected host boot changes.
 - `ix_build_telemetry_dropped_total`: durable dropped-event counter, initially zero.
-- `ix_build_info{version,policy_hash}`: exporter version and effective policy fingerprint, with value one.
+- `ix_build_info{version,commit,dirty,policy_hash}`: compiled provenance and effective policy fingerprint, with value one.
 - `ix_build_policy_hold_seconds`: maximum lease duration.
 - `ix_build_policy_maximum_load`: maximum admission load average.
 - `ix_build_export_timestamp_seconds`: last successful refresh time in UTC seconds.
@@ -188,8 +188,8 @@ Per-build cache attribution requires an identifier shared with the admission req
 
 ## Shared-cache policy and observations
 
-`cache.mode` accepts `local`, `shared`, or `both`. The default permits local reuse and sets `KACHE_LOCAL_ONLY=true` for each admitted command.
-Shared modes explicitly permit the configured remote and retain local fallback; the wrapper rollout is separate.
+`cache.mode` accepts `local` or `shared`; `both` is a compatibility alias of shared. The default permits local reuse and sets `KACHE_LOCAL_ONLY=true` for each admitted command.
+Shared mode explicitly permits the configured remote and retains local fallback; the wrapper rollout is separate.
 `cache.cache_role` defaults to `client`; set `server` for a cache-serving host.
 `ix_build_cache_policy_info{host,cache_role,cache_mode}` supports host joins for future disk/network panels.
 No host is classified by its name.
@@ -213,3 +213,7 @@ They are omitted. Live backend reachability, authentication, and real compiler f
 
 Per-store `store_inventory_bytes` uses `blob_stats.total_blob_size` for physical payload bytes; it is omitted when that source is unavailable.
 The aggregate `store_bytes` remains the physical disk gauge.
+
+`ix_build_info` includes compile-time `commit` and `dirty` labels alongside package version and policy fingerprint.
+Unknown build provenance reports commit unknown with dirty=true; it never consults runtime Git state.
+Standalone sampler `cache.remote_report_file` and `cache.remote_status_file` inputs must be absolute paths.

@@ -297,10 +297,31 @@ fn telemetry_every_dashboard_question_matches_hand_written_replay_values() -> Re
         ]
         .map(str::to_owned),
     );
+    covered.extend(
+        [
+            "ix_kache:miss_ratio",
+            "ix_kache:hits_1h",
+            "ix_kache:misses_1h",
+            "ix_kache:time_saved_seconds_1h",
+            "ix_kache:local_hits_1h",
+            "ix_kache:remote_hits_1h",
+            "ix_build:run_p50_seconds",
+            "ix_build:run_p95_seconds",
+            "ix_build:builds_1h",
+            "ix_build:failures_1h",
+            "ix_build:storage_free_bytes",
+            "ix_build:storage_io_utilisation_pct",
+            "ix_kache_store_bytes",
+            "ix_kache_store_limit_bytes",
+            "ix_kache_entries",
+            "ix_kache_remote_reachable",
+        ]
+        .map(str::to_owned),
+    );
     let panels = dashboard["panels"]
         .as_array()
         .ok_or_else(|| Error::new(ErrorCode::State, "dashboard panels missing"))?;
-    assert_eq!(panels.iter().filter(|p| p["type"] == "row").count(), 16);
+    assert_eq!(panels.iter().filter(|p| p["type"] == "row").count(), 3);
     for panel in panels {
         if let Some(targets) = panel["targets"].as_array() {
             for target in targets {

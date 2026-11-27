@@ -2169,6 +2169,7 @@ fn start_command(
         }
         Ok((config.clone(), request.memory_cap_bytes))
     })?;
+    let prepared_cache = crate::kache_wrapper::Prepared::discover(&config_snapshot.cache);
     let (mut enforcement, _probe_launch_spec) = select_lease_launch(
         LauncherPlatform::current(),
         request
@@ -2252,7 +2253,10 @@ fn start_command(
         lease_record.cargo_incremental_overwrote_caller = incremental_overwrote_caller;
         lease_record.cargo_target_dir = target_dir;
         lease_record.cargo_target_dir_overwrote_caller = target_overwrote_caller;
-        config.cache.apply(&mut command);
+        let (cache_wrapper, cache_wrapper_status) =
+            prepared_cache.apply(&mut command, &config.cache);
+        lease_record.cache_wrapper = cache_wrapper;
+        lease_record.cache_wrapper_status = cache_wrapper_status;
         let child = command.spawn()?;
         lease_record.command = Processes::read().member_identity(child.id());
         state.find_mut(&request.id)?.lease_record = Some(lease_record);

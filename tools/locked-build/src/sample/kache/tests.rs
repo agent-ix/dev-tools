@@ -456,7 +456,7 @@ fn kache_verified_remote_kinds_and_outage_leave_local_observations_available() -
     std::fs::write(&report, include_str!("../fixtures/remote-report.json"))?;
     std::fs::write(&status, include_str!("../fixtures/unreachable-doctor.json"))?;
     let policy = crate::config::CachePolicy {
-        mode: crate::config::CacheMode::Both,
+        mode: crate::config::CacheMode::Shared,
         remote_report_file: Some(report),
         remote_status_file: Some(status),
         ..Default::default()
@@ -498,6 +498,7 @@ fn kache_policy_defaults_local_and_does_not_enable_a_wrapper() -> Result<()> {
     let policy: crate::config::CachePolicy = serde_json::from_str("{}")?;
     assert!(!policy.shared_enabled());
     let mut command = std::process::Command::new("/usr/bin/true");
+    command.env_remove("KACHE_LOCAL_ONLY");
     policy.apply(&mut command);
     let environment = command.get_envs().collect::<Vec<_>>();
     assert!(environment.contains(&(
@@ -510,7 +511,7 @@ fn kache_policy_defaults_local_and_does_not_enable_a_wrapper() -> Result<()> {
     assert!(server.shared_enabled());
     let mut text = String::new();
     server.append_info(&mut text, "future-server");
-    assert!(text.contains("cache_role=\"server\",cache_mode=\"both\""));
+    assert!(text.contains("cache_role=\"server\",cache_mode=\"shared\""));
     assert!(serde_json::from_str::<crate::config::CachePolicy>(r#"{"mode":"invented"}"#).is_err());
     Ok(())
 }
@@ -528,7 +529,7 @@ fn kache_shared_maximum_inventory_budget_and_missing_remote_data_are_fail_open()
         .collect();
     let config: Value = serde_json::from_str(include_str!("../fixtures/s3-config.json"))?;
     let policy = crate::config::CachePolicy {
-        mode: crate::config::CacheMode::Both,
+        mode: crate::config::CacheMode::Shared,
         ..Default::default()
     };
     let mut text = String::new();
@@ -632,5 +633,92 @@ fn kache_late_source_failure_publishes_only_failure_metrics() -> Result<()> {
     );
     assert!(!partial.contains("hits_total"));
     assert_eq!(value(&partial, "scrape_error")?, 1.);
+    Ok(())
+}
+
+/// Provenance: SWM-409 delta review; real kache type normalization and file-field inference.
+#[test]
+fn kache_backend_type_normalization_alias_and_inference() -> Result<()> {
+    for (remote_config, expected) in [
+        (
+            serde_json::json!({"type":" S3 ","bucket":"cache"}),
+            Some("s3"),
+        ),
+        (
+            serde_json::json!({"type":"fs","path":"/cache"}),
+            Some("filesystem"),
+        ),
+        (
+            serde_json::json!({"type":" FS ","path":"/cache"}),
+            Some("filesystem"),
+        ),
+        (
+            serde_json::json!({"type":" GCS ","bucket":"cache"}),
+            Some("gcs"),
+        ),
+        (
+            serde_json::json!({"type":" OCI ","repository":"registry/cache"}),
+            Some("oci"),
+        ),
+        (serde_json::json!({"bucket":" cache "}), Some("s3")),
+        (serde_json::json!({"type":" ","bucket":"cache"}), Some("s3")),
+        (serde_json::json!({"path":"/cache"}), Some("filesystem")),
+        (serde_json::json!({"bucket":"cache","path":"/cache"}), None),
+        (serde_json::json!({"repository":"registry/cache"}), None),
+    ] {
+        let config = serde_json::json!({"values":{"cache":{"remote":remote_config}}});
+        assert_eq!(remote::backend(&config), expected, "{config}");
+    }
+    Ok(())
+}
+
+/// Provenance: SWM-409 delta review; full remote observations plus four stores retain the <=60 budget.
+#[test]
+fn kache_four_stores_and_inferred_remote_emit_metrics_within_budget() -> Result<()> {
+    let (mut stats, mut config, explain) = fixtures()?;
+    let store = stats["stores"][0].clone();
+    stats["stores"] = (0..4)
+        .map(|index| {
+            let mut s = store.clone();
+            s["path"] = format!("/store/{index}").into();
+            s
+        })
+        .collect();
+    config["values"]["cache"]["local_only"] = false.into();
+    config["values"]["cache"]["remote"] = serde_json::json!({"bucket":"cache"});
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("report.json");
+    let mut report: Value = serde_json::from_str(include_str!("../fixtures/remote-report.json"))?;
+    report["network"]["configured_backend"] = "s3".into();
+    std::fs::write(&path, serde_json::to_vec(&report)?)?;
+    let policy = crate::config::CachePolicy {
+        mode: crate::config::CacheMode::Shared,
+        remote_report_file: Some(path),
+        ..Default::default()
+    };
+    let mut text = String::new();
+    let mut ledger = Ledger::default();
+    render(&stats, &config, &explain, "luna", &mut ledger, &mut text)?;
+    remote::observe(
+        Path::new("/missing/kache"),
+        &stats,
+        &config,
+        "luna",
+        &mut ledger,
+        &mut text,
+        Instant::now() + TIMEOUT,
+        &policy,
+    );
+    emit(&mut text, "daemon_expected", "gauge", "luna", "", "", 1);
+    policy.append_info(&mut text, "luna");
+    assert_eq!(value(&text, "remote_observation_available")?, 1.);
+    assert_eq!(value(&text, "remote_push_total")?, 7.);
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("ix_kache_store_inventory_bytes{"))
+            .count(),
+        4
+    );
+    assert!(text.lines().filter(|line| !line.starts_with('#')).count() <= 60);
     Ok(())
 }

@@ -100,10 +100,35 @@ pub(crate) struct CommandOutcome {
     pub signal: Option<i32>,
 }
 
+/// Per-request wrapper decision, recorded alongside measured lease limits.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheWrapperStatus {
+    /// Old records contain no wrapper selection evidence.
+    #[default]
+    Unrecorded,
+    /// A runnable kache binary was selected.
+    Enabled,
+    /// Host policy disabled the wrapper.
+    Disabled,
+    /// No executable was discovered.
+    Missing,
+    /// The selected executable failed its bounded version check.
+    Unhealthy,
+    /// Policy changed after preparation; this request runs without a wrapper.
+    PolicyChanged,
+}
+
 /// Effective build limits and memory enforcement selected for a running lease.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseRecord {
+    /// Effective kache executable, absent when caching was skipped.
+    #[serde(default)]
+    pub cache_wrapper: Option<PathBuf>,
+    /// Why the per-request wrapper was selected or skipped.
+    #[serde(default)]
+    pub cache_wrapper_status: CacheWrapperStatus,
     /// Observed kernel OOM-kill counter for this command's memory scope.
     #[serde(default)]
     pub oom_kill_count: u64,
