@@ -22,6 +22,43 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "explicit native Linux unshare --pid/no-user-bus regression"]
+fn unshare_pid_namespace_keeps_supervision_through_child_exit() -> TestResult {
+    let output = Command::new("unshare")
+        .args([
+            "--user",
+            "--map-root-user",
+            "--pid",
+            "--fork",
+            "--mount-proc",
+        ])
+        .arg(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "namespace_local_watchdog_survives_mutation_style_child_churn",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=4",
+        ])
+        .env("IX_BUILD_PID_NAMESPACE_FIXTURE", "1")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent-locked-build-test-bus",
+        )
+        .env("XDG_RUNTIME_DIR", "/nonexistent-locked-build-test-runtime")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "unshare PID fixture failed (not skipped):\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
 #[ignore = "native Linux PID namespace/no-user-bus churn lane"]
 fn namespace_local_watchdog_survives_mutation_style_child_churn() -> TestResult {
     let harness = Harness::new(1, 120000)?;
@@ -84,6 +121,35 @@ fn namespace_local_watchdog_survives_mutation_style_child_churn() -> TestResult 
             .to_string_lossy()
             .as_ref()
     );
+    if std::env::var_os("IX_BUILD_PID_NAMESPACE_FIXTURE").is_some() {
+        let state: Value = serde_json::from_slice(&fs::read(harness.state.join("state.json"))?)?;
+        let request = &state["requests"][0];
+        for role in ["worker", "watchdog"] {
+            assert!(
+                request[role]["pid"]
+                    .as_u64()
+                    .is_some_and(|pid| (2..128).contains(&pid)),
+                "expected namespace-local {role} PID: {request}"
+            );
+            assert!(
+                request[role]["started_seconds"]
+                    .as_u64()
+                    .is_some_and(|start| start > 0)
+            );
+        }
+        assert!(
+            request["lease_record"]["command"]["pid"]
+                .as_u64()
+                .is_some_and(|pid| (2..128).contains(&pid))
+        );
+        eprintln!(
+            "namespace-local lease survived: worker={} watchdog={} command={} namespace={}",
+            request["worker"]["pid"],
+            request["watchdog"]["pid"],
+            request["lease_record"]["command"]["pid"],
+            request["pid_namespace"]
+        );
+    }
     Ok(())
 }
 
