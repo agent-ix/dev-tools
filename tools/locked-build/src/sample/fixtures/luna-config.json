@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "command": "config",
+  "success": true,
+  "path": "redacted",
+  "values": {
+    "cache": {
+      "explain_miss": true,
+      "local_max_size": "80GiB",
+      "local_only": true,
+      "local_store": "redacted"
+    }
+  }
+}

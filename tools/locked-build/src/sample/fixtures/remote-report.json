@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "command": "stats",
+  "success": true,
+  "network": {
+    "configured_backend": "filesystem",
+    "bytes_up": 123456,
+    "bytes_down": 456789,
+    "uploads_ok": 7,
+    "uploads_failed": 2,
+    "downloads_ok": 11,
+    "downloads_failed": 3,
+    "avg_download_ms": 125,
+    "p95_download_ms": 250
+  }
+}

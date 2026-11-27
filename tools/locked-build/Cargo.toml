@@ -8,6 +8,7 @@ description = "Persistent fair admission and supervision for shared build hosts"
 repository = "https://github.com/agent-ix/dev-tools"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 nix = { version = "0.30", features = ["signal", "process", "fs", "user"] }
 rustix = { version = "1", features = ["time", "process"] }

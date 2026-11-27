@@ -36,12 +36,84 @@ pub(crate) enum OnMissingCgroup {
     RssWatchdog,
 }
 
+/// Per-host cache permission; shared modes always retain local fallback.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMode {
+    /// Local cache enabled; remote access disabled until policy enables it.
+    #[default]
+    Local,
+    /// Permit the configured shared remote, retaining local fallback.
+    Shared,
+    /// Permit both local reuse and the configured shared remote.
+    Both,
+}
+
+/// Role used to join cache-server disk/network panels to host telemetry.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheRole {
+    /// Build host consuming a cache.
+    #[default]
+    Client,
+    /// Host serving the cache; does not imply an exposed client-count metric.
+    Server,
+}
+
+/// Cache policy shared by request environments and telemetry.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CachePolicy {
+    /// Local is the default; shared access requires an explicit policy change.
+    pub mode: CacheMode,
+    /// Server or client role; never inferred from a host name.
+    pub cache_role: CacheRole,
+    /// Optional recent read-only full stats snapshot, instead of an extra CLI call.
+    pub remote_report_file: Option<PathBuf>,
+    /// Optional recent doctor JSON snapshot used for remote reachability evidence.
+    pub remote_status_file: Option<PathBuf>,
+}
+
+impl CachePolicy {
+    pub(crate) fn shared_enabled(&self) -> bool {
+        self.mode != CacheMode::Local
+    }
+    pub(crate) fn mode_label(&self) -> &'static str {
+        match self.mode {
+            CacheMode::Local => "local",
+            CacheMode::Shared => "shared",
+            CacheMode::Both => "both",
+        }
+    }
+    pub(crate) fn role_label(&self) -> &'static str {
+        match self.cache_role {
+            CacheRole::Client => "client",
+            CacheRole::Server => "server",
+        }
+    }
+    pub(crate) fn apply(&self, command: &mut std::process::Command) {
+        command.env(
+            "KACHE_LOCAL_ONLY",
+            if self.shared_enabled() {
+                "false"
+            } else {
+                "true"
+            },
+        );
+    }
+    pub(crate) fn append_info(&self, text: &mut String, host: &str) {
+        text.push_str(&format!("# HELP ix_build_cache_policy_info Host cache permissions and role.\n# TYPE ix_build_cache_policy_info gauge\nix_build_cache_policy_info{{host=\"{}\",cache_role=\"{}\",cache_mode=\"{}\"}} 1\n", crate::metrics::escape_label(host), self.role_label(), self.mode_label()));
+    }
+}
+
 /// Admission policy. Every capacity and limit is explicitly configured.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Stable host label attached to telemetry.
     pub host: String,
+    /// Cache mode, role, and optional read-only observation files.
+    pub cache: CachePolicy,
     /// Currently enabled resource units; may shrink without killing work.
     pub capacity_units: u32,
     /// Maximum feasible request size, independent of temporary shrink.
@@ -123,6 +195,7 @@ impl Default for Config {
         ]);
         Self {
             host: "localhost".to_owned(),
+            cache: CachePolicy::default(),
             capacity_units: 1,
             maximum_units: 1,
             memory_per_unit_bytes: 0,
@@ -228,6 +301,17 @@ impl Config {
             && real_cargo.is_relative()
         {
             *real_cargo = directory.join(&*real_cargo);
+        }
+        for file in [
+            &mut config.cache.remote_report_file,
+            &mut config.cache.remote_status_file,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if file.is_relative() {
+                *file = directory.join(&*file);
+            }
         }
         config.validate()?;
         Ok(config)

@@ -318,6 +318,77 @@
           "annotations": {
             "summary": "Locked-build RunningStuck"
           }
+        },
+        {
+          "record": "ix_kache:hit_ratio",
+          "expr": "rate(ix_kache_hits_total[1h]) / clamp_min(rate(ix_kache_hits_total[1h]) + rate(ix_kache_misses_total[1h]), 0.000001)"
+        },
+        {
+          "record": "ix_kache:store_fill_ratio",
+          "expr": "ix_kache_store_bytes / clamp_min(ix_kache_store_limit_bytes, 1)"
+        },
+        {
+          "record": "ix_kache:evicted_bytes_1h",
+          "expr": "increase(ix_kache_gc_evicted_bytes_total[1h])"
+        },
+        {
+          "record": "ix_kache:permit_wait_share",
+          "expr": "rate(ix_kache_permit_wait_seconds_total[1h]) / clamp_min(rate(ix_kache_miss_compile_seconds_total[1h]) + rate(ix_kache_hit_elapsed_seconds_total[1h]), 0.000001)"
+        },
+        {
+          "alert": "KacheHitRatioCollapse",
+          "expr": "(ix_kache:hit_ratio < 0.20) and (increase(ix_kache_hits_total[1h]) + increase(ix_kache_misses_total[1h]) >= 10)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache hit ratio below 20% while compiles are active"
+          }
+        },
+        {
+          "alert": "KacheStoreNearLimit",
+          "expr": "(ix_kache:store_fill_ratio > 0.90) and (ix_kache_store_limit_bytes > 0)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache store above 90% of its limit"
+          }
+        },
+        {
+          "alert": "KacheEvictionThrash",
+          "expr": "(ix_kache:evicted_bytes_1h > ix_kache_store_limit_bytes) and (ix_kache_store_limit_bytes > 0) and (resets(ix_kache_gc_evicted_bytes_total[1h]) == 0)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache evicted more than one store capacity in an hour"
+          }
+        },
+        {
+          "alert": "KacheScrapeFailing",
+          "expr": "(min by (host) (ix_kache_up) == 0) and on (host) (ix_kache_daemon_expected == 1)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache unavailable while this host expects its daemon"
+          }
+        },
+        {
+          "alert": "KachePermitWaitHigh",
+          "expr": "(ix_kache:permit_wait_share > 0.20) and (increase(ix_kache_hits_total[1h]) + increase(ix_kache_misses_total[1h]) >= 10)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache permit wait exceeds 20% of compile elapsed time"
+          }
         }
       ]
     }

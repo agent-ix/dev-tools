@@ -28,9 +28,10 @@ Use a persistent shared state directory and an installed locked-build. Read the 
 ## Expected output
 
 The checks exit successfully. `ix_build_export_timestamp_seconds` advances and `ix_build_export_error` remains zero.
-The dashboard has fifteen rows covering wait percentiles, starvation, resource use, scheduler health, fairness, failures, and process ownership.
+The dashboard has sixteen rows covering wait percentiles, starvation, resource use, scheduler health, fairness, failures, process ownership, and kache cache health.
 
 Collection runs with low CPU and I/O priority. Collection has a six-second deadline and publication has an eight-second deadline. Linux also limits the service to ten seconds.
+Set `IX_BUILD_KACHE` to the absolute kache executable path in the service environment if its `PATH` omits kache.
 A failed refresh preserves previous measurements and marks the export error.
 Back up state, policy, and the cumulative metrics ledger together. Restore their matching backup if the ledger is damaged.
 

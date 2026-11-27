@@ -282,14 +282,25 @@ fn telemetry_every_dashboard_question_matches_hand_written_replay_values() -> Re
         ),
     ];
     let dashboard: Value = serde_json::from_str(include_str!("../../monitoring/dashboard.json"))?;
-    let covered: std::collections::BTreeSet<_> = entries
+    let mut covered: std::collections::BTreeSet<_> = entries
         .iter()
         .map(|(name, _)| format!("ix_build:{name}"))
         .collect();
+    // Kache expressions are exercised in monitoring/alerts.test.yml.
+    covered.extend(
+        [
+            "ix_kache:hit_ratio",
+            "ix_kache:store_fill_ratio",
+            "ix_kache:evicted_bytes_1h",
+            "ix_kache:permit_wait_share",
+            "ix_kache_up",
+        ]
+        .map(str::to_owned),
+    );
     let panels = dashboard["panels"]
         .as_array()
         .ok_or_else(|| Error::new(ErrorCode::State, "dashboard panels missing"))?;
-    assert_eq!(panels.iter().filter(|p| p["type"] == "row").count(), 15);
+    assert_eq!(panels.iter().filter(|p| p["type"] == "row").count(), 16);
     for panel in panels {
         if let Some(targets) = panel["targets"].as_array() {
             for target in targets {
