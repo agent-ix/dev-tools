@@ -1383,6 +1383,13 @@ fn cancel_build_lock_scenario(nested_scope: bool) -> TestResult {
         lock.try_lock(),
         Err(std::fs::TryLockError::WouldBlock)
     ));
+    // The child can publish its marker before the launch transaction commits.
+    // Status intentionally serves the previous snapshot while that writer runs.
+    observed(|| {
+        harness
+            .request(0)
+            .is_ok_and(|row| row["lease_record"].is_object())
+    });
     let request = harness.request(0)?;
     if nested_scope {
         assert!(
@@ -1402,7 +1409,7 @@ fn cancel_build_lock_scenario(nested_scope: bool) -> TestResult {
     let launch_pid = i32::try_from(
         request["lease_record"]["command"]["pid"]
             .as_u64()
-            .ok_or("launch PID missing")?,
+            .ok_or_else(|| format!("launch PID missing from committed lease: {request}"))?,
     )?;
     let group = nix::unistd::getpgid(Some(Pid::from_raw(command_pid)))?;
     if !nested_scope {
