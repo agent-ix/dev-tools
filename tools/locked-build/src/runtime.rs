@@ -407,6 +407,8 @@ pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<Child> {
 /// Redacted snapshot suitable for deterministic monitoring consumers.
 #[derive(Serialize)]
 pub struct Report {
+    /// Effective shared admission state directory.
+    pub state_path: std::path::PathBuf,
     /// Report schema version.
     pub schema_version: u32,
     /// Stable store identity for event deduplication.
@@ -640,6 +642,7 @@ fn status_with_clock(
             .collect();
         let used = state.used();
         Ok(Report {
+            state_path: store.path.clone(),
             schema_version: 1,
             store_id: state.store_id.clone(),
             host: state.host.clone(),
@@ -1637,6 +1640,30 @@ fn target_directory(
 ) -> Result<Option<std::path::PathBuf>> {
     let Some(configured_root) = &config.target_root else {
         return Ok(None);
+    };
+    let fallback;
+    let configured_root = if create {
+        match crate::writable::probe_directory(configured_root) {
+            Ok(()) => configured_root,
+            Err(error) if crate::writable::access_denied(&error) => {
+                fallback = crate::writable::shared_root()?.join("targets");
+                &fallback
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        fallback = crate::writable::shared_root()?.join("targets");
+        if request
+            .lease_record
+            .as_ref()
+            .and_then(|lease| lease.cargo_target_dir.as_deref())
+            .and_then(Path::parent)
+            == Some(fallback.as_path())
+        {
+            &fallback
+        } else {
+            configured_root
+        }
     };
     if create {
         std::fs::create_dir_all(configured_root)?;

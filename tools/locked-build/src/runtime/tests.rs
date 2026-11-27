@@ -8,6 +8,47 @@ use super::*;
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
 
+/// Provenance: SWM-374. Trace: FR-011-AC-7
+#[test]
+fn readonly_target_root_uses_shared_writable_targets() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = enqueue(
+        &store,
+        "swm-374-target-fixture",
+        "SWM-374",
+        1,
+        0,
+        None,
+        &["true".into()],
+    )?;
+    let mut policy = Config::read(&store.config_path)?;
+    let readonly = root.path().join("readonly");
+    std::fs::create_dir(&readonly)?;
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o500))?;
+    policy.target_root = Some(readonly.join("targets"));
+    let mut request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let result = target_directory(&policy, &request, true);
+    std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700))?;
+    let target = result?.ok_or_else(|| Error::new(ErrorCode::State, "missing fallback target"))?;
+    assert_eq!(
+        target.parent(),
+        Some(crate::writable::shared_root()?.join("targets").as_path())
+    );
+    std::fs::write(target.join("test-output"), b"hand-written")?;
+    request.lease_record = Some(crate::model::LeaseRecord {
+        cargo_target_dir: Some(target.clone()),
+        ..Default::default()
+    });
+    assert_eq!(
+        target_directory(&policy, &request, false)?,
+        Some(target.clone())
+    );
+    std::fs::remove_dir_all(target)?;
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct TestClock {
     now_ms: u64,
