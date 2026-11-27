@@ -431,7 +431,8 @@ fn hold_timeout_kills_the_group_before_releasing_capacity() -> TestResult {
         "{run_output}"
     );
     assert_eq!(harness.request(0)?["state"], "timed_out");
-    let reason = harness.request(0)?["reason"]
+    let request = harness.request(0)?;
+    let reason = request["reason"]
         .as_str()
         .ok_or("reason missing")?
         .to_owned();
