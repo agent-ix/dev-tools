@@ -1,7 +1,7 @@
 CARGO ?= cargo
 PREFIX ?= $(HOME)/.local
 
-.PHONY: build fmt fmt-check lint test ci install clean
+.PHONY: build fmt fmt-check lint test ci install install-tools clean
 
 build:
 	$(CARGO) build --locked --release
@@ -22,6 +22,9 @@ ci: fmt-check lint test
 
 install:
 	$(CARGO) install --locked --path . --root $(PREFIX)
+
+install-tools:
+	$(CARGO) run --locked --release -j 4 -- install-tools
 
 clean:
 	$(CARGO) clean

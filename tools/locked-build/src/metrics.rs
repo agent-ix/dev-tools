@@ -23,10 +23,19 @@ enum PriorityClass {
     Point,
     Block,
     Periodic,
+    ArchTest,
+    Kani,
 }
 
 impl PriorityClass {
-    const ALL: [Self; 4] = [Self::MustFix, Self::Point, Self::Block, Self::Periodic];
+    const ALL: [Self; 6] = [
+        Self::MustFix,
+        Self::Point,
+        Self::Block,
+        Self::Periodic,
+        Self::ArchTest,
+        Self::Kani,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -34,6 +43,8 @@ impl PriorityClass {
             Self::Point => "point",
             Self::Block => "block",
             Self::Periodic => "periodic",
+            Self::ArchTest => "arch-test",
+            Self::Kani => "kani",
         }
     }
 
@@ -42,6 +53,8 @@ impl PriorityClass {
             "must-fix" => Self::MustFix,
             "point" => Self::Point,
             "block" => Self::Block,
+            "arch-test" => Self::ArchTest,
+            "kani" => Self::Kani,
             _ => Self::Periodic,
         }
     }

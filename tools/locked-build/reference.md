@@ -18,6 +18,15 @@ On first use, locked-build measures the host and writes a conservative policy.
 Use `locked-build policy show` to print it or `locked-build policy init --force`
 to regenerate it.
 
+`make install-tools` builds and copies the locked-build executable only when it
+changes, generates a measured policy on first install, installs the `cargo`
+shim, and writes `~/.local/share/dev-tools/installed.json`. It places the shim
+directory before `~/.local/bin` in `.profile`, `.bashrc`, and `.zshrc`.
+`locked-build check-install` compares the checked-in
+[`tool-versions.json`](tool-versions.json) pins with each executable's
+`--version` output. It prints one `ok` or `mismatch` line per tool and exits 1
+when any tool is missing or differs.
+
 | Field | Meaning |
 |---|---|
 | `host` | Stable host label for requests and samples. |
@@ -43,7 +52,7 @@ to regenerate it.
 | `cargo_incremental` | Optional incremental compilation setting; true sets `CARGO_INCREMENTAL=1`, false sets it to `0`. |
 | `target_root` | Optional root for owner-specific `CARGO_TARGET_DIR` directories. Relative paths resolve from the policy file. |
 | `max_bytes` | Optional target size limit; the target directory is deleted when it exceeds this many bytes at lease end. |
-| `priority_classes` | Mapping of `must-fix`, `point`, `block`, and `periodic` to numeric priorities. The largest value sets the accepted priority limit. |
+| `priority_classes` | Mapping of `must-fix`, `point`, `block`, `periodic`, `arch-test`, and `kani` to numeric priorities. The largest value sets the accepted priority limit. |
 | `real_cargo` | Optional Cargo executable path used when this binary is invoked with `argv[0]` basename `cargo`. Relative paths resolve from the policy file. |
 
 Explicit command-line `-j`/`--jobs` and `--test-threads` values, and explicit
@@ -61,7 +70,14 @@ and never followed. Reaching the bounded walk's entry limit marks the target
 oversized and removes the whole directory.
 `run --class NAME` looks up `NAME` in `priority_classes`; omitting class records
 class `periodic` and uses its configured priority, or zero when absent. Metrics
-use a `class` label with `must-fix`, `point`, `block`, or `periodic`.
+use a `class` label with `must-fix`, `point`, `block`, `periodic`, `arch-test`,
+or `kani`.
+
+`worktree-run --repository NAME --slot N --ticket T -- COMMAND` waits for the
+exclusive state-file lock for that repository slot, then submits an arch-test
+job as owner `arch-test:NAME:slot-N`, class `arch-test`, and one resource unit.
+Different slot numbers run concurrently. The Kani replacement is
+`run --class kani -- ...`.
 
 Scheduler commands and the PATH shim read policy from `--config`, then
 `LOCKED_BUILD_CONFIG`, then `$XDG_CONFIG_HOME/locked-build/policy.json` or

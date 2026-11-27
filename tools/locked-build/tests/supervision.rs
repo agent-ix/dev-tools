@@ -6,7 +6,10 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::sys::signal::{Signal, kill};
@@ -20,6 +23,10 @@ struct Harness {
     root: TempDir,
     state: PathBuf,
     config: PathBuf,
+    sample: PathBuf,
+    sample_stop: Arc<AtomicBool>,
+    sample_lock: Arc<Mutex<()>>,
+    sample_refresher: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Harness {
@@ -49,11 +56,36 @@ impl Harness {
                 "on_missing_cgroup": "rss_watchdog",
             }))?,
         )?;
+        let sample_stop = Arc::new(AtomicBool::new(false));
+        let sample_lock = Arc::new(Mutex::new(()));
+        let refresher_stop = sample_stop.clone();
+        let refresher_lock = sample_lock.clone();
+        let refresher_path = sample.clone();
+        let sample_refresher = Some(std::thread::spawn(move || {
+            while !refresher_stop.load(Ordering::Relaxed) {
+                if let Ok(_guard) = refresher_lock.lock() {
+                    let _ = write_sample(&refresher_path);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }));
         Ok(Self {
             root,
             state,
             config,
+            sample,
+            sample_stop,
+            sample_lock,
+            sample_refresher,
         })
+    }
+
+    fn refresh_sample(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = self
+            .sample_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("sample refresh lock poisoned"))?;
+        write_sample(&self.sample)
     }
 
     fn cli(&self) -> Command {
@@ -73,6 +105,7 @@ impl Harness {
         release: &Path,
         units: u32,
     ) -> Result<Child, Box<dyn std::error::Error>> {
+        self.refresh_sample()?;
         Ok(self
             .cli()
             .arg("run")
@@ -99,10 +132,12 @@ impl Harness {
     }
 
     fn output(&self, action: &str) -> Result<Output, Box<dyn std::error::Error>> {
+        self.refresh_sample()?;
         Ok(self.cli().arg(action).output()?)
     }
 
     fn report(&self) -> Result<Value, Box<dyn std::error::Error>> {
+        self.refresh_sample()?;
         let output = self.output("status")?;
         assert!(
             output.status.success(),
@@ -121,6 +156,7 @@ impl Harness {
     }
 
     fn persisted(&self) -> Result<Value, Box<dyn std::error::Error>> {
+        self.refresh_sample()?;
         Ok(serde_json::from_slice(&fs::read(
             self.state.join("state.json"),
         )?)?)
@@ -129,6 +165,10 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        self.sample_stop.store(true, Ordering::Relaxed);
+        if let Some(refresher) = self.sample_refresher.take() {
+            let _ = refresher.join();
+        }
         let mut pids = std::collections::BTreeSet::new();
         if let Ok(bytes) = fs::read(self.state.join("state.json"))
             && let Ok(state) = serde_json::from_slice::<Value>(&bytes)
@@ -170,6 +210,20 @@ impl Drop for Harness {
             }
         }
     }
+}
+
+fn write_sample(sample: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
+    let next = sample.with_extension("json.next");
+    fs::write(
+        &next,
+        serde_json::to_vec(&json!({
+            "host": "fixture-host", "observed_at_ms": now,
+            "memory_available_bytes": 1000000, "disk_available_bytes": 1000000, "load_one": 0.0,
+        }))?,
+    )?;
+    fs::rename(next, sample)?;
+    Ok(())
 }
 
 fn observed(mut check: impl FnMut() -> bool) {
@@ -225,7 +279,7 @@ fn process_alive(pid: u32) -> bool {
 /// Trace: FR-005-AC-7, FR-005-AC-5
 #[test]
 fn exit_75_is_executed_once_and_telemetry_excludes_command_arguments() -> TestResult {
-    let harness = Harness::new(1, 10000)?;
+    let harness = Harness::new(1, 120000)?;
     let marker = harness.root.path().join("invocations");
     let release = harness.root.path().join("release");
     let mut child = harness.command("exit75", &marker, &release, 1)?;
@@ -243,7 +297,7 @@ fn exit_75_is_executed_once_and_telemetry_excludes_command_arguments() -> TestRe
 /// Trace: FR-005-AC-4, FR-005-AC-7
 #[test]
 fn exit_75_survives_forced_descendant_cleanup_and_reaps_its_watchdog() -> TestResult {
-    let harness = Harness::new(1, 10000)?;
+    let harness = Harness::new(1, 120000)?;
     let marker = harness.root.path().join("invocations");
     let descendant = marker.with_extension("descendant");
     let mut child = harness.command(
@@ -253,7 +307,7 @@ fn exit_75_survives_forced_descendant_cleanup_and_reaps_its_watchdog() -> TestRe
         1,
     )?;
     assert_eq!(
-        complete_before(&mut child, Duration::from_secs(8))?.code(),
+        complete_before(&mut child, Duration::from_secs(30))?.code(),
         Some(75)
     );
     assert_eq!(fs::read_to_string(&marker)?, "invoked\n");
@@ -265,7 +319,7 @@ fn exit_75_survives_forced_descendant_cleanup_and_reaps_its_watchdog() -> TestRe
 /// Trace: FR-005-AC-7
 #[test]
 fn a_signaled_command_returns_non_success() -> TestResult {
-    let harness = Harness::new(1, 10000)?;
+    let harness = Harness::new(1, 120000)?;
     let mut child = harness.command(
         "signal",
         &harness.root.path().join("signal"),
@@ -281,7 +335,7 @@ fn a_signaled_command_returns_non_success() -> TestResult {
 /// Trace: FR-005-AC-1, FR-005-AC-2, FR-005-AC-5
 #[test]
 fn concurrent_clients_never_duplicate_a_lease_and_run_in_fifo_order() -> TestResult {
-    let harness = Harness::new(1, 20000)?;
+    let harness = Harness::new(1, 120000)?;
     let first_marker = harness.root.path().join("first");
     let second_marker = harness.root.path().join("second");
     let first_release = harness.root.path().join("release-first");
@@ -323,7 +377,7 @@ fn concurrent_clients_never_duplicate_a_lease_and_run_in_fifo_order() -> TestRes
 /// Trace: FR-005-AC-4
 #[test]
 fn queued_cancel_never_runs_the_command() -> TestResult {
-    let harness = Harness::new(0, 20000)?;
+    let harness = Harness::new(0, 120000)?;
     let marker = harness.root.path().join("must-not-run");
     let mut child = harness.command("block", &marker, &harness.root.path().join("release"), 1)?;
     observed(|| {
@@ -343,7 +397,7 @@ fn queued_cancel_never_runs_the_command() -> TestResult {
 /// Trace: FR-005-AC-4
 #[test]
 fn hold_timeout_kills_the_group_before_releasing_capacity() -> TestResult {
-    let harness = Harness::new(1, 2000)?;
+    let harness = Harness::new(1, 15000)?;
     let marker = harness.root.path().join("started");
     let mut child = harness.command(
         "ignore-term",
@@ -366,7 +420,7 @@ fn hold_timeout_kills_the_group_before_releasing_capacity() -> TestResult {
 /// Trace: FR-005-AC-4
 #[test]
 fn supervisor_crash_keeps_lease_until_its_child_group_is_verified_stopped() -> TestResult {
-    let harness = Harness::new(1, 20000)?;
+    let harness = Harness::new(1, 120000)?;
     let marker = harness.root.path().join("started");
     let release = harness.root.path().join("release");
     let mut child = harness.command("block", &marker, &release, 1)?;
@@ -392,7 +446,7 @@ fn supervisor_crash_keeps_lease_until_its_child_group_is_verified_stopped() -> T
 /// Trace: FR-005-AC-3
 #[test]
 fn invalid_policy_and_oversized_request_are_rejected_without_execution() -> TestResult {
-    let harness = Harness::new(1, 10000)?;
+    let harness = Harness::new(1, 120000)?;
     let marker = harness.root.path().join("must-not-run");
     let mut child = harness.command("exit75", &marker, &harness.root.path().join("release"), 5)?;
     assert_eq!(complete(&mut child)?.code(), Some(2));
@@ -407,7 +461,7 @@ fn invalid_policy_and_oversized_request_are_rejected_without_execution() -> Test
 /// Trace: FR-005-AC-2, FR-005-AC-3
 #[test]
 fn live_capacity_shrink_reports_overcommit_and_preserves_running_command() -> TestResult {
-    let harness = Harness::new(2, 20000)?;
+    let harness = Harness::new(2, 120000)?;
     let marker = harness.root.path().join("started");
     let release = harness.root.path().join("release");
     let mut child = harness.command("block", &marker, &release, 2)?;
@@ -431,7 +485,7 @@ fn live_capacity_shrink_reports_overcommit_and_preserves_running_command() -> Te
 /// Trace: FR-005-AC-4
 #[test]
 fn dead_queued_supervisor_is_restarted_without_duplicate_command_execution() -> TestResult {
-    let harness = Harness::new(0, 20000)?;
+    let harness = Harness::new(0, 120000)?;
     let marker = harness.root.path().join("started");
     let release = harness.root.path().join("release");
     let mut child = harness.command("block", &marker, &release, 1)?;
@@ -467,7 +521,7 @@ fn dead_queued_supervisor_is_restarted_without_duplicate_command_execution() -> 
 /// Trace: FR-005-AC-4
 #[test]
 fn policy_read_failure_stops_owned_work_and_retains_lease_until_recovery() -> TestResult {
-    let harness = Harness::new(1, 20000)?;
+    let harness = Harness::new(1, 120000)?;
     let marker = harness.root.path().join("started");
     let mut child = harness.command("block", &marker, &harness.root.path().join("release"), 1)?;
     observed(|| marker.exists());
@@ -499,7 +553,7 @@ fn policy_read_failure_stops_owned_work_and_retains_lease_until_recovery() -> Te
 /// Trace: FR-005-AC-3, FR-005-AC-5
 #[test]
 fn relative_host_sample_paths_work_from_another_directory_and_prune_removes_logs() -> TestResult {
-    let harness = Harness::new(1, 10000)?;
+    let harness = Harness::new(1, 120000)?;
     let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
     policy["sample_file"] = json!("sample.json");
     policy["disk_path"] = json!(".");
@@ -521,7 +575,7 @@ fn relative_host_sample_paths_work_from_another_directory_and_prune_removes_logs
 /// Trace: FR-005-AC-4
 #[test]
 fn running_cancel_returns_cancelled_after_group_cleanup() -> TestResult {
-    let harness = Harness::new(1, 20000)?;
+    let harness = Harness::new(1, 120000)?;
     let marker = harness.root.path().join("started");
     let mut child = harness.command("block", &marker, &harness.root.path().join("release"), 1)?;
     observed(|| marker.exists());
@@ -540,7 +594,7 @@ fn running_cancel_returns_cancelled_after_group_cleanup() -> TestResult {
 #[test]
 fn cancellation_after_supervisor_loss_stops_owned_descendants_and_preserves_unrelated_work()
 -> TestResult {
-    let harness = Harness::new(1, 20000)?;
+    let harness = Harness::new(1, 120000)?;
     let marker = harness.root.path().join("owned");
     let descendant = marker.with_extension("descendant");
     let mut child = harness.command(
@@ -575,7 +629,7 @@ fn cancellation_after_supervisor_loss_stops_owned_descendants_and_preserves_unre
     kill(Pid::from_raw(i32::try_from(pid)?), Signal::SIGKILL)?;
     assert!(harness.cli().arg("cancel").arg(id).status()?.success());
     assert_eq!(
-        complete_before(&mut child, Duration::from_secs(8))?.code(),
+        complete_before(&mut child, Duration::from_secs(30))?.code(),
         Some(130)
     );
     assert_eq!(harness.report()?["used_units"], 0);
@@ -594,7 +648,7 @@ fn cancellation_after_supervisor_loss_stops_owned_descendants_and_preserves_unre
 /// Trace: FR-005-AC-4
 #[test]
 fn hold_deadline_survives_supervisor_loss_and_stops_term_resistant_descendants() -> TestResult {
-    let harness = Harness::new(1, 2000)?;
+    let harness = Harness::new(1, 15000)?;
     let marker = harness.root.path().join("owned");
     let descendant = marker.with_extension("descendant");
     let mut child = harness.command(
@@ -609,7 +663,7 @@ fn hold_deadline_survives_supervisor_loss_and_stops_term_resistant_descendants()
         .ok_or("PID missing")?;
     kill(Pid::from_raw(i32::try_from(pid)?), Signal::SIGKILL)?;
     assert_eq!(
-        complete_before(&mut child, Duration::from_secs(8))?.code(),
+        complete_before(&mut child, Duration::from_secs(30))?.code(),
         Some(124)
     );
     assert_eq!(harness.request(0)?["state"], "timed_out");

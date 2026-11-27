@@ -4,6 +4,7 @@
 
 mod config;
 mod error;
+mod install;
 mod metrics;
 mod model;
 mod process;
@@ -13,12 +14,14 @@ mod store;
 mod watchdog;
 
 use std::ffi::{OsStr, OsString};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
 use clap::{Parser, Subcommand};
+use nix::fcntl::{Flock, FlockArg};
 
 use crate::error::Result;
 use crate::model::RequestId;
@@ -72,6 +75,24 @@ enum Action {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Finish host setup after installing the locked-build binary.
+    InstallTools,
+    /// Compare installed CLI versions against the pinned tool manifest.
+    CheckInstall {
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
+    /// Admit an arch-test command under a stable per-repository slot owner.
+    WorktreeRun {
+        #[arg(long)]
+        repository: String,
+        #[arg(long)]
+        slot: u32,
+        #[arg(long)]
+        ticket: Option<String>,
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
     /// Show or initialize the effective host policy.
     Policy {
         #[command(subcommand)]
@@ -97,6 +118,50 @@ enum PolicyAction {
 }
 
 fn execute(cli: Cli) -> Result<i32> {
+    if let Action::WorktreeRun {
+        repository,
+        slot,
+        ticket,
+        command,
+    } = cli.command
+    {
+        if !valid_worktree_repository(&repository) || slot == 0 {
+            return Err(error::Error::new(
+                error::ErrorCode::Request,
+                "worktree-run requires a repository and a positive slot number",
+            ));
+        }
+        let (state, config) = resolve_paths(cli.state.as_deref(), cli.config.as_deref(), |name| {
+            std::env::var_os(name).map(PathBuf::from)
+        })?;
+        let store = runtime::open(&state, &config)?;
+        let _slot_lock = lock_worktree_slot(&store.path, &repository, slot)?;
+        return execute(Cli {
+            state: Some(store.path),
+            config: Some(store.config_path),
+            command: Action::Run {
+                owner: Some(format!("arch-test:{repository}:slot-{slot}")),
+                ticket,
+                units: 1,
+                class: Some("arch-test".to_owned()),
+                command,
+            },
+        });
+    }
+    if matches!(cli.command, Action::InstallTools) {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "HOME is not set"))?;
+        return install::install_tools(
+            &home,
+            &std::env::current_exe()?,
+            std::env::var_os("PATH").as_deref(),
+        )
+        .map(|()| 0);
+    }
+    if let Action::CheckInstall { manifest } = &cli.command {
+        return install::check_install(manifest.as_deref());
+    }
     if let Action::Sample { output } = &cli.command {
         let config = cli.config.as_deref().ok_or_else(|| {
             error::Error::new(error::ErrorCode::Configuration, "--config is required")
@@ -201,6 +266,10 @@ fn execute(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Action::Sample { .. } => unreachable!("sample handled before opening scheduler state"),
+        Action::InstallTools | Action::CheckInstall { .. } => {
+            unreachable!("installation commands handled before opening scheduler state")
+        }
+        Action::WorktreeRun { .. } => unreachable!("worktree command normalized at entry"),
         Action::Policy { .. } => {
             unreachable!("policy commands handled before opening scheduler state")
         }
@@ -216,6 +285,31 @@ fn execute(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn valid_worktree_repository(repository: &str) -> bool {
+    !repository.is_empty()
+        && repository != "."
+        && repository != ".."
+        && repository
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn lock_worktree_slot(state: &std::path::Path, repository: &str, slot: u32) -> Result<Flock<File>> {
+    let lock_dir = state.join("arch-test/slots");
+    std::fs::create_dir_all(&lock_dir)?;
+    std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o700))?;
+    let lock_path = lock_dir.join(format!("{repository}-slot-{slot}.lock"));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)?;
+    Flock::lock(file, FlockArg::LockExclusive)
+        .map_err(|(_, error)| error::Error::new(error::ErrorCode::Io, error.to_string()))
 }
 
 fn resolve_paths(
@@ -320,11 +414,12 @@ fn ensure_policy_with_discovery(
 fn discover_real_cargo(search_path: &OsStr, current_exe: &std::path::Path) -> Option<PathBuf> {
     let current_exe = current_exe.canonicalize().ok()?;
     std::env::split_paths(search_path).find_map(|directory| {
-        let candidate = directory.join("cargo").canonicalize().ok()?;
-        if candidate == current_exe {
+        let candidate = directory.join("cargo");
+        let resolved = candidate.canonicalize().ok()?;
+        if resolved == current_exe || resolved.file_name() == Some(OsStr::new("locked-build")) {
             return None;
         }
-        let metadata = std::fs::metadata(&candidate).ok()?;
+        let metadata = std::fs::metadata(&resolved).ok()?;
         if !metadata.is_file() {
             return None;
         }
@@ -567,6 +662,71 @@ mod tests {
     }
 
     #[test]
+    fn per_slot_worktree_runner_is_a_distinct_arch_test_command() {
+        let parsed = Cli::try_parse_from([
+            "locked-build",
+            "worktree-run",
+            "--repository",
+            "quire",
+            "--slot",
+            "3",
+            "--ticket",
+            "QSL-3541",
+            "--",
+            "cargo",
+            "test",
+        ]);
+        assert!(matches!(
+            parsed,
+            Ok(Cli {
+                command: Action::WorktreeRun {
+                    repository,
+                    slot: 3,
+                    ticket: Some(ticket),
+                    command,
+                },
+                ..
+            }) if repository == "quire"
+                && ticket == "QSL-3541"
+                && command == ["cargo", "test"]
+        ));
+    }
+
+    #[test]
+    fn install_and_version_check_commands_accept_the_documented_inputs() {
+        assert!(matches!(
+            Cli::try_parse_from(["locked-build", "install-tools"]),
+            Ok(Cli {
+                command: Action::InstallTools,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["locked-build", "check-install", "--manifest", "pins.json"]),
+            Ok(Cli { command: Action::CheckInstall { manifest: Some(path) }, .. }) if path == std::path::Path::new("pins.json")
+        ));
+    }
+
+    #[test]
+    fn worktree_slot_repository_label_rejects_paths() {
+        assert!(valid_worktree_repository("quire-cli"));
+        assert!(!valid_worktree_repository("../quire-cli"));
+        assert!(!valid_worktree_repository(""));
+    }
+
+    #[test]
+    fn same_arch_test_slot_cannot_be_acquired_twice() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let state = root.path().join("state");
+        let _first = lock_worktree_slot(&state, "quire-cli", 2)?;
+        let lock_path = state.join("arch-test/slots/quire-cli-slot-2.lock");
+        let second_file = OpenOptions::new().read(true).write(true).open(lock_path)?;
+        let second = Flock::lock(second_file, FlockArg::LockExclusiveNonblock);
+        assert!(second.is_err());
+        Ok(())
+    }
+
+    #[test]
     fn ticket_is_derived_from_a_ticket_branch_prefix() {
         assert_eq!(
             ticket_from_branch("tooling/qsl-3541-w1-2").as_deref(),
@@ -608,8 +768,10 @@ mod tests {
         let current_exe = std::env::current_exe()?;
         symlink(&current_exe, shim_dir.join("cargo"))?;
         let real_cargo = cargo_dir.join("cargo");
-        std::fs::write(&real_cargo, "#!/bin/sh\nexit 0\n")?;
-        std::fs::set_permissions(&real_cargo, std::fs::Permissions::from_mode(0o755))?;
+        let cargo_target = cargo_dir.join("cargo.real");
+        std::fs::write(&cargo_target, "#!/bin/sh\nexit 0\n")?;
+        std::fs::set_permissions(&cargo_target, std::fs::Permissions::from_mode(0o755))?;
+        symlink(&cargo_target, &real_cargo)?;
         let search_path = std::env::join_paths([&shim_dir, &cargo_dir]).map_err(|error| {
             error::Error::new(error::ErrorCode::Configuration, error.to_string())
         })?;
@@ -618,7 +780,7 @@ mod tests {
         let config =
             read_shim_config_with_discovery(&config_path, Some(&search_path), &current_exe)?;
 
-        assert_eq!(config.real_cargo, Some(real_cargo.canonicalize()?));
+        assert_eq!(config.real_cargo, Some(real_cargo));
         assert!(config_path.exists());
         Ok(())
     }

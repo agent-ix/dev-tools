@@ -580,9 +580,19 @@ fn recover_with_processes(
 }
 
 pub(crate) fn status(store: &Store) -> Result<Report> {
-    store.transaction(|state, config| {
-        let now = now_ms()?;
-        let clock = clock_ms()?;
+    status_with_clock(store, || Ok((now_ms()?, clock_ms()?)))
+}
+
+#[cfg(test)]
+fn status_at(store: &Store, now: u64, clock: u64) -> Result<Report> {
+    status_with_clock(store, || Ok((now, clock)))
+}
+
+fn status_with_clock(
+    store: &Store,
+    read_clock: impl FnMut() -> Result<(u64, u64)>,
+) -> Result<Report> {
+    store.transaction_with_clock(read_clock, |state, config, now, clock| {
         let processes = Processes::read();
         let sample = config.sample(now);
         let (sample, source_error) = match sample {
@@ -649,9 +659,19 @@ pub(crate) fn status(store: &Store) -> Result<Report> {
 }
 
 pub(crate) fn metrics(store: &Store) -> Result<String> {
-    store.transaction(|state, config| {
-        let now = now_ms()?;
-        let clock = clock_ms()?;
+    metrics_with_clock(store, || Ok((now_ms()?, clock_ms()?)))
+}
+
+#[cfg(test)]
+fn metrics_at(store: &Store, now: u64, clock: u64) -> Result<String> {
+    metrics_with_clock(store, || Ok((now, clock)))
+}
+
+fn metrics_with_clock(
+    store: &Store,
+    read_clock: impl FnMut() -> Result<(u64, u64)>,
+) -> Result<String> {
+    store.transaction_with_clock(read_clock, |state, config, now, clock| {
         state.metrics.checkpoint_active(clock, now)?;
         state.metrics.exposition(state, config, now, clock)
     })
@@ -678,14 +698,27 @@ pub(crate) fn current_block_reason(
 }
 
 pub(crate) fn cancel(store: &Store, id: &RequestId) -> Result<()> {
-    store.transaction(|state, config| {
+    cancel_with_clock(store, id, || Ok((now_ms()?, clock_ms()?)))
+}
+
+#[cfg(test)]
+fn cancel_at(store: &Store, id: &RequestId, now: u64, clock: u64) -> Result<()> {
+    cancel_with_clock(store, id, || Ok((now, clock)))
+}
+
+fn cancel_with_clock(
+    store: &Store,
+    id: &RequestId,
+    read_clock: impl FnMut() -> Result<(u64, u64)>,
+) -> Result<()> {
+    store.transaction_with_clock(read_clock, |state, config, now, clock| {
         let request = state.find_mut(id)?;
         if request.phase.terminal() {
             return Ok(());
         }
         request.stop = Some(StopReason::Cancelled);
         if request.phase == Phase::Queued {
-            state.finish(id, Completion::default(), config, now_ms()?, clock_ms()?)?;
+            state.finish(id, Completion::default(), config, now, clock)?;
         }
         Ok(())
     })
@@ -784,9 +817,45 @@ fn admit_worker(
     fence: &WorkerFence,
     interrupted: &AtomicBool,
 ) -> Result<Admission> {
-    store.transaction(|state, config| {
-        let now = now_ms()?;
-        let clock = clock_ms()?;
+    admit_worker_with_clock(
+        store,
+        id,
+        fence,
+        interrupted,
+        || Ok((now_ms()?, clock_ms()?)),
+        |config, now| config.sample(now).ok(),
+    )
+}
+
+#[cfg(test)]
+fn admit_worker_at(
+    store: &Store,
+    id: &RequestId,
+    fence: &WorkerFence,
+    interrupted: &AtomicBool,
+    now: u64,
+    clock: u64,
+    sample_for: impl FnOnce(&Config, u64) -> Option<HostSample>,
+) -> Result<Admission> {
+    admit_worker_with_clock(
+        store,
+        id,
+        fence,
+        interrupted,
+        || Ok((now, clock)),
+        sample_for,
+    )
+}
+
+fn admit_worker_with_clock(
+    store: &Store,
+    id: &RequestId,
+    fence: &WorkerFence,
+    interrupted: &AtomicBool,
+    read_clock: impl FnMut() -> Result<(u64, u64)>,
+    sample_for: impl FnOnce(&Config, u64) -> Option<HostSample>,
+) -> Result<Admission> {
+    store.transaction_with_clock(read_clock, |state, config, now, clock| {
         let request = state.find(id)?;
         if request.phase != Phase::Queued || !fence.owns(request) {
             return Ok(Admission::Stopped);
@@ -796,7 +865,7 @@ fn admit_worker(
             state.finish(id, Completion::default(), config, now, clock)?;
             return Ok(Admission::Stopped);
         }
-        let sample = config.sample(now).ok();
+        let sample = sample_for(config, now);
         let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
         {
             let request = state.find_mut(id)?;

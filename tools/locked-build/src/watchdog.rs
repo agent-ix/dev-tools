@@ -136,7 +136,55 @@ fn observe(
     read_processes: impl FnOnce() -> Processes,
     probe_exit: impl FnOnce(u32) -> Result<bool>,
 ) -> Result<Decision> {
-    store.transaction(|state, config| {
+    observe_with_clock(
+        store,
+        id,
+        generation,
+        worker,
+        watchdog,
+        || Ok((now_ms()?, clock_ms()?)),
+        read_processes,
+        probe_exit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn observe_at(
+    store: &Store,
+    id: &RequestId,
+    generation: u64,
+    worker: &ProcessIdentity,
+    watchdog: &ProcessIdentity,
+    now: u64,
+    clock: u64,
+    read_processes: impl FnOnce() -> Processes,
+    probe_exit: impl FnOnce(u32) -> Result<bool>,
+) -> Result<Decision> {
+    observe_with_clock(
+        store,
+        id,
+        generation,
+        worker,
+        watchdog,
+        || Ok((now, clock)),
+        read_processes,
+        probe_exit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_with_clock(
+    store: &Store,
+    id: &RequestId,
+    generation: u64,
+    worker: &ProcessIdentity,
+    watchdog: &ProcessIdentity,
+    read_clock: impl FnMut() -> Result<(u64, u64)>,
+    read_processes: impl FnOnce() -> Processes,
+    probe_exit: impl FnOnce(u32) -> Result<bool>,
+) -> Result<Decision> {
+    store.transaction_with_clock(read_clock, |state, config, now, clock| {
         let processes = read_processes();
         let request = state.find_mut(id)?;
         if request.phase.terminal()
@@ -147,9 +195,9 @@ fn observe(
             return Ok(Decision::Done);
         }
         if request.stop.is_none()
-            && request.started_clock_ms.is_some_and(|started| {
-                clock_ms().is_ok_and(|now| now.saturating_sub(started) >= config.hold_ms)
-            })
+            && request
+                .started_clock_ms
+                .is_some_and(|started| clock.saturating_sub(started) >= config.hold_ms)
         {
             request.stop = Some(StopReason::TimedOut);
         }
@@ -190,7 +238,7 @@ fn observe(
                     ..Completion::default()
                 },
             };
-            state.finish(id, completion, config, now_ms()?, clock_ms()?)?;
+            state.finish(id, completion, config, now, clock)?;
             return Ok(Decision::Done);
         }
         if worker_state != IdentityState::Matching {
