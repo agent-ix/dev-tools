@@ -351,8 +351,32 @@ pub(crate) fn unscoped(error: &Error, request: String) -> Failure {
             key,
             limit,
             "unavailable".into(),
-            &error.message,
+            &error.to_string(),
             "not-started/command",
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Provenance: SWM-421. Trace: FR-005-AC-4
+    #[test]
+    fn state_failure_keeps_the_error_kind_and_message() {
+        let error = Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let failure = unscoped(&error, "fixture:r1".into());
+        assert_eq!(failure.diagnostic.code, Some(Code::StateUnavailable));
+        assert_eq!(failure.diagnostic.measured_what.as_deref(), Some("Io: PermissionDenied: permission denied"));
+        assert_eq!(failure.diagnostic.message.as_deref(), Some("locked-build: LB_STATE_UNAVAILABLE request=fixture:r1 limit=policy.state_access=read_write measured=unavailable (Io: PermissionDenied: permission denied) killed=not-started/command"));
+    }
+
+    /// Provenance: SWM-421. Trace: FR-005-AC-4
+    #[test]
+    fn state_failure_keeps_the_supervision_cause() {
+        let error = Error::new(ErrorCode::State, "command-tree memory supervision unavailable");
+        let failure = unscoped(&error, "fixture:r2".into());
+        assert_eq!(failure.diagnostic.code, Some(Code::StateUnavailable));
+        assert_eq!(failure.diagnostic.measured_what.as_deref(), Some("State: command-tree memory supervision unavailable"));
     }
 }

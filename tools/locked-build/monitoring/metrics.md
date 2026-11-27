@@ -25,6 +25,9 @@ Queue age includes time saved at reboot recovery. Cross-boot run and hold durati
 
 ### Memory
 
+- `ix_build_active_memory_reserved_bytes{class,state}`: summed reservations for queued or running requests.
+- `ix_build_active_memory_limit_bytes{class,state}`: summed hard limits for queued or running requests.
+
 These histograms have `class` labels:
 
 - `ix_build_memory_reserved_bytes`: completed lease reservations.

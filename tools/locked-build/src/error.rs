@@ -48,7 +48,7 @@ impl Error {
 
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
-        Self::new(ErrorCode::Io, value.to_string())
+        Self::new(ErrorCode::Io, format!("{:?}: {value}", value.kind()))
     }
 }
 

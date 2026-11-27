@@ -932,7 +932,7 @@ fn recover_with_boot(
                     // An extinct PID namespace cannot retain live children.
                     request.worker = None; request.watchdog = None;
                     if request.phase == Phase::Running {
-                        request.supervision_detail = Some("owning PID namespace is extinct; host procfs verified no remaining members".to_owned());
+                        request.supervision_detail = Some("owning PID namespace is extinct; host procfs verified no namespace init remains".to_owned());
                         finish.push(request.id.clone());
                     } else { request.pid_namespace = pid_namespace.clone(); respawn.push(request.id.clone()); }
                     continue;
@@ -2387,8 +2387,7 @@ fn start_command(
         if enforcement == MemoryEnforcement::SystemdScope {
             let scope = format!("locked-build-{}.scope", crate::store::random_id()?);
             command
-                .arg(format!("--unit={scope}"))
-                .args(["-p", "OOMPolicy=stop"]);
+                .arg(format!("--unit={scope}"));
             lease_record.memory_scope = Some(scope);
         }
         command
@@ -2481,6 +2480,8 @@ fn lease_command_spec(
             format!("MemoryMax={memory_cap_bytes}").into(),
             "-p".into(),
             "MemorySwapMax=0".into(),
+            "-p".into(),
+            "OOMPolicy=stop".into(),
             "--".into(),
             program.into(),
         ];

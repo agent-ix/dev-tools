@@ -461,6 +461,8 @@ pub(crate) mod tests {
 
     pub(crate) fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
         Request {
+            client: None,
+            client_pid_namespace: None,
             telemetry: Default::default(),
             supervision_detail: None,
             trace: Default::default(),
@@ -594,6 +596,8 @@ pub(crate) mod tests {
     #[test]
     fn exposition_excludes_ticket_request_command_and_environment_values() -> Result<()> {
         let mut request = crate::model::Request {
+            client: None,
+            client_pid_namespace: None,
             telemetry: Default::default(),
             supervision_detail: None,
             trace: Default::default(),

@@ -5,6 +5,14 @@ use std::fs::{File, TryLockError};
 use std::sync::mpsc;
 
 use super::*;
+
+/// Provenance: SWM-421. Trace: FR-005-AC-4
+#[test]
+fn scope_probe_and_launch_require_the_same_oom_policy() {
+    let spec = lease_command_spec(LauncherPlatform::Linux, "/usr/bin/true", &[], Some(64));
+    let args: Vec<_> = spec.arguments.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+    assert_eq!(args, ["--user", "--scope", "--quiet", "-p", "MemoryMax=64", "-p", "MemorySwapMax=0", "-p", "OOMPolicy=stop", "--", "/usr/bin/true"]);
+}
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
 
@@ -199,7 +207,7 @@ fn explicit_memory_is_reserved_enforced_bounded_and_budget_authoritative() -> Re
         Some(17_179_869_184)
     );
     let scrape = metrics(&store)?;
-    assert!(scrape.contains("ix_build_active_memory_reserved_bytes{host=\"your-build-host\",class=\"periodic\",state=\"running\"} 34359738368"), "{scrape}");
+    assert!(scrape.contains("ix_build_active_memory_reserved_bytes{class=\"periodic\",host=\"your-build-host\",state=\"running\"} 34359738368"), "{scrape}");
     let mut policy = Config::read(&store.config_path)?;
     policy.max_request_memory = Some(68_719_476_736);
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
@@ -2517,6 +2525,8 @@ fn lease_launcher_builds_systemd_argv_without_spawning_a_cgroup() {
             "MemoryMax=4294967296",
             "-p",
             "MemorySwapMax=0",
+            "-p",
+            "OOMPolicy=stop",
             "--",
             "/usr/bin/cargo",
             "test",
