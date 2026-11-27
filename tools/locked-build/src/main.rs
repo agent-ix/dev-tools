@@ -236,7 +236,17 @@ fn execute(cli: Cli) -> Result<i32> {
             )?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let worker = runtime::spawn_worker(&store, &id)?;
-            runtime::wait(&store, &id, vec![worker])
+            let exit_code = runtime::wait(&store, &id, vec![worker])?;
+            if let Some(reason) = runtime::status(&store)?
+                .requests
+                .into_iter()
+                .find(|request| request.request_id == id)
+                .filter(|request| request.state == "timed_out")
+                .and_then(|request| request.reason)
+            {
+                eprintln!("request={} reason={reason}", id.0);
+            }
+            Ok(exit_code)
         }
         Action::Status => {
             println!("{}", serde_json::to_string(&runtime::status(&store)?)?);

@@ -14,7 +14,7 @@
   "disk_path": "/",
   "maximum_load": 8.0,
   "aging_ms": 60000,
-  "hold_ms": 1800000,
+  "hold_ms": 5400000,
   "termination_grace_ms": 10000,
   "sample_file": null,
   "cargo_build_jobs": 4,

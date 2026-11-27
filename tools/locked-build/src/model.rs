@@ -57,6 +57,12 @@ pub(crate) enum StopReason {
     MemoryCap,
 }
 
+pub(crate) fn hold_timeout_reason(hold_ms: u64) -> String {
+    format!(
+        "hold_timeout: command exceeded policy hold_ms={hold_ms} ms; change the limit in policy hold_ms"
+    )
+}
+
 #[derive(Default)]
 pub(crate) struct Completion<'reason> {
     pub code: Option<i32>,
@@ -464,7 +470,7 @@ impl State {
             .stop
             .map(|stop| match stop {
                 StopReason::Cancelled => "cancelled".to_owned(),
-                StopReason::TimedOut => "hold_timeout".to_owned(),
+                StopReason::TimedOut => hold_timeout_reason(config.hold_ms),
                 StopReason::MemoryCap => "rss_cap".to_owned(),
             })
             .or_else(|| reason.map(str::to_owned))
