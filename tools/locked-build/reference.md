@@ -85,16 +85,35 @@ Different slot numbers run concurrently. The Kani replacement is
 `run --class kani -- ...`.
 
 Scheduler commands and the PATH shim read policy from `--config`, then
-`LOCKED_BUILD_CONFIG`, then `$XDG_CONFIG_HOME/locked-build/policy.json` or
-`$HOME/.config/locked-build/policy.json`. State resolves from `--state`, then
-`LOCKED_BUILD_STATE`, then `$XDG_STATE_HOME/locked-build` or
-`$HOME/.local/state/locked-build`; the state directory is created mode `0700`.
+`LOCKED_BUILD_CONFIG`, then `<ix-home>/locked-build/policy.json`.
+State resolves from `--state`, then `LOCKED_BUILD_STATE`, then
+`<ix-home>/locked-build/state`; the state directory is created mode `0700`.
+The IX home resolution matches Quoin: nonempty `IX_HOME`, then `$HOME/.ix`,
+then relative `.ix` when HOME is absent. Relative `IX_HOME` is accepted.
+Generated target roots default to `<ix-home>/locked-build/targets`.
+Installation moves `~/.config/locked-build/policy.json` into the IX home
+without regenerating its host settings. Differing policies at both paths
+stop installation and preserve both files.
+
+If default state access is denied or read-only, lanes of the same user share
+`/tmp/locked-build-<uid>`. This directory must be owned by the effective user,
+mode `0700`, and a directory rather than a symlink. Unsafe fallback directories
+cause an error; commands never bypass admission after a path failure.
+An existing policy is read without opening it for write. If absent and its
+parent is unwritable, the generated policy lives in the fallback state directory.
+An unwritable target root uses `<fallback>/targets`; explicit `CARGO_TARGET_DIR`
+remains authoritative. `status` includes `state_path`. `policy show` prints
+effective state and policy paths to stderr, keeping stdout as policy JSON.
 The persisted state file is `<state-directory>/state.json`.
-Relative XDG values are ignored. The shim reads
+The shim reads
 `LOCKED_BUILD_CLASS`, `LOCKED_BUILD_OWNER`, and `LOCKED_BUILD_TICKET`, defaulting
 to `point`, `cargo-shim`, and `MANUAL`. A leased command receives
 `LOCKED_BUILD_LEASE=1`; when a shim invocation sees that marker, it execs
-`real_cargo` directly to avoid queue recursion.
+`real_cargo` directly to avoid queue recursion. This happens before state
+resolution or policy initialization. Without an installed policy, the nested
+shim discovers real Cargo on PATH, skipping itself. The legacy runner is
+recognized by nonempty `CARGO_TARGET_DIR` and equal positive integer values
+for `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS`.
 
 In `lease_accounted` mode, admission requires the sum of active leases plus
 the new request to be at most `memory_budget_bytes`; requests larger than the

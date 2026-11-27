@@ -71,7 +71,9 @@ fn install_tools_with_measurement(
     })?;
     std::fs::create_dir_all(installed_bin_dir)?;
     copy_file_if_changed(current_exe, &installed_path)?;
-    let config_dir = home.join(".config/locked-build");
+    let config_dir =
+        crate::writable::ix_home(std::env::var_os("IX_HOME").map(PathBuf::from), Some(home))
+            .join("locked-build");
     let data_dir = home.join(".local/share/dev-tools");
     let shim_dir = home.join(".local/lib/locked-build/shims");
     create_private_dir(&config_dir)?;
@@ -79,13 +81,14 @@ fn install_tools_with_measurement(
     create_private_dir(&shim_dir)?;
 
     let policy_path = config_dir.join("policy.json");
+    migrate_policy(&home.join(".config/locked-build/policy.json"), &policy_path)?;
     let mut policy = if policy_path.exists() {
         Config::read(&policy_path)?
     } else {
         let mut policy = measure_policy()?;
         policy.host = policy.host.to_ascii_lowercase();
         policy.real_cargo = discover_executable(search_path, "cargo", current_exe);
-        policy.target_root = Some(home.join(".cache/locked-build/targets"));
+        policy.target_root = Some(config_dir.join("targets"));
         policy
     };
     policy
@@ -127,6 +130,34 @@ fn install_tools_with_measurement(
     println!("cargo shim: {}", shim_path.display());
     println!("binary: {}", installed_path.display());
     println!("version record: {}", record_path.display());
+    Ok(())
+}
+
+fn migrate_policy(old: &Path, new: &Path) -> Result<()> {
+    if !old.try_exists()? {
+        return Ok(());
+    }
+    // Validate before moving; never measure over hand-tuned host settings.
+    Config::read(old)?;
+    if new.try_exists()? {
+        if std::fs::read(old)? != std::fs::read(new)? {
+            return Err(Error::new(
+                ErrorCode::Configuration,
+                "both old and new policies exist and differ; preserving both",
+            ));
+        }
+    } else {
+        // Exclusive creation refuses to overwrite a concurrently installed policy.
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(new)?;
+        file.write_all(&std::fs::read(old)?)?;
+        file.sync_all()?;
+    }
+    std::fs::remove_file(old)?;
     Ok(())
 }
 
@@ -396,6 +427,29 @@ fn shell_quote_path(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// Provenance: SWM-374. Trace: FR-011-AC-7
+    #[test]
+    fn migration_moves_hand_tuned_policy_without_regeneration() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let old = root.path().join("old-policy.json");
+        let new = root.path().join("policy.json");
+        let bytes = br#"{"host":"titan","capacity_units":4,"maximum_units":4,"cargo_build_jobs":4,"rust_test_threads":4,"disk_reserve_bytes":100000000000,"hold_ms":5400000}"#;
+        std::fs::write(&old, bytes)?;
+        migrate_policy(&old, &new)?;
+        assert!(!old.exists());
+        assert_eq!(std::fs::read(&new)?, bytes);
+        let policy = Config::read(&new)?;
+        assert_eq!(policy.cargo_build_jobs, Some(4));
+        assert_eq!(policy.rust_test_threads, Some(4));
+        assert_eq!(policy.disk_reserve_bytes, 100_000_000_000);
+        assert_eq!(policy.hold_ms, 5_400_000);
+        std::fs::write(&old, b"{\"host\":\"luna\"}")?;
+        assert!(migrate_policy(&old, &new).is_err());
+        assert_eq!(std::fs::read(&new)?, bytes);
+        assert!(old.exists());
+        Ok(())
+    }
+
     #[test]
     fn checked_in_pins_have_hand_written_version_requirements_and_executable_names() -> Result<()> {
         let manifest = read_manifest(TOOL_MANIFEST)?;
@@ -613,6 +667,13 @@ mod tests {
         let root = tempfile::tempdir()?;
         let home = root.path().join("home");
         std::fs::create_dir_all(&home)?;
+        let legacy = home.join(".config/locked-build/policy.json");
+        std::fs::create_dir_all(
+            legacy
+                .parent()
+                .ok_or_else(|| Error::new(ErrorCode::State, "fixture parent"))?,
+        )?;
+        std::fs::write(&legacy, br#"{"host":"test-host","capacity_units":4,"maximum_units":4,"cargo_build_jobs":4,"rust_test_threads":4,"disk_reserve_bytes":100000000000,"hold_ms":5400000}"#)?;
         let current_exe = std::env::current_exe()?;
 
         install_tools_with_measurement(&home, &current_exe, None, || {
@@ -627,7 +688,7 @@ mod tests {
         })?;
 
         let binary = home.join(".local/bin/locked-build");
-        let policy_path = home.join(".config/locked-build/policy.json");
+        let policy_path = home.join(".ix/locked-build/policy.json");
         let shim = home.join(".local/lib/locked-build/shims/cargo");
         let record = home.join(".local/share/dev-tools/installed.json");
         assert_eq!(std::fs::read(&binary)?, std::fs::read(&current_exe)?);
@@ -637,6 +698,11 @@ mod tests {
         );
         assert_eq!(std::fs::read_link(&shim)?, binary.canonicalize()?);
         let policy = Config::read(&policy_path)?;
+        assert!(!legacy.exists());
+        assert_eq!(policy.cargo_build_jobs, Some(4));
+        assert_eq!(policy.rust_test_threads, Some(4));
+        assert_eq!(policy.disk_reserve_bytes, 100_000_000_000);
+        assert_eq!(policy.hold_ms, 5_400_000);
         assert_eq!(policy.priority_classes.get("arch-test"), Some(&2));
         assert_eq!(policy.priority_classes.get("kani"), Some(&0));
         let profile = std::fs::read_to_string(home.join(".zshrc"))?;

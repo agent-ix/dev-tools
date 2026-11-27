@@ -15,11 +15,30 @@ make install-tools
 ```
 
 The installer builds and copies the binary only when its bytes change. It
-creates `~/.config/locked-build/policy.json` from the host's core, memory, and
+creates `~/.ix/locked-build/policy.json` from the host's core, memory, and
 disk measurements, writes `~/.local/share/dev-tools/installed.json`, and adds
 `~/.local/lib/locked-build/shims` ahead of the real Cargo path in shell startup
 files. Re-running the command leaves identical files untouched. Start a new
 shell after the first install.
+
+`IX_HOME`, when nonempty, replaces `~/.ix`, using the same resolution as Quoin.
+State lives in `~/.ix/locked-build/state` and generated targets in
+`~/.ix/locked-build/targets`. Installation moves an existing policy from
+`~/.config/locked-build/policy.json`, preserving host settings. Conflicting
+old and new policies stop installation and leave both files intact.
+
+When the default state directory is unwritable, sandboxed lanes share
+`/tmp/locked-build-<uid>`, owned by that user with mode `0700`.
+Existing policy needs only read access. An absent policy whose directory is
+unwritable is generated in the shared fallback directory. Unwritable generated
+target roots fall back to its `targets` directory. Explicit state and policy
+paths remain authoritative. `status` reports `state_path`; `policy show` prints
+the state and policy paths to stderr alongside policy JSON on stdout.
+
+Inside an admitted run, the Cargo shim executes real Cargo directly, without
+state access or policy creation. It recognizes `LOCKED_BUILD_LEASE=1` and the
+legacy runner's nonempty `CARGO_TARGET_DIR` plus equal, positive
+`CARGO_BUILD_JOBS` and `RUST_TEST_THREADS`. The outer runner retains admission.
 
 Check pinned versions of the installed tools with:
 

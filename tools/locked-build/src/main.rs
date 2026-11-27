@@ -12,6 +12,7 @@ mod runtime;
 mod sample;
 mod store;
 mod watchdog;
+mod writable;
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -193,6 +194,7 @@ fn execute(cli: Cli) -> Result<i32> {
         match command {
             PolicyAction::Show => {
                 ensure_policy(&config, false)?;
+                eprintln!("state: {}\npolicy: {}", state.display(), config.display());
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&crate::config::Config::read(&config)?)?
@@ -332,21 +334,40 @@ fn resolve_paths(
     if let (Some(state), Some(config)) = (&state, &config) {
         return Ok((state.clone(), config.clone()));
     }
-    let home = env("HOME")
-        .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "HOME is not set"))?;
-    let state = state.unwrap_or_else(|| {
-        env("XDG_STATE_HOME")
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| home.join(".local/state"))
-            .join("locked-build")
-    });
-    let config = config.unwrap_or_else(|| {
-        env("XDG_CONFIG_HOME")
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| home.join(".config"))
-            .join("locked-build/policy.json")
-    });
+    let home = env("HOME");
+    let root = writable::ix_home(env("IX_HOME"), home.as_deref()).join("locked-build");
+    let state = match state {
+        Some(state) => state,
+        None => match writable::probe_directory(&root.join("state")) {
+            Ok(()) => root.join("state"),
+            Err(error) if writable::access_denied(&error) => writable::shared_root()?,
+            Err(error) => return Err(error.into()),
+        },
+    };
+    let config = config.unwrap_or_else(|| root.join("policy.json"));
+    let config = if config_flag.is_none() && env("LOCKED_BUILD_CONFIG").is_none() {
+        default_policy_path(&config, &state)?
+    } else {
+        config
+    };
     Ok((state, config))
+}
+
+fn default_policy_path(path: &std::path::Path, state: &std::path::Path) -> Result<PathBuf> {
+    // Existing policy is read-only input. Never test it by opening for write.
+    match std::fs::File::open(path) {
+        Ok(_) => return Ok(path.to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let parent = path.parent().ok_or_else(|| {
+        error::Error::new(error::ErrorCode::Configuration, "policy path has no parent")
+    })?;
+    match writable::probe_directory(parent) {
+        Ok(()) => Ok(path.to_owned()),
+        Err(error) if writable::access_denied(&error) => Ok(state.join("policy.json")),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn ensure_policy(path: &std::path::Path, force: bool) -> Result<()> {
@@ -370,6 +391,14 @@ fn ensure_policy_with_discovery(
         return Ok(());
     }
     let mut policy = crate::config::Config::measured_default()?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    policy.target_root = Some(
+        writable::ix_home(
+            std::env::var_os("IX_HOME").map(PathBuf::from),
+            home.as_deref(),
+        )
+        .join("locked-build/targets"),
+    );
     policy.real_cargo =
         search_path.and_then(|search_path| discover_real_cargo(search_path, current_exe));
     let parent = path.parent().ok_or_else(|| {
@@ -580,6 +609,22 @@ fn cargo_shim_command(invocation: CargoShimInvocation<'_>) -> Result<Command> {
 }
 
 fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
+    if inside_admitted_run(|name| std::env::var(name).ok()) {
+        // No state resolution, creation, probing or policy initialization here.
+        // The outer runner already owns admission and target configuration.
+        let real_cargo = nested_real_cargo()?;
+        let mut command = cargo_shim_command(CargoShimInvocation {
+            arguments,
+            real_cargo: &real_cargo,
+            config_path: std::path::Path::new(""),
+            state_path: std::path::Path::new(""),
+            class: "",
+            owner: "",
+            ticket: "",
+            in_lease: true,
+        })?;
+        return Err(command.exec().into());
+    }
     let (state_path, config_path) =
         resolve_paths(None, None, |name| std::env::var_os(name).map(PathBuf::from))?;
     let config = read_shim_config(&config_path)?;
@@ -601,10 +646,48 @@ fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
         class: &class,
         owner: &owner,
         ticket: &ticket,
-        in_lease: std::env::var_os("LOCKED_BUILD_LEASE").is_some(),
+        in_lease: false,
     })?;
     let error = command.exec();
     Err(error.into())
+}
+
+fn inside_admitted_run(mut env: impl FnMut(&str) -> Option<String>) -> bool {
+    env("LOCKED_BUILD_LEASE").as_deref() == Some("1")
+        || (env("CARGO_TARGET_DIR").is_some_and(|value| !value.is_empty())
+            && env("CARGO_BUILD_JOBS").is_some_and(|value| {
+                value.parse::<u32>().is_ok_and(|jobs| jobs > 0)
+                    && env("RUST_TEST_THREADS").as_deref() == Some(value.as_str())
+            }))
+}
+
+fn nested_real_cargo() -> Result<PathBuf> {
+    let explicit = std::env::var_os("LOCKED_BUILD_CONFIG").map(PathBuf::from);
+    let policy = explicit.clone().or_else(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        Some(
+            writable::ix_home(
+                std::env::var_os("IX_HOME").map(PathBuf::from),
+                home.as_deref(),
+            )
+            .join("locked-build/policy.json"),
+        )
+    });
+    if let Some(path) = policy {
+        match std::fs::File::open(&path) {
+            Ok(_) => {
+                if let Some(cargo) = config::Config::read(&path)?.real_cargo {
+                    return Ok(cargo);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && explicit.is_none() => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    std::env::var_os("PATH")
+        .as_deref()
+        .and_then(|path| discover_real_cargo(path, &std::env::current_exe().ok()?))
+        .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "real cargo not found"))
 }
 
 fn cargo_shim_class(read_env: impl FnOnce(&str) -> Option<String>) -> String {
@@ -636,6 +719,56 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Provenance: SWM-374. Trace: FR-011-AC-7
+    #[test]
+    fn readonly_ix_home_uses_one_private_fallback_and_reads_existing_policy() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let ix = root.path().join("ix");
+        let dir = ix.join("locked-build");
+        std::fs::create_dir_all(&dir)?;
+        let policy = dir.join("policy.json");
+        let bytes = br#"{"host":"manual","capacity_units":1,"maximum_units":1,"cargo_build_jobs":4,"rust_test_threads":4,"disk_reserve_bytes":100000000000,"hold_ms":5400000}"#;
+        std::fs::write(&policy, bytes)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))?;
+        let resolve = || resolve_paths(None, None, |key| (key == "IX_HOME").then(|| ix.clone()));
+        let first = resolve();
+        let second = resolve();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        let (state, config) = first?;
+        assert_eq!(second?, (state.clone(), config.clone()));
+        assert_eq!(state, writable::shared_root()?);
+        assert_eq!(config, policy);
+        assert_eq!(std::fs::read(&config)?, bytes);
+        assert_eq!(config::Config::read(&config)?.cargo_build_jobs, Some(4));
+        std::fs::remove_file(&policy)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))?;
+        let absent = resolve();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        assert_eq!(absent?, (state.clone(), state.join("policy.json")));
+        Ok(())
+    }
+
+    /// Provenance: SWM-374. Trace: FR-011-AC-7
+    #[test]
+    fn nested_markers_require_an_actual_marker_or_complete_legacy_environment() {
+        assert!(inside_admitted_run(
+            |key| (key == "LOCKED_BUILD_LEASE").then(|| "1".into())
+        ));
+        assert!(!inside_admitted_run(|_| None));
+        assert!(!inside_admitted_run(
+            |key| (key == "LOCKED_BUILD_LEASE").then(|| "0".into())
+        ));
+        assert!(inside_admitted_run(|key| match key {
+            "CARGO_TARGET_DIR" => Some("/work/target".into()),
+            "CARGO_BUILD_JOBS" | "RUST_TEST_THREADS" => Some("4".into()),
+            _ => None,
+        }));
+        assert!(!inside_admitted_run(|key| match key {
+            "CARGO_BUILD_JOBS" | "RUST_TEST_THREADS" => Some("4".into()),
+            _ => None,
+        }));
+    }
 
     #[test]
     fn run_accepts_named_class_without_owner_or_ticket_flags() {
@@ -822,33 +955,29 @@ mod tests {
     }
 
     #[test]
-    fn run_and_shim_paths_default_from_home_or_xdg_and_honor_precedence() -> Result<()> {
+    fn run_and_shim_paths_default_from_ix_home_and_honor_precedence() -> Result<()> {
         let root = tempfile::tempdir()?;
         let home = root.path().join("home");
         std::fs::create_dir_all(&home)?;
         let vars = [
             ("HOME", home.clone()),
-            ("XDG_STATE_HOME", root.path().join("xdg-state")),
-            ("XDG_CONFIG_HOME", root.path().join("xdg-config")),
+            ("IX_HOME", root.path().join("ix-home")),
         ];
         let (state, config) = resolve_paths(None, None, |name| {
             vars.iter()
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.clone())
         })?;
-        assert_eq!(state, root.path().join("xdg-state/locked-build"));
-        assert_eq!(
-            config,
-            root.path().join("xdg-config/locked-build/policy.json")
-        );
+        assert_eq!(state, root.path().join("ix-home/locked-build/state"));
+        assert_eq!(config, root.path().join("ix-home/locked-build/policy.json"));
         let (home_state, home_config) = resolve_paths(None, None, |name| match name {
             "HOME" => Some(home.clone()),
             "XDG_STATE_HOME" => Some("relative/state".into()),
             "XDG_CONFIG_HOME" => Some("relative/config".into()),
             _ => None,
         })?;
-        assert_eq!(home_state, home.join(".local/state/locked-build"));
-        assert_eq!(home_config, home.join(".config/locked-build/policy.json"));
+        assert_eq!(home_state, home.join(".ix/locked-build/state"));
+        assert_eq!(home_config, home.join(".ix/locked-build/policy.json"));
 
         let policy = root.path().join("policy.json");
         std::fs::write(&policy, include_str!("../policy.example.json"))?;
