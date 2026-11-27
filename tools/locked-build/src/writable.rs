@@ -37,7 +37,7 @@ fn publish_host_namespace(path: &Path, marker: &HostNamespace) -> Result<()> {
         .mode(0o600)
         .open(path.with_extension("lock"))?;
     lock.lock()?;
-    match fs::read(&path) {
+    match fs::read(path) {
         Ok(bytes) => {
             let existing: HostNamespace = serde_json::from_slice(&bytes)?;
             if existing.boot_id == marker.boot_id {

@@ -116,11 +116,14 @@ fn stable_boot_identity_and_timestamp_jitter_never_expire_healthy_leases() {
     let mut state = state(vec![request(1, 0, 1, 0)]);
     state.requests[0].phase = Phase::Running;
     state.boot_time = 10_000;
-    for boot in [10_001, 9_999, 10_090, 9_910] {
+    for boot in [0, 10_001, 9_999, 10_090, 9_910] {
         assert!(!state.rebooted(None, boot));
     }
     assert!(state.rebooted(None, 10_600));
     assert!(state.rebooted(None, 9_400));
+    state.boot_time = 0;
+    assert!(!state.rebooted(None, 10_000));
+    state.boot_time = 10_000;
     // Upgrade adopts a UUID without declaring the existing host rebooted.
     assert!(!state.rebooted(Some("boot-a"), 10_600));
     state.boot_id = Some("boot-a".to_owned());
