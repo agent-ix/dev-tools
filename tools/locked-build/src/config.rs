@@ -61,9 +61,13 @@ pub enum CacheRole {
 }
 
 /// Cache policy shared by request environments and telemetry.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CachePolicy {
+    /// Enable the per-request kache wrapper when its binary passes a bounded health check.
+    pub enabled: bool,
+    /// Optional executable path, resolved relative to the host policy file.
+    pub executable: Option<PathBuf>,
     /// Local is the default; shared access requires an explicit policy change.
     pub mode: CacheMode,
     /// Server or client role; never inferred from a host name.
@@ -74,7 +78,46 @@ pub struct CachePolicy {
     pub remote_status_file: Option<PathBuf>,
 }
 
+impl Default for CachePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            executable: None,
+            mode: CacheMode::Local,
+            cache_role: CacheRole::Client,
+            remote_report_file: None,
+            remote_status_file: None,
+        }
+    }
+}
+
 impl CachePolicy {
+    pub(crate) fn resolve_paths(&mut self, directory: &Path) -> Result<()> {
+        let directory = if directory.is_absolute() {
+            directory.to_owned()
+        } else {
+            std::env::current_dir()?.join(directory)
+        };
+        for path in [
+            &mut self.executable,
+            &mut self.remote_report_file,
+            &mut self.remote_status_file,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if path.is_relative() {
+                *path = directory.join(&*path);
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn executable_or(
+        &self,
+        fallback: impl FnOnce() -> Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        self.executable.clone().or_else(fallback)
+    }
     pub(crate) fn shared_enabled(&self) -> bool {
         self.mode != CacheMode::Local
     }
@@ -302,17 +345,7 @@ impl Config {
         {
             *real_cargo = directory.join(&*real_cargo);
         }
-        for file in [
-            &mut config.cache.remote_report_file,
-            &mut config.cache.remote_status_file,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if file.is_relative() {
-                *file = directory.join(&*file);
-            }
-        }
+        config.cache.resolve_paths(directory)?;
         config.validate()?;
         Ok(config)
     }

@@ -389,6 +389,54 @@
           "annotations": {
             "summary": "Kache permit wait exceeds 20% of compile elapsed time"
           }
+        },
+        {
+          "record": "ix_kache:miss_ratio",
+          "expr": "rate(ix_kache_misses_total[1h]) / clamp_min(rate(ix_kache_hits_total[1h]) + rate(ix_kache_misses_total[1h]), 0.000001)"
+        },
+        {
+          "record": "ix_kache:hits_1h",
+          "expr": "increase(ix_kache_hits_total[1h])"
+        },
+        {
+          "record": "ix_kache:misses_1h",
+          "expr": "increase(ix_kache_misses_total[1h])"
+        },
+        {
+          "record": "ix_kache:time_saved_seconds_1h",
+          "expr": "increase(ix_kache_hit_compile_seconds_total[1h])"
+        },
+        {
+          "record": "ix_kache:local_hits_1h",
+          "expr": "increase(ix_kache_local_hits_total[1h])"
+        },
+        {
+          "record": "ix_kache:remote_hits_1h",
+          "expr": "increase(ix_kache_remote_hits_total[1h])"
+        },
+        {
+          "record": "ix_build:run_p50_seconds",
+          "expr": "histogram_quantile(0.50, sum by (host, le) (rate(ix_build_run_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:run_p95_seconds",
+          "expr": "histogram_quantile(0.95, sum by (host, le) (rate(ix_build_run_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:builds_1h",
+          "expr": "sum by (host, outcome) (increase(ix_build_builds_total[1h]))"
+        },
+        {
+          "record": "ix_build:failures_1h",
+          "expr": "sum by (host, code) (increase(ix_build_failures_total[1h]))"
+        },
+        {
+          "record": "ix_build:storage_free_bytes",
+          "expr": "node_filesystem_avail_bytes{fstype!~\"tmpfs|devtmpfs|overlay\"}"
+        },
+        {
+          "record": "ix_build:storage_io_utilisation_pct",
+          "expr": "100 * rate(node_disk_io_time_seconds_total[5m])"
         }
       ]
     }

@@ -237,8 +237,11 @@ impl SamplerConfig {
                 format!("sampler config cannot be read safely: {}", error.kind()),
             )
         })?;
-        let config: Self = serde_json::from_slice(&bytes)
+        let mut config: Self = serde_json::from_slice(&bytes)
             .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        config
+            .cache
+            .resolve_paths(path.parent().unwrap_or_else(|| Path::new(".")))?;
         config.validate()?;
         Ok(config)
     }

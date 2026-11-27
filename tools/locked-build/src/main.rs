@@ -8,6 +8,7 @@ mod diagnostics;
 mod error;
 mod exporter;
 mod install;
+mod kache_wrapper;
 mod metrics;
 mod model;
 mod process;
