@@ -2178,9 +2178,12 @@ enum LauncherPlatform {
 
 impl LauncherPlatform {
     fn current() -> Self {
-        if cfg!(target_os = "linux") {
+        #[cfg(target_os = "linux")]
+        {
             Self::Linux
-        } else {
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
             Self::Other
         }
     }
