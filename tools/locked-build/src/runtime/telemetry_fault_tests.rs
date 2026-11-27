@@ -195,7 +195,7 @@ fn telemetry_fault_stopped_timer_and_unavailable_store_keep_previous_samples() -
     let id = queued(&store)?;
     cancel(&store, &id)?;
     let output = root.path().join("metrics.prom");
-    let previous = cli_export(&binary, &store, &output)?;
+    let _ = cli_export(&binary, &store, &output)?;
     #[cfg(target_os = "macos")]
     {
         let label = format!("com.agent-ix.swm417-{}", crate::store::random_id()?);
@@ -243,6 +243,7 @@ fn telemetry_fault_stopped_timer_and_unavailable_store_keep_previous_samples() -
                 .success()
         );
     }
+    let previous = std::fs::read_to_string(&output)?;
     // Stop this fixture's refreshes; replay twenty minutes with the last textfile.
     assert_fault_alert(&previous, "LockedBuildExportStale")?;
     std::fs::rename(&store.path, root.path().join("unavailable-store"))?;
@@ -366,4 +367,65 @@ fn telemetry_fault_full_state_directory_fires_free_space_alert() -> Result<()> {
     .ok_or_else(|| Error::new(ErrorCode::State, "state free metric missing"))?;
     assert!(free < 65536.);
     assert_fault_alert(&text, "LockedBuildStateDirFreeLow")
+}
+
+/// Trace: FR-015-AC-5, FR-015-AC-10
+#[test]
+#[ignore = "draco-only isolated FIFO/deadline regression lane; requires reviewed binary"]
+fn telemetry_fault_blocked_store_keeps_previous_and_fifo_output_cannot_hang() -> Result<()> {
+    let binary = draco_only()?;
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    cancel(&store, &id)?;
+    let output = root.path().join("metrics.prom");
+    let previous = cli_export(&binary, &store, &output)?;
+    std::fs::remove_file(store.path.join("snapshot.json"))?;
+    let mode = nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR;
+    nix::unistd::mkfifo(&store.path.join("snapshot.json"), mode)
+        .map_err(|e| Error::new(ErrorCode::Io, e.to_string()))?;
+    let started = std::time::Instant::now();
+    let fallback = cli_export(&binary, &store, &output)?;
+    assert!(
+        started.elapsed() < Duration::from_secs(9),
+        "blocked-store fallback exceeded publisher deadline"
+    );
+    for line in previous
+        .lines()
+        .filter(|l| !l.contains("ix_build_export_error"))
+    {
+        assert!(
+            fallback.lines().any(|actual| actual == line),
+            "lost previous sample {line}"
+        );
+    }
+    assert!(fallback.contains("ix_build_export_error{host=\"your-build-host\"} 1"));
+    std::fs::rename(&store.path, root.path().join("unavailable-store"))?;
+    std::fs::remove_file(&output)?;
+    nix::unistd::mkfifo(&output, mode).map_err(|e| Error::new(ErrorCode::Io, e.to_string()))?;
+    let mut publisher = OwnedChild(
+        Command::new(&binary)
+            .arg("--state")
+            .arg(&store.path)
+            .arg("--config")
+            .arg(&store.config_path)
+            .args(["metrics", "--output"])
+            .arg(&output)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?,
+    );
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = publisher.0.try_wait()? {
+            assert!(!status.success(), "non-regular output must be refused");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "FIFO output hung the publisher"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }

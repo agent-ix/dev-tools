@@ -64,11 +64,11 @@ These gauges have only the `host` label:
 - `ix_build_unleased_build_processes`: live Cargo, rustc, or rustc-wrapper processes outside verified lease ancestry.
 
 Process sampling verifies PID and start time before accepting a lease root. Zombies are excluded.
-Process observations are read-only. Their gauges remain absent when the process table cannot be sampled.
+Process observations are read-only. Their gauges remain absent when the process table or a lease's PID namespace cannot be verified.
 
 `ix_build_oldest_queued_seconds{class}` measures the oldest current queue age, including saved reboot age.
 `ix_build_queue_depth_by_reason{class,reason}` counts queued requests by their last observed blockers.
-Simultaneous blockers overlap; their sum indicates queue presence rather than exact queue size.
+Simultaneous blockers overlap; Their sum indicates queue presence.
 An empty blocker list is `ready`. Priority reservation becomes `fifo_or_priority_reservation`.
 
 `ix_build_admission_blocked_seconds_total{reason}` measures host blocked time once per resource interval.
@@ -87,16 +87,17 @@ Scrapes project an open interval without changing persisted state.
 - `ix_build_export_timestamp_seconds`: last successful refresh time in UTC seconds.
 - `ix_build_state_dir_free_bytes`: available bytes on the state directory filesystem.
 - `ix_build_snapshot_size_bytes`: atomic snapshot file size.
-- `ix_build_export_error`: one when collection failed or exceeded its eight-second deadline; otherwise zero.
+- `ix_build_export_error`: one when collection failed or exceeded its six-second collection deadline; otherwise zero.
 
 The policy fingerprint is FNV-1a over effective serialized policy. Compare hashes with each host's intended configuration.
 Different hardware policies can produce intentional cross-host skew.
 
 ## Collection and retention
 
-Collection reads atomic snapshots without taking the scheduler write lock. A separate collector process bounds store and process probes.
+Collection reads atomic snapshots without taking the scheduler write lock. Separate collector and publisher processes bound probes and all fallback/publication I/O.
 On failure, publication retains previous samples and their original refresh timestamp, then sets `ix_build_export_error` to one.
 Atomic publication skips unchanged contents. Successful textfile publication records the exported store identity and ledger sequence.
+The publisher has an eight-second hard deadline; a blocked output leaves the previous atomic file intact.
 Daily pruning removes terminal requests covered by that checkpoint and retains cumulative counters.
 
 The exporter and its node scrape use the `node` job's static `host` label.

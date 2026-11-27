@@ -87,6 +87,11 @@ enum Action {
     },
     #[command(hide = true)]
     MetricsCollect,
+    #[command(hide = true)]
+    MetricsPublish {
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Sample configured read-only host sources into Prometheus text.
     Sample {
         #[arg(long)]
@@ -216,7 +221,7 @@ fn execute(cli: Cli) -> Result<i32> {
     }
     if matches!(
         &cli.command,
-        Action::Metrics { .. } | Action::MetricsCollect
+        Action::Metrics { .. } | Action::MetricsCollect | Action::MetricsPublish { .. }
     ) {
         // Monitoring resolves paths without creating aliases, policies or stores.
         let state = cli
@@ -234,6 +239,10 @@ fn execute(cli: Cli) -> Result<i32> {
             if output.is_none() {
                 print!("{text}");
             }
+            return Ok(0);
+        }
+        if let Action::MetricsPublish { output } = &cli.command {
+            print!("{}", exporter::publish(&state, &config, output.as_deref())?);
             return Ok(0);
         }
         if matches!(&cli.command, Action::MetricsCollect) {
@@ -322,7 +331,7 @@ fn execute(cli: Cli) -> Result<i32> {
             println!("{}", runtime::prune_exported(&store, exported_only)?);
             Ok(0)
         }
-        Action::MetricsCollect | Action::Metrics { .. } => {
+        Action::MetricsPublish { .. } | Action::MetricsCollect | Action::Metrics { .. } => {
             unreachable!("metrics handled before scheduler setup")
         }
         Action::Sample { .. } => unreachable!("sample handled before opening scheduler state"),

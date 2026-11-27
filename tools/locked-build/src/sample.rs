@@ -128,6 +128,7 @@ struct SampleResult {
 
 /// Read-only lease/process observations; no signaling or scheduler mutation.
 pub(crate) fn lease_health(state: &crate::model::State) -> Option<(usize, usize)> {
+    let namespace = crate::process::pid_namespace().ok()?;
     use sysinfo::{ProcessRefreshKind, RefreshKind, System};
     let system = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_tasks()),
@@ -156,12 +157,20 @@ pub(crate) fn lease_health(state: &crate::model::State) -> Option<(usize, usize)
             arguments: p.cmd().to_vec(),
         })
         .collect();
-    Some(lease_health_from_processes(state, &rows))
+    lease_health_from_processes(state, &rows, namespace.as_deref())
 }
 fn lease_health_from_processes(
     state: &crate::model::State,
     rows: &[ProcessRecord],
-) -> (usize, usize) {
+    namespace: Option<&str>,
+) -> Option<(usize, usize)> {
+    if state
+        .requests
+        .iter()
+        .any(|r| r.phase == crate::model::Phase::Running && r.pid_namespace.as_deref() != namespace)
+    {
+        return None;
+    }
     let by_pid: BTreeMap<_, _> = rows.iter().map(|row| (row.pid, row)).collect();
     let mut roots = BTreeSet::new();
     let mut missing = 0;
@@ -213,7 +222,7 @@ fn lease_health_from_processes(
             true
         })
         .count();
-    (missing, unleased)
+    Some((missing, unleased))
 }
 
 impl SamplerConfig {
@@ -2086,8 +2095,40 @@ mod lease_tests {
             row(40, 1, 9, "rustc"),
         ];
         assert_eq!(
-            lease_health_from_processes(&state(vec![running, missing]), &rows),
-            (1, 3)
+            lease_health_from_processes(&state(vec![running, missing]), &rows, None),
+            Some((1, 3))
+        );
+    }
+    /// Trace: FR-015-AC-15
+    #[test]
+    fn telemetry_foreign_or_unknown_namespace_is_not_reported_as_local_process_health() {
+        let mut running = request(1, "draco:tooling:one".into(), Phase::Running);
+        running.pid_namespace = Some("pid:[11]".into());
+        running.worker = Some(ProcessIdentity {
+            pid: 10,
+            started_seconds: 7,
+        });
+        let rows = vec![ProcessRecord {
+            pid: 10,
+            parent_pid: 1,
+            process_group_id: 10,
+            start_time: "7".into(),
+            state: 'S',
+            uid: None,
+            arguments: vec!["rustc".into()],
+        }];
+        assert_eq!(
+            lease_health_from_processes(&state(vec![running.clone()]), &rows, Some("pid:[11]")),
+            Some((0, 0))
+        );
+        assert_eq!(
+            lease_health_from_processes(&state(vec![running.clone()]), &rows, Some("pid:[22]")),
+            None
+        );
+        running.pid_namespace = None;
+        assert_eq!(
+            lease_health_from_processes(&state(vec![running]), &rows, Some("pid:[22]")),
+            None
         );
     }
 }
