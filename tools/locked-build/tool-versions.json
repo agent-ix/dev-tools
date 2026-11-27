@@ -4,7 +4,8 @@
     {"name": "locked-build", "executable": "locked-build", "version": "0.1.0"},
     {"name": "quire", "executable": "quire", "version": "0.53.3"},
     {"name": "quoin", "executable": "quoin", "version": "0.36.10"},
-    {"name": "ix-board", "executable": "ix-board", "version": "0.12.0"},
+    {"name": "ix-board", "executable": "ix-board", "version": "0.12.2"},
+    {"name": "ix-flow", "executable": "ix-flow", "version": "0.3.5"},
     {"name": "ix-trace-run", "executable": "ix-trace-run"},
     {"name": "cargo", "executable": "cargo", "version": "1.98.1"},
     {"name": "rustc", "executable": "rustc", "version": "1.98.1"}
