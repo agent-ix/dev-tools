@@ -2172,6 +2172,7 @@ enum CommandStart {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LauncherPlatform {
     Linux,
+    #[cfg(any(not(target_os = "linux"), test))]
     Other,
 }
 
