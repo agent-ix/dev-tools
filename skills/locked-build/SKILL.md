@@ -48,9 +48,12 @@ shell after the first install. npm packages are installed with both
 `--registry=https://registry.npmjs.org/` and
 `--@agent-ix:registry=https://registry.npmjs.org/`, so a user or scope registry
 setting cannot route Agent IX package installs through a different registry.
-Run `locked-build check-install` to compare all tool versions against
+Run `locked-build check-install` to compare installed CLI pins against
 `tools/locked-build/tool-versions.json`; its one-line `ok`/`mismatch` output
-and exit status are suitable for ix-board cadence checks.
+and exit status are suitable for ix-board cadence checks. This host manifest
+does not pin Cargo or rustc; each repository owns its toolchain selection,
+using `rust-toolchain` where configured. A `rust-version` value sets an MSRV
+floor, not a host-wide toolchain pin.
 
 ## Wrapper migration map
 

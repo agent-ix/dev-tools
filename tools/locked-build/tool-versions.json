@@ -6,8 +6,6 @@
     {"name": "quoin", "executable": "quoin", "version": "0.37.0", "npm_package": "@agent-ix/quoin"},
     {"name": "ix-board", "executable": "ix-board", "version": "0.12.2"},
     {"name": "ix-flow", "executable": "ix-flow", "version": "0.3.5", "npm_package": "@agent-ix/ix-flow"},
-    {"name": "ix-trace-run", "executable": "ix-trace-run"},
-    {"name": "cargo", "executable": "cargo", "version": "1.98.1"},
-    {"name": "rustc", "executable": "rustc", "version": "1.98.1"}
+    {"name": "ix-trace-run", "executable": "ix-trace-run"}
   ]
 }

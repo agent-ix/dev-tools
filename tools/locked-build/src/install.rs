@@ -416,8 +416,6 @@ mod tests {
                 Some("@agent-ix/ix-flow"),
             ),
             ("ix-trace-run", "ix-trace-run", None, None),
-            ("cargo", "cargo", Some("1.98.1"), None),
-            ("rustc", "rustc", Some("1.98.1"), None),
         ];
         let actual: Vec<_> = manifest
             .tools
