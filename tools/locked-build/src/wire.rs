@@ -239,87 +239,12 @@ pub struct RequestTrace {
     pub granted_memory_reservation_bytes: Option<u64>,
 }
 
-/// One counter series in status JSON.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct OutcomeCounter {
-    /// Host label.
-    pub host: String,
-    /// Class label.
-    pub class: String,
-    /// Closed terminal/refusal outcome.
-    pub outcome: String,
-    /// Durable counter value.
-    pub value: u64,
-}
-/// One code counter series in status JSON.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CodeCounter {
-    /// Host label.
-    pub host: String,
-    /// Class label.
-    pub class: String,
-    /// Stable termination/refusal code.
-    pub code: Code,
-    /// Durable counter value.
-    pub value: u64,
-}
-/// One class/reason blocked-duration series.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct BlockedCounter {
-    /// Host label.
-    pub host: String,
-    /// Class label.
-    pub class: String,
-    /// Blocking reason label.
-    pub reason: String,
-    /// Cumulative blocked seconds.
-    pub value: f64,
-}
-/// Histogram upper bound, including the Prometheus +Inf spelling.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum BucketBound {
-    /// Finite seconds.
-    Seconds(u64),
-    /// The string +Inf.
-    Infinity(String),
-}
-/// One cumulative histogram bucket.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct HistogramBucket {
-    /// Inclusive seconds bound.
-    pub le: BucketBound,
-    /// Cumulative count.
-    pub value: u64,
-}
-/// Queue-wait histogram in status JSON.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct QueueHistogram {
-    /// Host label.
-    pub host: String,
-    /// Class label.
-    pub class: String,
-    /// Cumulative buckets, including +Inf.
-    pub buckets: Vec<HistogramBucket>,
-    /// Sum in seconds.
-    pub sum: f64,
-    /// Observation count.
-    pub count: u64,
-}
 /// Shared status representation of the existing metric families.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MetricsSnapshot {
     /// Durable build telemetry and current capacity/policy gauges.
     pub telemetry: Vec<MetricFamily>,
-    /// Completed/refused attempts by outcome.
-    pub ix_build_requests_total: Vec<OutcomeCounter>,
-    /// Abnormal attempts by stable code.
-    pub ix_build_terminations_total: Vec<CodeCounter>,
-    /// Per-request blocked durations by class/reason.
-    pub ix_build_blocked_seconds_total: Vec<BlockedCounter>,
-    /// Existing queue-wait histogram.
-    pub ix_build_queue_wait_seconds: Vec<QueueHistogram>,
 }
 
 /// Additive, read-only request projection for monitoring consumers.

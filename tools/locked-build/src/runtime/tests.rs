@@ -740,22 +740,10 @@ fn refusal_ledger_metrics_and_requested_parallelism_use_hand_written_values() ->
         refusal_event.trace.diagnostic.message,
         failure.diagnostic.message
     );
-    assert!(
-        report
-            .metrics
-            .ix_build_requests_total
-            .iter()
-            .any(|row| row.class == "periodic" && row.outcome == "refused" && row.value == 1)
-    );
-    assert!(
-        report
-            .metrics
-            .ix_build_terminations_total
-            .iter()
-            .any(|row| row.class == "periodic"
-                && row.code == locked_build::wire::Code::RefusedQueue
-                && row.value == 1)
-    );
+    let mut rendered = String::new();
+    crate::telemetry::render(&report.metrics.telemetry, &mut rendered);
+    assert!(rendered.contains("outcome=\"refused\""));
+    assert!(rendered.contains("code=\"LB_REFUSED_QUEUE\""));
     Ok(())
 }
 
@@ -1012,13 +1000,11 @@ fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
     ));
 
     let admitted = metrics(&store)?;
-    assert!(admitted.contains("ix_build_slots_busy{host=\"your-build-host\"} 1"));
-    assert!(admitted.contains("ix_build_slots_configured{host=\"your-build-host\"} 1"));
-    assert!(admitted.contains(
-        "ix_build_queue_wait_seconds_count{host=\"your-build-host\",class=\"periodic\"} 1"
-    ));
+    assert!(admitted.contains("ix_build_units_used{host=\"your-build-host\"} 1"));
+    assert!(admitted.contains("ix_build_units_capacity{host=\"your-build-host\"} 1"));
+    assert!(!admitted.contains("ix_build_queue_wait_seconds"));
     assert!(
-        admitted.contains("ix_build_queue_depth{host=\"your-build-host\",class=\"periodic\"} 0")
+        admitted.contains("ix_build_queue_depth_by_reason{class=\"periodic\",host=\"your-build-host\",reason=\"ready\"} 0")
     );
 
     store.transaction(|state, config| {
@@ -1035,9 +1021,9 @@ fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
     })?;
     let completed = metrics(&store)?;
     assert!(completed.contains(
-        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"ok\"} 1"
+        "ix_build_builds_total{class=\"periodic\",host=\"your-build-host\",outcome=\"ok\"} 1"
     ));
-    assert!(completed.contains("ix_build_slots_busy{host=\"your-build-host\"} 0"));
+    assert!(completed.contains("ix_build_units_used{host=\"your-build-host\"} 0"));
     let state_bytes = std::fs::read_to_string(store.path.join("state.json"))?;
     assert!(!state_bytes.contains("\"metrics\""));
     Ok(())
@@ -1251,7 +1237,7 @@ fn host_blocked_accumulator_survives_late_polls_recovery_and_interrupts() -> Res
 
 /// Trace: FR-015-AC-11
 #[test]
-fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> Result<()> {
+fn scheduler_checkpoints_expired_last_waiter_without_counter_regression() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let config_path = root.path().join("policy.json");
@@ -1270,7 +1256,7 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
         2 * crate::config::POLL_INTERVAL_MS + 50,
     ));
     stop_child_group(&mut child)?;
-
+    store.transaction(|_, _| Ok(()))?;
     let expired = metrics(&store)?;
     let value = metric_value(
         &expired,
@@ -1304,7 +1290,7 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
 
 /// Trace: FR-015-AC-11
 #[test]
-fn metrics_exposition_checkpoints_monotonic_and_utc_block_starts() -> Result<()> {
+fn metrics_exposition_does_not_write_monotonic_or_utc_block_checkpoints() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let config_path = root.path().join("policy.json");
@@ -1355,21 +1341,14 @@ fn metrics_exposition_checkpoints_monotonic_and_utc_block_starts() -> Result<()>
     let checkpoint_after: serde_json::Value =
         serde_json::from_slice(&std::fs::read(store.path.join("metrics.json"))?)?;
     assert!(second_value >= first_value);
-    assert!(
-        checkpoint_after["blocked_millis"]["memory"]
-            .as_u64()
-            .unwrap_or(0)
-            > 0
+    assert_eq!(checkpoint_after, checkpoint_before);
+    assert_eq!(
+        checkpoint_after["active_block"][1].as_u64(),
+        Some(clock_before)
     );
-    assert!(
-        checkpoint_after["active_block"][1]
-            .as_u64()
-            .is_some_and(|after| after > clock_before)
-    );
-    assert!(
-        checkpoint_after["active_started_at_ms"]
-            .as_u64()
-            .is_some_and(|after| after > utc_before)
+    assert_eq!(
+        checkpoint_after["active_started_at_ms"].as_u64(),
+        Some(utc_before)
     );
     Ok(())
 }
@@ -3108,6 +3087,11 @@ fn metrics_sidecar_is_rebound_when_state_file_is_recreated() -> Result<()> {
         .ok_or_else(|| Error::new(ErrorCode::State, "store id missing"))?;
     std::fs::remove_file(store.path.join("state.json"))?;
     let _ = metrics(&store)?;
+    assert!(
+        !store.path.join("state.json").exists(),
+        "read-only scrape must not recreate scheduler state"
+    );
+    let _ = queued(&store)?;
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(store.path.join("state.json"))?)?;
     let metrics_sidecar: serde_json::Value =
@@ -3117,7 +3101,7 @@ fn metrics_sidecar_is_rebound_when_state_file_is_recreated() -> Result<()> {
         .ok_or_else(|| Error::new(ErrorCode::State, "store id missing"))?;
     assert_ne!(old_id, new_id);
     assert_eq!(metrics_sidecar["store_id"].as_str(), Some(new_id));
-    assert!(state["requests"].as_array().is_none_or(Vec::is_empty));
+    assert_eq!(state["requests"].as_array().map(Vec::len), Some(1));
     Ok(())
 }
 
@@ -3199,14 +3183,14 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
         )
     })?;
     assert!(metrics(&store)?.contains(
-        "ix_build_builds_total{host=\"your-build-host\",class=\"must-fix\",outcome=\"ok\"} 1"
+        "ix_build_builds_total{class=\"must-fix\",host=\"your-build-host\",outcome=\"ok\"} 1"
     ));
     Ok(())
 }
 
 /// Trace: FR-015-AC-3
 #[test]
-fn concurrent_textfile_exports_are_serialized_and_leave_a_complete_document() -> Result<()> {
+fn concurrent_textfile_exports_leave_a_complete_document_without_scheduler_lock() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let output = root.path().join("collector.prom");
@@ -3224,7 +3208,10 @@ fn concurrent_textfile_exports_are_serialized_and_leave_a_complete_document() ->
     })?;
     let without_refresh = |text: String| {
         text.lines()
-            .filter(|line| !line.starts_with("ix_build_export_timestamp_seconds{"))
+            .filter(|line| {
+                !line.starts_with("ix_build_export_timestamp_seconds{")
+                    && !line.starts_with("ix_build_state_dir_free_bytes{")
+            })
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
@@ -3282,34 +3269,11 @@ fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
         admitting
             .join()
             .map_err(|_| Error::new(ErrorCode::State, "admission thread panicked"))?;
-        assert!(scrape.contains("# TYPE ix_build_queue_depth gauge"));
-        assert!(scrape.contains("ix_build_slots_busy{host=\"your-build-host\"}"));
+        assert!(scrape.contains("# TYPE ix_build_queue_depth_by_reason gauge"));
+        assert!(scrape.contains("ix_build_units_used{host=\"your-build-host\"}"));
         assert!(matches!(admitted, Admission::Granted));
         Ok(())
     })?;
-    Ok(())
-}
-
-/// Trace: FR-015-AC-1
-#[test]
-fn holding_textfile_export_lock_does_not_hold_the_scheduler_state_lock() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let store = store(root.path())?;
-    let output = root.path().join("collector.prom");
-    let export_lock = store.lock_metrics_export()?;
-    let id = enqueue(
-        &store,
-        "test:team:lead",
-        "TEST-DURING-EXPORT",
-        1,
-        0,
-        None,
-        &["/usr/bin/true".into()],
-    )?;
-    assert_eq!(state_phase(&store, &id)?, Phase::Queued);
-    drop(export_lock);
-    metrics_to_file(&store, &output)?;
-    assert!(output.exists());
     Ok(())
 }
 
@@ -3515,13 +3479,11 @@ fn outcome_counters_survive_store_reopen_and_prune() -> Result<()> {
     let output = metrics(&reopened)?;
     assert_eq!(before_prune, metric_outcome_lines(&output));
     assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"cancelled\"} 1"
+        "ix_build_builds_total{class=\"periodic\",host=\"your-build-host\",outcome=\"cancelled\"} 1"
     ));
+    assert!(!output.contains("aborted_thermal"));
     assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"aborted_thermal\"} 0"
-    ));
-    assert!(output.contains(
-        "ix_build_builds_total{host=\"your-build-host\",class=\"periodic\",outcome=\"failed\"} 1"
+        "ix_build_builds_total{class=\"periodic\",host=\"your-build-host\",outcome=\"failed\"} 1"
     ));
     Ok(())
 }
@@ -3645,3 +3607,127 @@ fn pending_live_launch_does_not_count_as_repaired_until_replacement_registers() 
     assert!(text.contains("ix_build_supervisor_restarts_total{host=\"your-build-host\"} 1"));
     Ok(())
 }
+
+/// Trace: FR-015-AC-5, FR-005-AC-4
+#[test]
+fn telemetry_metrics_finishes_while_scheduler_holds_store_write_lock() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let _id = queued(&store)?;
+    let before = std::fs::read(store.path.join("metrics.json"))?;
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .open(store.path.join("lock"))?;
+    lock.lock()?;
+    std::thread::scope(|scope| -> Result<()> {
+        let (tx, rx) = mpsc::channel();
+        let store = &store;
+        scope.spawn(move || {
+            let _ = tx.send(metrics(store));
+        });
+        let text = rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|e| Error::new(ErrorCode::State, e.to_string()))??;
+        assert!(text.contains("ix_build_export_timestamp_seconds"));
+        Ok(())
+    })?;
+    assert_eq!(std::fs::read(store.path.join("metrics.json"))?, before);
+    drop(lock);
+    Ok(())
+}
+
+/// Trace: FR-015-AC-3, FR-015-AC-10
+#[test]
+fn telemetry_daily_prune_keeps_unexported_requests_and_durable_totals() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let first = queued(&store)?;
+    cancel(&store, &first)?;
+    let (snapshot, _) = store.snapshot()?;
+    let ack = crate::model::ExportCheckpoint {
+        store_id: snapshot.store_id.clone(),
+        sequence: snapshot.metrics.exported_sequence(),
+    };
+    std::fs::write(store.path.join("exported.json"), serde_json::to_vec(&ack)?)?;
+    let second = queued(&store)?;
+    cancel(&store, &second)?;
+    assert_eq!(prune_exported(&store, true)?, 1);
+    let (after, _) = store.snapshot()?;
+    assert!(after.find(&first).is_err());
+    assert_eq!(after.find(&second)?.phase, Phase::Cancelled);
+    let text = metrics(&store)?;
+    assert!(text.contains("outcome=\"cancelled\"} 2"));
+    // Another store's checkpoint cannot authorize pruning, even with a large sequence.
+    std::fs::write(
+        store.path.join("exported.json"),
+        serde_json::to_vec(&crate::model::ExportCheckpoint {
+            store_id: "another-store".into(),
+            sequence: u64::MAX,
+        })?,
+    )?;
+    assert_eq!(prune_exported(&store, true)?, 0);
+    Ok(())
+}
+
+/// Trace: FR-015-AC-5
+#[test]
+#[ignore = "named release performance lane: ten full scrapes of 10k retained requests"]
+fn telemetry_10k_request_ledger_scrape_p95_is_under_half_a_second() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    cancel(&store, &id)?;
+    store.transaction(|state, _| {
+        let template = state.find(&id)?.clone();
+        for sequence in 2..=10_000 {
+            let mut request = template.clone();
+            request.sequence = sequence;
+            request.id = RequestId(format!("{}:r{sequence}", state.store_id));
+            state.requests.push(request);
+        }
+        state.next_sequence = 10_001;
+        Ok(())
+    })?;
+    let snapshot_size = std::fs::metadata(store.path.join("snapshot.json"))?.len();
+    let binary = std::env::var_os("IX_BUILD_LOCKED_BUILD_BIN").ok_or_else(|| {
+        Error::new(
+            ErrorCode::Configuration,
+            "CLI performance lane requires IX_BUILD_LOCKED_BUILD_BIN",
+        )
+    })?;
+    let output_path = root.path().join("metrics.prom");
+    let mut durations = Vec::new();
+    for _ in 0..20 {
+        let start = std::time::Instant::now();
+        let output = std::process::Command::new(&binary)
+            .arg("--state")
+            .arg(&store.path)
+            .arg("--config")
+            .arg(&store.config_path)
+            .args(["metrics", "--output"])
+            .arg(&output_path)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = std::fs::read_to_string(&output_path)?;
+        assert!(text.contains("ix_build_snapshot_size_bytes"));
+        assert!(text.contains("ix_build_export_error{host=\"your-build-host\"} 0"));
+        durations.push(start.elapsed());
+    }
+    durations.sort();
+    let p95 = durations[18];
+    eprintln!(
+        "SWM-417 {} 10k-request snapshot_bytes={snapshot_size} scrape_p95={p95:?} max={:?}",
+        sysinfo::System::host_name().unwrap_or_default(),
+        durations[19]
+    );
+    assert!(p95 < Duration::from_millis(500), "scrape p95={p95:?}");
+    Ok(())
+}
+
+#[path = "telemetry_fault_tests.rs"]
+mod telemetry_fault_tests;

@@ -932,3 +932,11 @@ impl State {
 
 #[cfg(test)]
 mod tests;
+
+/// Durable acknowledgement of a successfully published telemetry ledger.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExportCheckpoint {
+    pub store_id: String,
+    pub sequence: u64,
+}

@@ -268,19 +268,6 @@ impl Store {
         })
     }
 
-    pub(crate) fn lock_metrics_export(&self) -> Result<File> {
-        self.reject_link("metrics-export.lock")?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(self.path.join("metrics-export.lock"))?;
-        lock.lock()?;
-        Ok(lock)
-    }
-
     pub(crate) fn transaction<T>(
         &self,
         operation: impl FnOnce(&mut State, &Config) -> Result<T>,

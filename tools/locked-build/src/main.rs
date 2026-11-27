@@ -6,6 +6,7 @@ mod build_disk;
 mod config;
 mod diagnostics;
 mod error;
+mod exporter;
 mod install;
 mod metrics;
 mod model;
@@ -75,12 +76,17 @@ enum Action {
     /// Reattach to an accepted request without submitting its command again.
     Wait { request: String },
     /// Remove terminal requests/events after the monitoring consumer saved them.
-    Prune,
+    Prune {
+        #[arg(long)]
+        exported_only: bool,
+    },
     /// Export Prometheus text metrics to stdout or an atomic textfile-collector path.
     Metrics {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    #[command(hide = true)]
+    MetricsCollect,
     /// Sample configured read-only host sources into Prometheus text.
     Sample {
         #[arg(long)]
@@ -208,6 +214,34 @@ fn execute(cli: Cli) -> Result<i32> {
         );
         return Ok(0);
     }
+    if matches!(
+        &cli.command,
+        Action::Metrics { .. } | Action::MetricsCollect
+    ) {
+        // Monitoring resolves paths without creating aliases, policies or stores.
+        let state = cli
+            .state
+            .clone()
+            .or_else(|| std::env::var_os("LOCKED_BUILD_STATE").map(PathBuf::from))
+            .unwrap_or_else(writable::shared_path);
+        let config = cli
+            .config
+            .clone()
+            .or_else(|| std::env::var_os("LOCKED_BUILD_CONFIG").map(PathBuf::from))
+            .unwrap_or_else(|| state.join("policy.json"));
+        if let Action::Metrics { output } = &cli.command {
+            let text = exporter::collect(&state, &config, output.as_deref())?;
+            if output.is_none() {
+                print!("{text}");
+            }
+            return Ok(0);
+        }
+        if matches!(&cli.command, Action::MetricsCollect) {
+            let store = store::Store::open_existing(&state, &config)?;
+            print!("{}", runtime::metrics(&store)?);
+            return Ok(0);
+        }
+    }
     let (state, config) = resolve_paths(cli.state.as_deref(), cli.config.as_deref(), |name| {
         std::env::var_os(name).map(PathBuf::from)
     })?;
@@ -229,11 +263,7 @@ fn execute(cli: Cli) -> Result<i32> {
         }
     }
     ensure_policy(&config, false)?;
-    let store = if matches!(&cli.command, Action::Metrics { .. }) {
-        store::Store::open_existing(&state, &config)?
-    } else {
-        runtime::open(&state, &config)?
-    };
+    let store = runtime::open(&state, &config)?;
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
         Action::Parking => Ok(0),
@@ -288,17 +318,12 @@ fn execute(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Action::Wait { request } => wait_and_report(&store, &RequestId(request), Vec::new()),
-        Action::Prune => {
-            println!("{}", runtime::prune(&store)?);
+        Action::Prune { exported_only } => {
+            println!("{}", runtime::prune_exported(&store, exported_only)?);
             Ok(0)
         }
-        Action::Metrics { output } => {
-            if let Some(output) = output {
-                runtime::metrics_to_file(&store, &output)?;
-            } else {
-                print!("{}", runtime::metrics(&store)?);
-            }
-            Ok(0)
+        Action::MetricsCollect | Action::Metrics { .. } => {
+            unreachable!("metrics handled before scheduler setup")
         }
         Action::Sample { .. } => unreachable!("sample handled before opening scheduler state"),
         Action::InstallTools | Action::CheckInstall { .. } => {

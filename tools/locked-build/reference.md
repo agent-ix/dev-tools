@@ -385,27 +385,11 @@ A running command's nonzero result is preserved as its own outcome.
 
 ## Prometheus metrics
 
-`metrics` writes Prometheus text to standard output. `metrics --output PATH` atomically
-replaces a textfile collector document; `--output` has no default. Use the per-user
-node_exporter path `$HOME/.local/share/node_exporter/textfile/ix_build_metrics.prom`;
-Terra WSL uses `/mnt/c/Users/<user>/.ix/metrics/ix_build_metrics.prom` instead. The exporter emits
-`ix_build_queue_depth` and `ix_build_queue_wait_seconds` by the FR-011 classes
-`check`, `test`, and `gate`;
-configured priorities above 2 use the `gate` series,
-`ix_build_slots_busy`, and `ix_build_slots_configured` from the host policy's
-`capacity_units` field, which is the source basis for this configured capacity
-series; it does not label this value as sustainable capacity. It exports
-`ix_build_builds_total` for the closed FR-015 outcomes `ok`, `failed`, `cancelled`,
-`timed_out`, `aborted_memory`, `aborted_swap`, `aborted_compressor`,
-`aborted_host_load`, `aborted_thermal`, `rss_cap`, and `pause_exceeded`, plus
-`ix_build_admission_blocked_seconds_total` for memory, target disk, host load, and
-probe failures. A blocked interval is counted once per host and closes when the last
-queued request leaves. This slice adds no pause or abort mechanism: abort outcome
-names remain in the closed outcome set but never increment here; FR-015-AC-8 coverage
-is limited to non-abort outcomes. The pause-specific metric series is omitted entirely;
-`pause_exceeded` is present only as a closed build outcome label. Named metrics data is
-stored in a separate `metrics.json` sidecar so old scheduler state remains readable.
-Event counters and histogram observations survive `recover`, process restart, and
-`prune` without being counted twice. Queue-wait histograms add the pre-reboot age
-captured at recovery to monotonic time after recovery. The hold deadline remains
-enforced by the existing watchdog behavior.
+`metrics` writes Prometheus text to standard output. `metrics --output PATH` publishes a complete textfile document atomically.
+Collection reads atomic state snapshots without taking the scheduler write lock. A collector timeout or unavailable store preserves previous textfile samples and sets the export-error gauge.
+
+`install-tools` discovers the running node_exporter's textfile directory and installs metric refresh and daily prune schedules.
+`prune --exported-only` removes terminal requests covered by the last successful export checkpoint, preserving cumulative counters.
+
+See [metric semantics](monitoring/metrics.md) for the family inventory, label bounds, duration clocks, and upgrade behavior.
+See [scrape build telemetry](monitoring/README.md) for host installation and monitoring configuration.

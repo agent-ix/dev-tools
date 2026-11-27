@@ -1,941 +1,611 @@
 {
-  "id": null,
-  "uid": "locked-build-hosts",
-  "title": "Locked-build host telemetry",
-  "description": "Build admission, execution and failures by host and class. Memory watchdog peaks are sampled lower bounds. Identity totals have lifetime cardinality limits.",
+  "uid": "locked-build",
+  "title": "Locked-build queue health",
   "schemaVersion": 39,
-  "version": 1,
-  "tags": [
-    "locked-build",
-    "builds"
-  ],
-  "timezone": "browser",
+  "version": 2,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
     "to": "now"
   },
-  "editable": true,
-  "annotations": {
-    "list": [
-
-    ]
-  },
   "templating": {
     "list": [
       {
         "name": "datasource",
-        "label": "Prometheus",
         "type": "datasource",
-        "query": "prometheus",
-        "refresh": 1,
-        "current": {
-          "text": "Prometheus",
-          "value": "Prometheus"
-        }
+        "query": "prometheus"
       },
       {
         "name": "host",
-        "label": "Host",
         "type": "query",
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "query": {
-          "query": "label_values(ix_build_info, host)",
-          "refId": "host"
-        },
-        "refresh": 1,
-        "multi": true,
+        "query": "label_values(ix_build_info, host)",
         "includeAll": true,
-        "allValue": ".*",
+        "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
-        }
-      },
-      {
-        "name": "class",
-        "label": "Class",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${datasource}"
         },
-        "query": {
-          "query": "label_values(ix_build_queue_depth, class)",
-          "refId": "class"
-        },
-        "refresh": 1,
-        "multi": true,
-        "includeAll": true,
-        "allValue": ".*",
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        }
+        "allValue": ".*"
       }
     ]
   },
   "panels": [
     {
       "id": 1,
-      "title": "Completed builds by outcome",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "title": "Wait p50 / p95 / p99 by class",
+      "type": "row",
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 0
+        "y": 0,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (host, outcome) (rate(ix_build_requests_total{host=~\"$host\",class=~\"$class\"}[$__rate_interval]))",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
+      "panels": []
     },
     {
       "id": 2,
-      "title": "Failures by code and cause",
+      "title": "Wait p50 / p95 / p99 by class",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (host, code, cause, exit_class, signal) (ix_build_failures_total{host=~\"$host\",class=~\"$class\"})",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:wait_p50_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "B",
+          "expr": "ix_build:wait_p95_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "C",
+          "expr": "ix_build:wait_p99_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     },
     {
       "id": 3,
-      "title": "Queue wait p50 / p95 / p99",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "title": "Priority and starvation",
+      "type": "row",
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 8
+        "y": 9,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (host, le) (rate(ix_build_wait_seconds_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "legendFormat": "{{host}} p50",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (host, le) (rate(ix_build_wait_seconds_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "legendFormat": "{{host}} p95",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        },
-        {
-          "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (host, le) (rate(ix_build_wait_seconds_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "legendFormat": "{{host}} p99",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
+      "panels": []
     },
     {
       "id": 4,
-      "title": "Command run p50 / p95 / p99",
+      "title": "Priority and starvation",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (host, le) (rate(ix_build_run_seconds_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "legendFormat": "{{host}} p50",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (host, le) (rate(ix_build_run_seconds_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "legendFormat": "{{host}} p95",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        },
-        {
-          "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (host, le) (rate(ix_build_run_seconds_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "legendFormat": "{{host}} p99",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:oldest_queued_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     },
     {
       "id": 5,
-      "title": "Queue depth by class",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "title": "Idle host with queue",
+      "type": "row",
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 16
+        "y": 18,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (host, class) (ix_build_queue_depth{host=~\"$host\",class=~\"$class\"})",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
+      "panels": []
     },
     {
       "id": 6,
-      "title": "Queue blockers (overlapping)",
+      "title": "Idle host with queue",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (host, class, reason) (ix_build_queue_depth_by_reason{host=~\"$host\",class=~\"$class\"})",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:idle_with_queue{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     },
     {
       "id": 7,
-      "title": "Running / units used / total",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "title": "Reserved versus peak memory and kills",
+      "type": "row",
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 24
+        "y": 27,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{__name__=~\"ix_build_running|ix_build_units_used|ix_build_units_capacity\",host=~\"$host\"}",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
+      "panels": []
     },
     {
       "id": 8,
-      "title": "Memory reservation / budget",
+      "title": "Reserved versus peak memory and kills",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 24
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "{__name__=~\"ix_build_memory_budget_used_bytes|ix_build_memory_budget_total_bytes\",host=~\"$host\"}",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:reserved_memory_bytes{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "B",
+          "expr": "ix_build:peak_memory_bytes{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "C",
+          "expr": "ix_build:kills_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "D",
+          "expr": "ix_build:memory_measurement_ratio{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     },
     {
       "id": 9,
-      "title": "Running memory headroom (minimum)",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "title": "Overload versus policy load",
+      "type": "row",
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 32
+        "y": 36,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "ix_build_running_memory_headroom_ratio{host=~\"$host\"}",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
+      "panels": []
     },
     {
       "id": 10,
-      "title": "Completed memory reservation / peak p95",
+      "title": "Overload versus policy load",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 32
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (host, measurement, le) (rate(ix_build_memory_peak_bytes_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "range": true,
-          "legendFormat": "peak {{host}} {{measurement}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (host, measurement, le) (rate(ix_build_memory_reserved_bytes_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "range": true,
-          "legendFormat": "reservation {{host}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:load_policy_ratio{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     },
     {
       "id": 11,
-      "title": "Memory and supervision kills",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "title": "Scheduler health: restarts, lost supervision, stuck queue",
+      "type": "row",
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 40
+        "y": 45,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (host, code) (increase(ix_build_terminations_total{host=~\"$host\",class=~\"$class\",code=~\"LB_RSS_CAP|LB_OOM_KILLED|LB_SUPERVISION_LOST\"}[$__rate_interval]))",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
+      "panels": []
     },
     {
       "id": 12,
-      "title": "Lease hold / policy cap p95",
+      "title": "Scheduler health: restarts, lost supervision, stuck queue",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 46,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 40
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (host, le) (rate(ix_build_hold_limit_ratio_bucket{host=~\"$host\",class=~\"$class\"}[$__rate_interval])))",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:restarts_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "B",
+          "expr": "ix_build:supervision_lost_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "C",
+          "expr": "ix_build:queue_stuck{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     },
     {
       "id": 13,
-      "title": "Queued builds by owner",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "title": "Lane fairness: completed unit-seconds",
+      "type": "row",
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 48
+        "y": 54,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "ix_build_owner_queued{host=~\"$host\"}",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
+      "panels": []
     },
     {
       "id": 14,
-      "title": "Blocked seconds by reason",
+      "title": "Lane fairness: completed unit-seconds",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 55,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 48
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (host, reason) (rate(ix_build_blocked_seconds_total{host=~\"$host\",class=~\"$class\"}[$__rate_interval]))",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:lane_unit_seconds_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     },
     {
       "id": 15,
-      "title": "Oldest queued build",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "title": "Wasted work: cancellations and late kills",
+      "type": "row",
+      "collapsed": false,
       "gridPos": {
-        "h": 8,
-        "w": 12,
         "x": 0,
-        "y": 56
+        "y": 63,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "ix_build_oldest_queued_seconds{host=~\"$host\"}",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
-        }
-      ]
+      "panels": []
     },
     {
       "id": 16,
-      "title": "Export freshness",
+      "title": "Wasted work: cancellations and late kills",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 56
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "time() - ix_build_export_timestamp_seconds{host=~\"$host\"}",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:cancelled_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "B",
+          "expr": "ix_build:late_kills_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "C",
+          "expr": "ix_build:wasted_run_seconds_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{cause}} seconds / second"
         }
       ]
     },
     {
       "id": 17,
-      "title": "Supervisor restarts / recoveries / boot changes",
+      "title": "Lease overhead",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 72,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 18,
+      "title": "Lease overhead",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 73,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 64
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "{__name__=~\"ix_build_supervisor_restarts_total|ix_build_recover_events_total|ix_build_boot_changes_total\",host=~\"$host\"}",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:lease_overhead_seconds_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     },
     {
-      "id": 18,
-      "title": "Build identity totals (bounded)",
+      "id": 19,
+      "title": "Refusals by code",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 81,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "title": "Refusals by code",
       "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 82,
+        "w": 24,
+        "h": 8
+      },
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 64
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": [
-
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ix_build:refusals_per_second{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Policy-change effect",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 90,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 22,
+      "title": "Policy-change effect",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 91,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build_identity_total{host=~\"$host\",class=~\"$class\"}",
-          "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
-          "range": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          }
+          "expr": "ix_build:policy_epochs{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        },
+        {
+          "refId": "B",
+          "expr": "ix_build:wait_p95_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Cross-host imbalance",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 99,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 24,
+      "title": "Cross-host imbalance",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 100,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ix_build:unit_utilization_ratio{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "title": "Leaked leases",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 108,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 26,
+      "title": "Leaked leases",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 109,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ix_build:leaked_leases{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "title": "Unleased builds",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 117,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 28,
+      "title": "Unleased builds",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 118,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ix_build:unleased_builds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "title": "Slow repository / subcommand",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 126,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 30,
+      "title": "Slow repository / subcommand",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 127,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ix_build:repo_run_mean_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}} {{lane}} {{repo}} {{subcommand}} {{code}}"
         }
       ]
     }

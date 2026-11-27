@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agent-ix.locked-build-prune</string>
+  <key>ProgramArguments</key><array>
+    <string>@BINARY@</string><string>--state</string><string>@STATE@</string>
+    <string>--config</string><string>@CONFIG@</string><string>prune</string><string>--exported-only</string>
+  </array>
+  <key>Nice</key><integer>19</integer><key>LowPriorityIO</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>17</integer></dict>
+</dict></plist>

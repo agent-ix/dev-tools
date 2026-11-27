@@ -1,51 +1,325 @@
-groups:
-  - name: locked-build
-    rules:
-      - record: ix_build:queue_depth:sum
-        expr: sum by (host) (ix_build_queue_depth)
-      - alert: LockedBuildQueueWaitHigh
-        expr: histogram_quantile(0.95, sum by (host, le) (rate(ix_build_wait_seconds_bucket[15m]))) > 300
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: 'Build queue wait p95 exceeds five minutes on {{ $labels.host }}'
-          description: 'Inspect locked-build status and queue reasons. Check admission policy and load before raising capacity.'
-      - alert: LockedBuildKilled
-        expr: sum by (host, code) (increase(ix_build_terminations_total{code=~"LB_OOM_KILLED|LB_RSS_CAP|LB_SUPERVISION_LOST"}[10m])) > 0
-        labels:
-          severity: critical
-        annotations:
-          summary: 'Build memory or supervision failure on {{ $labels.host }}: {{ $labels.code }}'
-          description: 'Inspect status/events for the exact policy limit and measured value; compare kill-limit and kill-measured histograms.'
-      - alert: LockedBuildQueueStuck
-        expr: (ix_build:queue_depth:sum > 0) and on (host) (changes(ix_build:queue_depth:sum[10m]) == 0) and on (host) (ix_build_units_used < ix_build_units_capacity) and on (host) (ix_build_oldest_queued_seconds > 600)
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: 'Build queue is unchanged with free units on {{ $labels.host }}'
-          description: 'Check memory_budget and fifo_or_priority_reservation reasons, host probes and supervisor health; free units alone do not guarantee admission.'
-      - alert: LockedBuildMemoryHeadroomLow
-        expr: ix_build_running_memory_headroom_ratio < 0.1
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: 'A running build has less than ten percent memory headroom on {{ $labels.host }}'
-          description: 'Inspect the lease hard cap and sampled peak. Watchdog measurements are lower bounds between polls.'
-      - alert: LockedBuildHostNoMetrics
-        expr: (up{job="locked-build"} == 0) or (up{job="locked-build"} unless on (host) ix_build_export_timestamp_seconds)
-        for: 10m
-        labels:
-          severity: critical
-        annotations:
-          summary: 'Build metrics have been unavailable for ten minutes on {{ $labels.host }}'
-          description: 'Check node_exporter, its textfile directory and the locked-build metrics timer or launch agent.'
-      - alert: LockedBuildExportStale
-        expr: time() - ix_build_export_timestamp_seconds > 600
-        labels:
-          severity: critical
-        annotations:
-          summary: 'Build textfile has not refreshed in ten minutes on {{ $labels.host }}'
-          description: 'Check the export service logs. Restore the durable metrics ledger if it is missing, corrupt or has a sequence gap.'
+{
+  "groups": [
+    {
+      "name": "locked-build",
+      "rules": [
+        {
+          "record": "ix_build:wasted_run_seconds_per_second",
+          "expr": "sum by (host, cause) (rate(ix_build_wasted_run_seconds_total[5m]))"
+        },
+        {
+          "record": "ix_build:wait_p50_seconds",
+          "expr": "histogram_quantile(0.50, sum by (host, class, le) (rate(ix_build_wait_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:wait_p95_seconds",
+          "expr": "histogram_quantile(0.95, sum by (host, class, le) (rate(ix_build_wait_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:wait_p99_seconds",
+          "expr": "histogram_quantile(0.99, sum by (host, class, le) (rate(ix_build_wait_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:oldest_queued_seconds",
+          "expr": "ix_build_oldest_queued_seconds"
+        },
+        {
+          "record": "ix_build:idle_with_queue",
+          "expr": "(sum by (host) (ix_build_queue_depth_by_reason) > bool 0) * on (host) (ix_build_running == bool 0)"
+        },
+        {
+          "record": "ix_build:reserved_memory_bytes",
+          "expr": "sum by (host, class) (rate(ix_build_memory_reserved_bytes_sum[5m])) / sum by (host, class) (rate(ix_build_memory_reserved_bytes_count[5m]))"
+        },
+        {
+          "record": "ix_build:peak_memory_bytes",
+          "expr": "sum by (host, class) (rate(ix_build_memory_peak_bytes_sum[5m])) / sum by (host, class) (rate(ix_build_memory_peak_bytes_count[5m]))"
+        },
+        {
+          "record": "ix_build:kills_per_second",
+          "expr": "sum by (host, code) (rate(ix_build_failures_total{code=~\"LB_RSS_CAP|LB_OOM_KILLED\"}[5m]))"
+        },
+        {
+          "record": "ix_build:load_policy_ratio",
+          "expr": "node_load1 / on (host) ix_build_policy_maximum_load"
+        },
+        {
+          "record": "ix_build:restarts_per_second",
+          "expr": "rate(ix_build_supervisor_restarts_total[5m])"
+        },
+        {
+          "record": "ix_build:supervision_lost_per_second",
+          "expr": "sum by (host) (rate(ix_build_failures_total{code=\"LB_SUPERVISION_LOST\"}[5m]))"
+        },
+        {
+          "record": "ix_build:queue_stuck",
+          "expr": "(max by (host) (ix_build_oldest_queued_seconds) > bool 600) * on (host) ix_build:idle_with_queue"
+        },
+        {
+          "record": "ix_build:lane_unit_seconds_per_second",
+          "expr": "rate(ix_build_lane_unit_seconds_total[5m])"
+        },
+        {
+          "record": "ix_build:cancelled_per_second",
+          "expr": "sum by (host) (rate(ix_build_builds_total{outcome=\"cancelled\"}[5m]))"
+        },
+        {
+          "record": "ix_build:late_kills_per_second",
+          "expr": "sum by (host) (rate(ix_build_failures_total{code=~\"LB_RSS_CAP|LB_OOM_KILLED|LB_HOLD_TIMEOUT\"}[5m]))"
+        },
+        {
+          "record": "ix_build:lease_overhead_seconds_per_second",
+          "expr": "sum by (host, class) (rate(ix_build_hold_seconds_sum[5m])) - sum by (host, class) (rate(ix_build_run_seconds_sum[5m]))"
+        },
+        {
+          "record": "ix_build:refusals_per_second",
+          "expr": "sum by (host, code) (rate(ix_build_failures_total{code=~\"LB_REFUSED_.*\"}[5m]))"
+        },
+        {
+          "record": "ix_build:policy_epochs",
+          "expr": "count by (host) (count_over_time(ix_build_info[1h]))"
+        },
+        {
+          "record": "ix_build:unit_utilization_ratio",
+          "expr": "ix_build_units_used / ix_build_units_capacity"
+        },
+        {
+          "record": "ix_build:leaked_leases",
+          "expr": "ix_build_leases_missing_process"
+        },
+        {
+          "record": "ix_build:unleased_builds",
+          "expr": "ix_build_unleased_build_processes"
+        },
+        {
+          "record": "ix_build:repo_run_mean_seconds",
+          "expr": "ix_build_repo_run_seconds_total / ix_build_repo_run_count_total"
+        },
+        {
+          "record": "ix_build:memory_measurement_ratio",
+          "expr": "sum by (host) (rate(ix_build_memory_peak_bytes_count[15m])) / sum by (host) (rate(ix_build_builds_total[15m]))"
+        },
+        {
+          "alert": "LockedBuildMustFixWaitHigh",
+          "expr": "ix_build:wait_p95_seconds{class=\"must-fix\"} > 60",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build MustFixWaitHigh"
+          }
+        },
+        {
+          "alert": "LockedBuildPointWaitHigh",
+          "expr": "ix_build:wait_p95_seconds{class=\"point\"} > 300",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build PointWaitHigh"
+          }
+        },
+        {
+          "alert": "LockedBuildBlockWaitHigh",
+          "expr": "ix_build:wait_p95_seconds{class=\"block\"} > 900",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build BlockWaitHigh"
+          }
+        },
+        {
+          "alert": "LockedBuildBackgroundWaitHigh",
+          "expr": "ix_build:wait_p95_seconds{class=~\"periodic|kani|arch-test\"} > 3600",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build BackgroundWaitHigh"
+          }
+        },
+        {
+          "alert": "LockedBuildIdleWithQueue",
+          "expr": "ix_build:idle_with_queue > 0",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build IdleWithQueue"
+          }
+        },
+        {
+          "alert": "LockedBuildQueueStuck",
+          "expr": "ix_build:queue_stuck > 0",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build QueueStuck"
+          }
+        },
+        {
+          "alert": "LockedBuildVersionSkew",
+          "expr": "count(count by (version) (ix_build_info)) > 1",
+          "for": "10m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build VersionSkew"
+          }
+        },
+        {
+          "alert": "LockedBuildPolicySkew",
+          "expr": "count(count by (policy_hash) (ix_build_info)) > 1",
+          "for": "10m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build PolicySkew"
+          }
+        },
+        {
+          "alert": "LockedBuildHostNoMetrics",
+          "expr": "(up{job=\"node\"} == 1) unless on (host) ix_build_export_timestamp_seconds",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build HostNoMetrics"
+          }
+        },
+        {
+          "alert": "LockedBuildNodeDown",
+          "expr": "(up{job=\"node\"} == 0) or absent(up{job=\"node\"})",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build NodeDown"
+          }
+        },
+        {
+          "alert": "LockedBuildExportStale",
+          "expr": "time() - ix_build_export_timestamp_seconds > 600",
+          "for": "0m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build ExportStale"
+          }
+        },
+        {
+          "alert": "LockedBuildExportError",
+          "expr": "ix_build_export_error > 0",
+          "for": "1m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build ExportError"
+          }
+        },
+        {
+          "alert": "LockedBuildMemoryMeasurementLow",
+          "expr": "ix_build:memory_measurement_ratio < 0.8",
+          "for": "10m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build MemoryMeasurementLow"
+          }
+        },
+        {
+          "alert": "LockedBuildRepeatedFailure",
+          "expr": "sum by (host, code) (increase(ix_build_failures_total[15m])) >= 3",
+          "for": "0m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build RepeatedFailure"
+          }
+        },
+        {
+          "alert": "LockedBuildLeakedLease",
+          "expr": "ix_build_leases_missing_process > 0",
+          "for": "2m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build LeakedLease"
+          }
+        },
+        {
+          "alert": "LockedBuildUnleasedProcess",
+          "expr": "ix_build_unleased_build_processes > 0",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build UnleasedProcess"
+          }
+        },
+        {
+          "alert": "LockedBuildStateDirFreeLow",
+          "expr": "ix_build_state_dir_free_bytes < 1073741824",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build StateDirFreeLow"
+          }
+        },
+        {
+          "alert": "LockedBuildSnapshotLarge",
+          "expr": "ix_build_snapshot_size_bytes > 52428800",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build SnapshotLarge"
+          }
+        },
+        {
+          "alert": "LockedBuildMemoryHeadroomLow",
+          "expr": "ix_build_running_memory_headroom_ratio < 0.1",
+          "for": "2m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build MemoryHeadroomLow"
+          }
+        },
+        {
+          "alert": "LockedBuildRunningStuck",
+          "expr": "ix_build_oldest_running_seconds > on (host) ix_build_policy_hold_seconds",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Locked-build RunningStuck"
+          }
+        }
+      ]
+    }
+  ]
+}

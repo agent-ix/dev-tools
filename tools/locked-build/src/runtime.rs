@@ -1050,7 +1050,7 @@ fn status_with_clock(
     Ok(Report {
         metrics: state
             .metrics
-            .snapshot_with_policy(&state, &config, now, clock),
+            .snapshot_with_policy(&state, &config, now, clock)?,
         state_path: store.path.clone(),
         schema_version: 1,
         store_id: state.store_id.clone(),
@@ -1080,16 +1080,78 @@ fn metrics_at(store: &Store, now: u64, clock: u64) -> Result<String> {
 
 fn metrics_with_clock(
     store: &Store,
-    read_clock: impl FnMut() -> Result<(u64, u64)>,
+    mut read_clock: impl FnMut() -> Result<(u64, u64)>,
 ) -> Result<String> {
-    store.transaction_with_clock(read_clock, |state, config, now, clock| {
-        state.metrics.checkpoint_active(clock, now)?;
-        state.metrics.exposition(state, config, now, clock)
-    })
+    let (state, config) = store.snapshot()?;
+    let (now, clock) = read_clock()?;
+    let mut projection = state.metrics.clone();
+    let queued_workers: Vec<_> = state
+        .requests
+        .iter()
+        .filter(|r| r.phase == Phase::Queued)
+        .filter_map(|r| r.worker.as_ref().map(|w| w.pid))
+        .collect();
+    let mut processes = None;
+    projection.expire_stale_block(
+        &state.requests,
+        now,
+        clock,
+        crate::config::POLL_INTERVAL_MS,
+        |request| {
+            request.worker.as_ref().is_some_and(|worker| {
+                matches!(
+                    processes
+                        .get_or_insert_with(|| Processes::read_workers(&queued_workers))
+                        .identity(worker, &request.id),
+                    IdentityState::Matching | IdentityState::Unavailable
+                )
+            })
+        },
+    )?;
+    let mut text = projection.exposition(&state, &config, now, clock)?;
+    let host = crate::metrics::escape_label(&state.host);
+    if let Some((missing, unleased)) = crate::sample::lease_health(&state) {
+        crate::telemetry::append_gauge(
+            &mut text,
+            "ix_build_leases_missing_process",
+            &host,
+            missing as f64,
+        );
+        crate::telemetry::append_gauge(
+            &mut text,
+            "ix_build_unleased_build_processes",
+            &host,
+            unleased as f64,
+        );
+    }
+    let disk = nix::sys::statvfs::statvfs(&store.path)
+        .map_err(|e| Error::new(ErrorCode::Io, e.to_string()))?;
+    crate::telemetry::append_gauge(
+        &mut text,
+        "ix_build_state_dir_free_bytes",
+        &host,
+        disk.blocks_available() as f64 * disk.fragment_size() as f64,
+    );
+    let size = std::fs::metadata(store.path.join("snapshot.json")).map_or(0, |m| m.len());
+    crate::telemetry::append_gauge(
+        &mut text,
+        "ix_build_snapshot_size_bytes",
+        &host,
+        size as f64,
+    );
+    let checkpoint = crate::model::ExportCheckpoint {
+        store_id: state.store_id.clone(),
+        sequence: state.metrics.exported_sequence(),
+    };
+    text.push_str(&format!(
+        "# locked-build-checkpoint {}\n",
+        serde_json::to_string(&checkpoint)?
+    ));
+    Ok(text)
 }
 
+#[cfg(test)]
 pub(crate) fn metrics_to_file(store: &Store, path: &Path) -> Result<()> {
-    let _export_lock = store.lock_metrics_export()?;
     let text = metrics(store)?;
     crate::metrics::write_atomic(path, &text)
 }
@@ -2891,22 +2953,63 @@ fn inspect_target_tree(target: &Path) -> Result<Option<TargetInspection>> {
     }))
 }
 
+#[cfg(test)]
 pub(crate) fn prune(store: &Store) -> Result<usize> {
+    prune_exported(store, false)
+}
+
+pub(crate) fn prune_exported(store: &Store, exported_only: bool) -> Result<usize> {
+    let checkpoint = if exported_only {
+        Some(serde_json::from_slice::<crate::model::ExportCheckpoint>(
+            &std::fs::read(store.path.join("exported.json"))?,
+        )?)
+    } else {
+        None
+    };
     let terminal = store.transaction(|state, _| {
+        if checkpoint
+            .as_ref()
+            .is_some_and(|ack| ack.store_id != state.store_id)
+        {
+            return Ok(Vec::new());
+        }
         let terminal: Vec<_> = state
             .requests
             .iter()
-            .filter(|request| request.phase.terminal())
+            .filter(|request| {
+                request.phase.terminal()
+                    && checkpoint.as_ref().is_none_or(|ack| {
+                        ack.store_id == state.store_id
+                            && state
+                                .events
+                                .iter()
+                                .filter(|e| e.request_id == request.id)
+                                .all(|e| {
+                                    e.event_id
+                                        .rsplit_once(":e")
+                                        .and_then(|(_, n)| n.parse::<u64>().ok())
+                                        .is_some_and(|n| n <= ack.sequence)
+                                })
+                    })
+            })
             .map(|request| request.id.clone())
             .collect();
-        state.requests.retain(|request| !request.phase.terminal());
+        state
+            .requests
+            .retain(|request| !terminal.contains(&request.id));
         let previous_events = state.events.len();
         state.events.retain(|event| {
             !terminal.contains(&event.request_id)
-                && !matches!(
+                && !(checkpoint.as_ref().is_none_or(|ack| {
+                    event
+                        .event_id
+                        .rsplit_once(":e")
+                        .and_then(|(_, n)| n.parse::<u64>().ok())
+                        .is_some_and(|n| n <= ack.sequence)
+                }) && matches!(
                     event.kind.as_str(),
                     "supervisor_restart" | "recovered" | "boot_changed"
-                )
+                ))
         });
         state.pruned_events = state
             .pruned_events
