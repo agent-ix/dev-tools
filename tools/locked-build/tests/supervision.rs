@@ -696,7 +696,15 @@ fn hold_deadline_survives_supervisor_loss_and_stops_term_resistant_descendants()
         Some(124)
     );
     assert_eq!(harness.request(0)?["state"], "timed_out");
-    assert_eq!(harness.request(0)?["reason"], "hold_timeout");
+    let reason = harness.request(0)?["reason"]
+        .as_str()
+        .ok_or("reason missing")?;
+    assert!(reason.contains("hold_timeout"), "{reason}");
+    assert!(reason.contains("hold_ms=15000 ms"), "{reason}");
+    assert!(
+        reason.contains("change the limit in policy hold_ms"),
+        "{reason}"
+    );
     assert!(!fixture_alive(&marker)?);
     assert!(!fixture_alive(&descendant)?);
     assert_eq!(harness.report()?["used_units"], 0);
