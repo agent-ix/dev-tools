@@ -369,6 +369,30 @@ impl Processes {
         })
     }
 
+    pub(crate) fn birth_identity_absent(&self, identity: &ProcessIdentity) -> bool {
+        self.birth_identity_absent_with(identity, |pid| {
+            i32::try_from(pid).is_ok_and(|pid| {
+                pid > 0
+                    && nix::sys::signal::kill(Pid::from_raw(pid), None)
+                        == Err(nix::errno::Errno::ESRCH)
+            })
+        })
+    }
+
+    fn birth_identity_absent_with(
+        &self,
+        identity: &ProcessIdentity,
+        kernel_absent: impl FnOnce(u32) -> bool,
+    ) -> bool {
+        if !self.complete {
+            return false;
+        }
+        match self.rows.get(&identity.pid) {
+            Some(row) => row.zombie || row.start != identity.started_seconds,
+            None => kernel_absent(identity.pid),
+        }
+    }
+
     pub(crate) fn command_memory_sample(
         &self,
         root: &ProcessIdentity,
@@ -380,6 +404,14 @@ impl Processes {
                 Some(row.memory_bytes)
             }
         })
+    }
+
+    /// Diagnostic RSS only; Linux admission enforcement still uses Pss_Anon.
+    pub(crate) fn command_rss_bytes(&self, root: &ProcessIdentity) -> Option<u64> {
+        self.command_memory_sample_with(root, crate::model::MemoryMetric::Rss, |_, row| {
+            Some(row.memory_bytes)
+        })
+        .map(|sample| sample.bytes)
     }
 
     fn command_memory_sample_with(
@@ -451,6 +483,18 @@ impl Processes {
 
     pub(crate) fn group_memory_events_files(&self, group: u32) -> BTreeSet<PathBuf> {
         self.group_memory_events_files_with(group, cgroup_memory_events_file)
+    }
+
+    pub(crate) fn command_memory_events_files(&self, root: &ProcessIdentity) -> BTreeSet<PathBuf> {
+        let inherited = cgroup_memory_events_file(std::process::id());
+        self.command_memory_sample_with(root, crate::model::MemoryMetric::Rss, |_, row| {
+            Some(row.memory_bytes)
+        })
+        .into_iter()
+        .flat_map(|sample| sample.contributors)
+        .filter_map(|row| cgroup_memory_events_file(row.pid))
+        .filter(|path| Some(path) != inherited.as_ref())
+        .collect()
     }
 
     fn group_memory_events_files_with(
@@ -561,6 +605,26 @@ fn parse_oom_kill_count(events: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    /// Provenance: SWM-400. Trace: FR-005-AC-4
+    #[test]
+    fn missing_client_row_requires_kernel_absence_not_visibility_loss() {
+        let client = crate::model::ProcessIdentity {
+            pid: 42,
+            started_seconds: 7,
+        };
+        let snapshot = super::Processes::test_snapshot(vec![]);
+        assert!(!snapshot.birth_identity_absent_with(&client, |_| false));
+        assert!(snapshot.birth_identity_absent_with(&client, |_| true));
+        let reused = super::Processes::test_snapshot(vec![(
+            crate::model::ProcessIdentity {
+                pid: 42,
+                started_seconds: 8,
+            },
+            42,
+            vec!["unrelated".into()],
+        )]);
+        assert!(reused.birth_identity_absent_with(&client, |_| false));
+    }
     use super::*;
 
     /// Trace: FR-005-AC-4

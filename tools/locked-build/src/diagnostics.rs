@@ -146,8 +146,24 @@ pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Dia
             Code::OomKilled,
             &memory_key,
             request.memory_cap_bytes.unwrap_or(0).into(),
-            record.oom_kill_count.into(),
-            "cgroup memory.events oom_kill counter",
+            request
+                .measured_memory_bytes
+                .map_or_else(|| Value::from("unavailable"), Value::from),
+            &format!(
+                "rss_bytes; cgroup_oom_kill={}; cgroup_memory_peak_bytes={}",
+                record.oom_kill_count,
+                record
+                    .memory_sample
+                    .as_ref()
+                    .filter(|sample| matches!(
+                        sample.metric,
+                        crate::model::MemoryMetric::CgroupMemoryPeak
+                    ))
+                    .map_or_else(
+                        || "unavailable".to_owned(),
+                        |sample| sample.bytes.to_string()
+                    )
+            ),
         );
     }
     match request.stop {

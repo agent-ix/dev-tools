@@ -76,7 +76,7 @@ Existing policies are not regenerated during installation.
 inherited root-disk temp path. Caller targets remain authoritative and relative
 targets resolve against the recorded command cwd. `.tmp` symlinks are refused.
 
-`make install-tools` builds and copies the locked-build executable only when it
+`make install-tools ROLLOUT_OWNER=<owner>` builds and copies the locked-build executable only when it
 changes, generates a measured policy on first install, installs the `cargo`
 shim, and writes `~/.local/share/dev-tools/installed.json`. It places the shim
 directory before `~/.local/bin` in `.profile`, `.bashrc`, and `.zshrc`.
@@ -87,12 +87,22 @@ minimum pin. Newer versions pass; prereleases follow SemVer ordering and build
 metadata is ignored. Entries without `version` require executable presence and
 are never invoked. It prints one `ok` or `mismatch` line per tool and exits 1
 when a tool is missing, version output is unavailable, or its version is older.
+It also prints `~/.ix/locked-build/install.json` provenance and fails on an
+installed binary hash mismatch. The record contains `schema_version: u32`,
+`owner: string`, `source_commit: string` (full Git SHA), `artifact_sha256: string`,
+`installed_at_ms: u64` (UTC Unix milliseconds), and
+`transfers: [{from: string, to: string, at_ms: u64}]`. An exclusive install lock
+rejects concurrent writers; only the recorded owner may install. An explicit
+`install-tools --owner <new> --transfer-from <old>` records ownership transfer.
+Git builds embed HEAD; archive builds require `IX_BUILD_COMMIT`.
 
 | Field | Meaning |
 |---|---|
 | `host` | Stable host label for requests and samples. |
 | `capacity_units` | Currently enabled units; zero pauses admission. |
 | `maximum_units` | Largest feasible request; temporary shrink preserves queue age. |
+| `max_queued_per_owner` | Positive queue cap override; absent/null uses ceil(maximum_units/4), minimum one. Running and terminal records are excluded. |
+| `max_request_memory` | Positive explicit request ceiling in bytes; absent/null uses half `memory_budget_bytes`. `run --memory 16GiB` sets both reservation and hard cap without changing jobs or class defaults. Requires lease accounting and respects total budget and absolute class caps. |
 | `memory_per_unit_bytes` | RAM budget charged per requested unit in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_reserve_bytes` | RAM retained outside build leases in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_admission` | `lease_accounted` (default) checks reservations against `memory_budget_bytes`; `live_available` checks measured available RAM. |

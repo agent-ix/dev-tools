@@ -186,6 +186,10 @@ pub struct Config {
     pub capacity_units: u32,
     /// Maximum feasible request size, independent of temporary shrink.
     pub maximum_units: u32,
+    /// Maximum queued requests per owner; absent uses ceil(maximum_units / 4).
+    pub max_queued_per_owner: Option<u32>,
+    /// Maximum explicit request memory; absent uses half the admission budget.
+    pub max_request_memory: Option<u64>,
     /// Memory budget charged for each resource unit.
     pub memory_per_unit_bytes: u64,
     /// Free memory kept outside build leases.
@@ -266,6 +270,8 @@ impl Default for Config {
             cache: CachePolicy::default(),
             capacity_units: 1,
             maximum_units: 1,
+            max_queued_per_owner: None,
+            max_request_memory: None,
             memory_per_unit_bytes: 0,
             memory_reserve_bytes,
             disk_reserve_bytes: 0,
@@ -299,6 +305,15 @@ fn memory_budget_after_reserve(total_memory: u64, memory_reserve: u64) -> Option
 }
 
 impl Config {
+    pub(crate) fn owner_queue_cap(&self) -> u32 {
+        self.max_queued_per_owner
+            .unwrap_or(self.maximum_units.div_ceil(4).max(1))
+    }
+
+    pub(crate) fn request_memory_cap(&self) -> Option<u64> {
+        self.max_request_memory
+            .or_else(|| self.memory_budget_bytes.map(|budget| budget / 2))
+    }
     #[allow(clippy::field_reassign_with_default)]
     pub(crate) fn measured_default() -> Result<Self> {
         let mut config = Self::default();
@@ -384,6 +399,12 @@ impl Config {
         };
         if self.host.is_empty() || self.host.len() > 128 {
             return Err(invalid("host", "must contain 1 to 128 characters"));
+        }
+        if self.max_queued_per_owner == Some(0) {
+            return Err(invalid("max_queued_per_owner", "must be positive when set"));
+        }
+        if self.max_request_memory == Some(0) {
+            return Err(invalid("max_request_memory", "must be positive when set"));
         }
         if self.maximum_units == 0 || self.capacity_units > self.maximum_units {
             return Err(invalid(
@@ -695,6 +716,22 @@ impl HostSample {
 
 #[cfg(test)]
 mod tests {
+    /// Provenance: SWM-401. Trace: FR-005-AC-1
+    #[test]
+    fn owner_cap_scales_from_maximum_not_enabled_capacity() {
+        for (units, expected) in [(1, 1), (8, 2), (32, 8), (33, 9)] {
+            let mut policy = super::Config {
+                maximum_units: units,
+                capacity_units: 0,
+                ..super::Config::default()
+            };
+            assert_eq!(policy.owner_queue_cap(), expected);
+            policy.max_queued_per_owner = Some(3);
+            assert_eq!(policy.owner_queue_cap(), 3);
+            policy.max_queued_per_owner = Some(0);
+            assert!(policy.validate().is_err());
+        }
+    }
     use super::*;
 
     /// Provenance: SWM-379. Trace: FR-005-AC-4

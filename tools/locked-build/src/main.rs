@@ -13,6 +13,7 @@ mod kache_wrapper;
 mod metrics;
 mod model;
 mod process;
+mod provenance;
 mod recovery;
 mod runtime;
 mod sample;
@@ -37,6 +38,29 @@ use crate::model::RequestId;
 
 const DEFAULT_CARGO_CLASS: &str = "point";
 const DEFAULT_CARGO_TICKET: &str = "MANUAL";
+
+fn parse_memory(input: &str) -> std::result::Result<u64, String> {
+    let split = input
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(input.len());
+    let number = input[..split]
+        .parse::<u64>()
+        .map_err(|_| "memory must be a positive integer size".to_owned())?;
+    let multiplier = match input[split..].to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "kb" => 1000,
+        "mb" => 1_000_000,
+        "gb" => 1_000_000_000,
+        "kib" => 1024,
+        "mib" => 1_048_576,
+        "gib" => 1_073_741_824,
+        _ => return Err("memory unit must be B, KB, MB, GB, KiB, MiB or GiB".into()),
+    };
+    number
+        .checked_mul(multiplier)
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| "memory size is zero or overflows bytes".into())
+}
 
 #[derive(Parser)]
 #[command(version = build_info::VERSION, about = "Fair persistent build admission for shared hosts")]
@@ -63,6 +87,9 @@ enum Action {
         units: u32,
         #[arg(long)]
         class: Option<String>,
+        /// Explicit total reservation and hard cap, e.g. 16GiB; policy bounded.
+        #[arg(long, value_parser = parse_memory)]
+        memory: Option<u64>,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -110,7 +137,14 @@ enum Action {
         output: PathBuf,
     },
     /// Finish host setup after installing the locked-build binary.
-    InstallTools,
+    InstallTools {
+        /// Stable rollout owner recorded on this host.
+        #[arg(long)]
+        owner: String,
+        /// Explicitly transfer from the previously recorded rollout owner.
+        #[arg(long)]
+        transfer_from: Option<String>,
+    },
     /// Compare installed CLI versions against the pinned tool manifest.
     CheckInstall {
         #[arg(long)]
@@ -183,11 +217,16 @@ fn execute(cli: Cli) -> Result<i32> {
                 ticket,
                 units: 1,
                 class: Some("arch-test".to_owned()),
+                memory: None,
                 command,
             },
         });
     }
-    if matches!(cli.command, Action::InstallTools) {
+    if let Action::InstallTools {
+        owner,
+        transfer_from,
+    } = &cli.command
+    {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "HOME is not set"))?;
@@ -195,6 +234,8 @@ fn execute(cli: Cli) -> Result<i32> {
             &home,
             &std::env::current_exe()?,
             std::env::var_os("PATH").as_deref(),
+            owner,
+            transfer_from.as_deref(),
         )
         .map(|()| 0);
     }
@@ -318,13 +359,14 @@ fn execute(cli: Cli) -> Result<i32> {
             ticket,
             units,
             class,
+            memory,
             command,
         } => {
             let owner = owner.unwrap_or_else(default_owner);
             let ticket = ticket.unwrap_or_else(default_ticket);
             let class_name = class.as_deref().unwrap_or("periodic");
             let priority = runtime::priority_for_class(&store, class_name)?;
-            let id = runtime::enqueue(
+            let id = runtime::enqueue_with_memory(
                 &store,
                 &owner,
                 &ticket,
@@ -332,6 +374,7 @@ fn execute(cli: Cli) -> Result<i32> {
                 priority,
                 Some(class_name),
                 &command,
+                memory,
             )?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let workers = runtime::spawn_worker(&store, &id)?.into_iter().collect();
@@ -372,7 +415,7 @@ fn execute(cli: Cli) -> Result<i32> {
             unreachable!("metrics handled before scheduler setup")
         }
         Action::Sample { .. } => unreachable!("sample handled before opening scheduler state"),
-        Action::InstallTools | Action::CheckInstall { .. } => {
+        Action::InstallTools { .. } | Action::CheckInstall { .. } => {
             unreachable!("installation commands handled before opening scheduler state")
         }
         Action::WorktreeRun { .. } => unreachable!("worktree command normalized at entry"),
@@ -1117,9 +1160,9 @@ mod tests {
     #[test]
     fn install_and_version_check_commands_accept_the_documented_inputs() {
         assert!(matches!(
-            Cli::try_parse_from(["locked-build", "install-tools"]),
+            Cli::try_parse_from(["locked-build", "install-tools", "--owner", "rollout"]),
             Ok(Cli {
-                command: Action::InstallTools,
+                command: Action::InstallTools { .. },
                 ..
             })
         ));
@@ -1321,6 +1364,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Provenance: SWM-406. Trace: FR-005-AC-1
+    #[test]
+    fn run_accepts_a_bounded_explicit_memory_request() {
+        assert!(
+            Cli::try_parse_from([
+                "locked-build",
+                "run",
+                "--memory",
+                "16GiB",
+                "--",
+                "cargo",
+                "test"
+            ])
+            .is_ok()
+        );
+        for (text, bytes) in [
+            ("16GiB", 17_179_869_184),
+            ("16GB", 16_000_000_000),
+            ("64MiB", 67_108_864),
+            ("1", 1),
+        ] {
+            assert_eq!(parse_memory(text), Ok(bytes));
+        }
+        for text in ["0", "-1GiB", "1.5GiB", "18446744073709551615GiB", "12watts"] {
+            assert!(parse_memory(text).is_err(), "{text}");
+        }
     }
 
     #[test]

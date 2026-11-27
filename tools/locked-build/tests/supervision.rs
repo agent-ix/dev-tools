@@ -342,6 +342,78 @@ fn unshare_pid_namespace_keeps_supervision_through_child_exit() -> TestResult {
     Ok(())
 }
 
+/// Provenance: SWM-400, lead diagnostic proof. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "deliberate 64 MiB cgroup OOM on one native Linux lane"]
+fn deliberate_scope_oom_reports_limit_and_measured_memory() -> TestResult {
+    let harness = Harness::new(1, 120000)?;
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["memory_admission"] = json!("lease_accounted");
+    policy["memory_budget_bytes"] = json!(1_000_000_000_u64);
+    policy["memory_reserve_per_job_bytes"] = json!(1_000_000);
+    policy["memory_limit_per_job_bytes"] = json!(67_108_864);
+    policy["on_missing_cgroup"] = json!("refuse");
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let stderr = harness.root.path().join("caller.stderr");
+    let mut child = harness.command_with_stderr(
+        "oom",
+        &harness.root.path().join("oom"),
+        &harness.root.path().join("unused"),
+        1,
+        Stdio::from(fs::File::create(&stderr)?),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        if let Some(outcome) = child.try_wait()? {
+            break outcome;
+        }
+        if Instant::now() >= deadline {
+            let row = harness.request(0)?;
+            let worker_log = harness.state.join(format!(
+                "{}.stderr",
+                row["request_id"].as_str().ok_or("id missing")?
+            ));
+            eprintln!(
+                "OOM_TIMEOUT: {row}\nWORKER: {}",
+                fs::read_to_string(worker_log)?
+            );
+            return Err("controlled OOM did not finish".into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(!outcome.success());
+    let row = harness.request(0)?;
+    let line = row["message"].as_str().ok_or("missing message")?;
+    eprintln!("CONTROLLED_OOM: {line}");
+    if row["code"] != "LB_OOM_KILLED" {
+        let worker_log = harness.state.join(format!(
+            "{}.stderr",
+            row["request_id"].as_str().ok_or("id missing")?
+        ));
+        eprintln!(
+            "OOM_STATE: {row}\nWORKER: {}",
+            fs::read_to_string(worker_log)?
+        );
+    }
+    assert_eq!(row["code"], "LB_OOM_KILLED");
+    assert_eq!(row["lease_record"]["memory_enforcement"], "systemd_scope");
+    assert!(line.contains("limit=policy.memory_limit_per_job_bytes*parallelism=67108864"));
+    assert!(line.contains("rss_bytes; cgroup_oom_kill="), "{line}");
+    assert!(
+        row["measured_value"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
+    assert!(
+        fs::read_to_string(stderr)?
+            .lines()
+            .any(|actual| actual == line)
+    );
+    assert_eq!(harness.report()?["used_units"], 0);
+    Ok(())
+}
+
 /// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
 #[cfg(target_os = "linux")]
 #[test]
@@ -551,6 +623,7 @@ impl Harness {
             serde_json::to_vec(&json!({
                 "host": "fixture-host", "capacity_units": capacity, "maximum_units": 4,
                 "memory_per_unit_bytes": 100, "memory_reserve_bytes": 100, "disk_reserve_bytes": 100,
+                "max_queued_per_owner": 1000,
                 "disk_path": root.path(), "maximum_load": 100.0,
                 "aging_ms": 1000, "hold_ms": hold_ms, "termination_grace_ms": 200,
                 "sample_file": sample,
@@ -1644,6 +1717,18 @@ fn subprocess_fixture() -> TestResult {
         "workload inherited a coordination lock as stdin"
     );
     let mode = std::env::var("LOCKED_BUILD_FIXTURE_MODE")?;
+    if mode == "oom" {
+        let mut allocations = Vec::new();
+        for index in 0..32 {
+            allocations.push(vec![42_u8; 4 * 1024 * 1024]);
+            std::hint::black_box(&allocations);
+            if index == 3 {
+                std::thread::sleep(Duration::from_secs(12));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        return Err("cgroup did not enforce the 64 MiB cap".into());
+    }
     let marker =
         PathBuf::from(std::env::var_os("LOCKED_BUILD_FIXTURE_MARKER").ok_or("marker missing")?);
     let release =

@@ -25,7 +25,7 @@ From the repository root, install locked-build, the Cargo shim, and a measured
 host policy with one command:
 
 ```sh
-make install-tools
+make install-tools ROLLOUT_OWNER=draco:tooling:rollout
 ```
 
 The installer builds and copies the binary only when its bytes change. It
@@ -34,6 +34,30 @@ disk measurements, writes `~/.local/share/dev-tools/installed.json`, and adds
 `~/.local/lib/locked-build/shims` ahead of the real Cargo path in shell startup
 files. Re-running the command leaves identical files untouched. Start a new
 shell after the first install.
+
+The rollout owner is pinned in `~/.ix/locked-build/install.json`, together with
+the source commit, artifact SHA256, install time and ownership transfers.
+Installs are serialized and another owner is refused. Transfer explicitly with
+`locked-build install-tools --owner <new> --transfer-from <recorded-owner>`.
+`check-install` prints provenance and fails if the installed binary hash differs
+from its recorded artifact. Source archives must be built with
+`IX_BUILD_COMMIT=<full-sha>`; Git builds embed their source HEAD.
+
+Each owner may queue `ceil(maximum_units/4)` requests (minimum one), with a
+positive `max_queued_per_owner` policy override. Extra submissions receive
+`LB_REFUSED_QUEUE` with the limit and attempted count. Running and completed
+requests do not consume queue slots. Status includes `queued_by_owner` and
+the effective `max_queued_per_owner`.
+
+Use `locked-build run --memory 16GiB ... -- cargo test ...` for a total
+per-request reservation and hard cap. `max_request_memory` defaults to half
+`memory_budget_bytes`; a positive policy override may set a different ceiling.
+Requests above that ceiling receive `LB_REFUSED_CLASS_CAP`. Absolute class
+caps and the total admission budget still apply. This option requires
+`lease_accounted` mode and leaves class defaults and job counts unchanged.
+Status/events retain requested and granted memory and reservations. Status and
+Prometheus expose `ix_build_memory_reserved_bytes` and `ix_build_memory_limit_bytes`,
+summed by `{host,class,state}` (`queued` or `running`).
 
 All lanes use `/tmp/locked-build-<uid>` and its `policy.json`, independent of
 lane `IX_HOME`. `~/.ix/locked-build/state` and `policy.json` are host aliases.

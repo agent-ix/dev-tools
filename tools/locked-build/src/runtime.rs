@@ -43,6 +43,7 @@ pub(crate) fn clock_ms() -> Result<u64> {
         .ok_or_else(|| Error::new(ErrorCode::State, "monotonic clock overflow"))
 }
 
+#[cfg(test)]
 pub(crate) fn enqueue(
     store: &Store,
     owner: &str,
@@ -51,6 +52,20 @@ pub(crate) fn enqueue(
     priority: u32,
     class: Option<&str>,
     command: &[String],
+) -> Result<RequestId> {
+    enqueue_with_memory(store, owner, ticket, units, priority, class, command, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enqueue_with_memory(
+    store: &Store,
+    owner: &str,
+    ticket: &str,
+    units: u32,
+    priority: u32,
+    class: Option<&str>,
+    command: &[String],
+    memory: Option<u64>,
 ) -> Result<RequestId> {
     if owner.is_empty()
         || owner.len() > 256
@@ -85,7 +100,7 @@ pub(crate) fn enqueue(
             .ok_or_else(|| Error::new(ErrorCode::State, "request sequence exhausted"))?;
         let id = RequestId(format!("{}:r{sequence}", state.store_id));
         let class_name = class.unwrap_or("periodic");
-        let attempt_trace = requested_trace(
+        let mut attempt_trace = requested_trace(
             config,
             class_name,
             command,
@@ -94,7 +109,45 @@ pub(crate) fn enqueue(
             units,
             state.used().saturating_add(units),
         );
+        if let Some(bytes) = memory {
+            attempt_trace.requested_memory_bytes = Some(bytes);
+            attempt_trace.requested_memory_reservation_bytes = Some(bytes);
+        }
         let result = (|| {
+            if let Some(bytes) = memory {
+                let cap = config.request_memory_cap().unwrap_or(0);
+                if bytes == 0 || bytes > cap || config.memory_admission != crate::config::MemoryAdmissionMode::LeaseAccounted {
+                    return Err(Error::new(ErrorCode::Request, "explicit memory requires lease accounting and must fit policy.max_request_memory")
+                        .with_failure(crate::diagnostics::Failure::refused(locked_build::wire::Code::RefusedClassCap, class_name, "policy.max_request_memory", cap.into(), bytes.into(), "requested memory bytes")));
+                }
+                if let Some(cap) = config.memory_cap_by_class.get(class_name).filter(|cap| bytes > **cap) {
+                    return Err(Error::new(ErrorCode::Request, "explicit memory exceeds class cap")
+                        .with_failure(crate::diagnostics::Failure::refused(locked_build::wire::Code::RefusedClassCap, class_name, &format!("policy.memory_cap_by_class.{class_name}"), (*cap).into(), bytes.into(), "requested memory bytes")));
+                }
+                if let Some(budget) = config.memory_budget_bytes.filter(|budget| bytes > *budget) {
+                    return Err(Error::new(ErrorCode::Request, "explicit memory exceeds admission budget")
+                        .with_failure(crate::diagnostics::Failure::refused(locked_build::wire::Code::RefusedMemoryBudget, class_name, "policy.memory_budget_bytes", budget.into(), bytes.into(), "requested memory reservation bytes")));
+                }
+            }
+            let owner_queued = state
+                .requests
+                .iter()
+                .filter(|request| request.owner == owner && request.phase == Phase::Queued)
+                .count() as u64;
+            if owner_queued >= u64::from(config.owner_queue_cap()) {
+                return Err(Error::new(
+                    ErrorCode::Request,
+                    "owner queue full; change policy.max_queued_per_owner to raise the limit",
+                )
+                .with_failure(crate::diagnostics::Failure::refused(
+                    locked_build::wire::Code::RefusedQueue,
+                    class_name,
+                    "policy.max_queued_per_owner",
+                    config.owner_queue_cap().into(),
+                    owner_queued.saturating_add(1).into(),
+                    "queued requests for owner; change policy.max_queued_per_owner to raise limit",
+                )));
+            }
             if units > config.maximum_units {
                 return Err(
                     Error::new(ErrorCode::Request, "units exceed configured maximum").with_failure(
@@ -151,7 +204,7 @@ pub(crate) fn enqueue(
                     units,
                     state.used().saturating_add(units),
                 );
-            let memory_cap_bytes =
+            let memory_cap_bytes = if memory.is_some() { memory } else {
                 if config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted {
                     Some(estimate_memory_lease(
                         config,
@@ -160,12 +213,14 @@ pub(crate) fn enqueue(
                     )?)
                 } else {
                     None
-                };
-            let memory_reservation_bytes = memory_cap_bytes
+                }};
+            let memory_reservation_bytes = if memory.is_some() { memory } else { memory_cap_bytes
                 .map(|_| estimate_memory_reservation(config, class_name, memory_parallelism))
-                .transpose()?;
+                .transpose()? };
             state.requests.push(Request {
                 telemetry: telemetry.clone(),
+                client: Some(Processes::self_identity()?),
+                client_pid_namespace: crate::process::pid_namespace()?,
                 supervision_detail: None,
                 pid_namespace: crate::process::pid_namespace()?,
                 trace: locked_build::wire::RequestTrace {
@@ -196,7 +251,7 @@ pub(crate) fn enqueue(
                 memory_cap_bytes,
                 memory_reservation_bytes,
                 memory_limit_key: memory_cap_bytes.map(|_| {
-                    if config.memory_per_job_by_class.contains_key(class_name) {
+                    if memory.is_some() { "request.memory_bytes".to_owned() } else if config.memory_per_job_by_class.contains_key(class_name) {
                         format!("policy.memory_per_job_by_class.{class_name}*parallelism")
                     } else {
                         "policy.memory_limit_per_job_bytes*parallelism".to_owned()
@@ -716,6 +771,12 @@ fn launch_worker(
 /// Redacted snapshot suitable for deterministic monitoring consumers.
 #[derive(Serialize)]
 pub struct Report {
+    /// Effective policy bound for explicitly sized memory requests.
+    pub max_request_memory: Option<u64>,
+    /// Effective queued request limit for each owner.
+    pub max_queued_per_owner: u32,
+    /// Queued request counts grouped by owner; running and terminal work excluded.
+    pub queued_by_owner: std::collections::BTreeMap<String, u32>,
     /// Durable counters and current queue timing metrics.
     pub metrics: locked_build::wire::MetricsSnapshot,
     /// Effective shared admission state directory.
@@ -1048,6 +1109,16 @@ fn status_with_clock(
         .collect();
     let used = state.used();
     Ok(Report {
+        max_request_memory: config.request_memory_cap(),
+        max_queued_per_owner: config.owner_queue_cap(),
+        queued_by_owner: state
+            .requests
+            .iter()
+            .filter(|request| request.phase == Phase::Queued)
+            .fold(std::collections::BTreeMap::new(), |mut counts, request| {
+                *counts.entry(request.owner.clone()).or_insert(0) += 1;
+                counts
+            }),
         metrics: state
             .metrics
             .snapshot_with_policy(&state, &config, now, clock)?,
@@ -1826,13 +1897,25 @@ fn supervise_started_command(
         observe_oom,
     )
     .and_then(|()| {
-        if child.try_wait()?.is_none() {
+        if let Some(outcome) = child.try_wait()? {
+            store.transaction(|state, config| {
+                reconcile_orphan_outcome(
+                    state,
+                    config,
+                    &request.id,
+                    fence,
+                    CommandOutcome {
+                        code: outcome.code(),
+                        signal: outcome.signal(),
+                    },
+                )
+            })?;
+            Ok(())
+        } else {
             Err(Error::new(
                 ErrorCode::State,
                 "lease ended while command remained alive",
             ))
-        } else {
-            Ok(())
         }
     });
     if let Err(error) = result {
@@ -1982,17 +2065,61 @@ fn supervise_command_loop(
     mut observe_oom: impl FnMut(&mut CgroupOomEvidence, &Processes, u32),
 ) -> Result<()> {
     let enforcement = persisted_memory_enforcement(store, &request.id)?;
+    let command_root = store
+        .snapshot()?
+        .0
+        .find(&request.id)?
+        .lease_record
+        .as_ref()
+        .and_then(|record| record.command.clone());
+    let scope = store
+        .snapshot()?
+        .0
+        .find(&request.id)?
+        .lease_record
+        .as_ref()
+        .and_then(|record| record.memory_scope.clone());
     let mut cgroup_oom_evidence = CgroupOomEvidence::default();
+    cgroup_oom_evidence.scope = scope.clone();
     let mut status = None;
     let mut degraded = false;
     let mut stop_degraded_group = false;
     let mut watchdog_reaped = false;
+    let mut memory_identity_logged = false;
     let grace = Config::read(&store.config_path)?.termination_grace_ms;
     loop {
         let watchdog_exited =
             watchdog_reaped || crate::process::owned_child_exited(watchdog_child)?;
+        let mut scope_rss = None;
         if enforcement == Some(MemoryEnforcement::SystemdScope) {
-            observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
+            let processes = Processes::read();
+            if !memory_identity_logged {
+                eprintln!(
+                    "scope_identity request={} root={command_root:?} observed={:?}",
+                    request.id.0,
+                    command_root
+                        .as_ref()
+                        .and_then(|root| processes.member_identity(root.pid))
+                );
+                memory_identity_logged = true;
+            }
+            scope_rss = command_root
+                .as_ref()
+                .and_then(|root| processes.command_rss_bytes(root));
+            if let Some(root) = &command_root {
+                let first = cgroup_oom_evidence.event_files.is_empty();
+                cgroup_oom_evidence
+                    .event_files
+                    .extend(processes.command_memory_events_files(root));
+                cgroup_oom_evidence.retain_owned_scope();
+                if first && !cgroup_oom_evidence.event_files.is_empty() {
+                    eprintln!(
+                        "scope_evidence request={} files={:?}",
+                        request.id.0, cgroup_oom_evidence.event_files
+                    );
+                }
+            }
+            observe_oom(&mut cgroup_oom_evidence, &processes, watchdog.pid);
         }
         if status.is_none() {
             status = child.try_wait()?;
@@ -2000,6 +2127,9 @@ fn supervise_command_loop(
         if status.is_some() && enforcement == Some(MemoryEnforcement::SystemdScope) {
             observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
             cgroup_oom_evidence.read_known_files();
+            if let Some(scope) = &scope {
+                cgroup_oom_evidence.observe_scope_result(scope);
+            }
         }
         if status.is_none()
             && cgroup_oom_evidence.scope_vanished()
@@ -2018,10 +2148,26 @@ fn supervise_command_loop(
         }
         let policy = store.transaction(|state, config| {
             if state.find(&request.id)?.phase.terminal() {
+                if let Some(outcome) = status {
+                    reconcile_orphan_outcome(
+                        state,
+                        config,
+                        &request.id,
+                        fence,
+                        CommandOutcome {
+                            code: outcome.code(),
+                            signal: outcome.signal(),
+                        },
+                    )?;
+                }
                 return Ok(None);
             }
             fence.require_running(state.find(&request.id)?)?;
             let current = state.find_mut(&request.id)?;
+            if let Some(bytes) = scope_rss {
+                current.measured_memory_bytes =
+                    Some(current.measured_memory_bytes.unwrap_or(0).max(bytes));
+            }
             // Persist OOM evidence before publishing command_finished. The
             // watchdog may win finalization as soon as that outcome is visible.
             record_scope_oom(current, enforcement, cgroup_oom_evidence.oom_kill_count);
@@ -2108,6 +2254,42 @@ fn supervise_command_loop(
         }
         std::thread::sleep(Duration::from_millis(poll_ms));
     }
+}
+
+fn reconcile_orphan_outcome(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    fence: &WorkerFence,
+    outcome: CommandOutcome,
+) -> Result<()> {
+    let current = state.find_mut(id)?;
+    if !fence.owns(current)
+        || current.stop.is_some()
+        || current.reason.as_deref() != Some("supervisor_lost")
+    {
+        return Ok(());
+    }
+    // The direct parent's owned Child result outranks a watchdog's inference.
+    // This race occurs only after the client is gone and the command has exited.
+    current.phase = Phase::Running;
+    current.reason = None;
+    current.command_finished = Some(outcome.clone());
+    state.finish(
+        id,
+        Completion {
+            code: outcome.code,
+            signal: outcome.signal,
+            reason: (outcome.code == Some(0)).then_some("supervision_degraded"),
+        },
+        config,
+        now_ms()?,
+        clock_ms()?,
+    )?;
+    if let Some(event) = state.events.last_mut() {
+        event.correction = true;
+    }
+    Ok(())
 }
 
 fn persisted_memory_enforcement(
@@ -2212,6 +2394,13 @@ fn start_command(
             enforcement,
         );
         let mut command = Command::new(launch_spec.program);
+        if enforcement == MemoryEnforcement::SystemdScope {
+            let scope = format!("locked-build-{}.scope", crate::store::random_id()?);
+            command
+                .arg(format!("--unit={scope}"))
+                .args(["-p", "OOMPolicy=stop"]);
+            lease_record.memory_scope = Some(scope);
+        }
         command
             .stdin(std::process::Stdio::null())
             .args(launch_spec.arguments)
@@ -2468,19 +2657,77 @@ fn record_scope_peak(request: &mut Request, evidence: &CgroupOomEvidence) {
 
 #[derive(Default)]
 struct CgroupOomEvidence {
+    scope: Option<String>,
     oom_kill_count: u64,
     event_files: std::collections::BTreeSet<std::path::PathBuf>,
     detected: bool,
     peak_bytes: Option<u64>,
 }
 
+fn scope_result_output(scope: &str) -> Option<std::process::Output> {
+    let mut child = Command::new("systemctl")
+        .args(["--user", "show", scope, "-p", "Result", "-p", "MemoryPeak"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return child.wait_with_output().ok().filter(|_| status.success()),
+            Ok(None) if started.elapsed() < Duration::from_secs(2) => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 impl CgroupOomEvidence {
+    fn retain_owned_scope(&mut self) {
+        if let Some(scope) = &self.scope {
+            self.event_files.retain(|path| {
+                path.parent()
+                    .and_then(|parent| parent.file_name())
+                    .is_some_and(|name| name == scope.as_str())
+            });
+        }
+    }
+    fn observe_scope_result(&mut self, scope: &str) {
+        // Failed scopes retain Result=oom-kill even if systemd already removed
+        // their cgroup before the parent's first process snapshot completed.
+        if let Some(output) = scope_result_output(scope) {
+            let text = String::from_utf8_lossy(&output.stdout);
+            self.observe_scope_text(&text);
+        }
+    }
+
+    fn observe_scope_text(&mut self, text: &str) {
+        if text.lines().any(|line| line == "Result=oom-kill") {
+            self.oom_kill_count = self.oom_kill_count.max(1);
+            self.detected = true;
+            if let Some(peak) = text
+                .lines()
+                .find_map(|line| line.strip_prefix("MemoryPeak="))
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value != u64::MAX)
+            {
+                self.peak_bytes = Some(self.peak_bytes.unwrap_or(0).max(peak));
+            }
+        }
+    }
     fn scope_vanished(&self) -> bool {
         !self.event_files.is_empty() && self.event_files.iter().all(|path| !path.is_file())
     }
     fn observe_group(&mut self, processes: &Processes, group: u32) {
         self.event_files
             .extend(processes.group_memory_events_files(group));
+        self.retain_owned_scope();
         self.read_known_files();
     }
 

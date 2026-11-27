@@ -129,6 +129,9 @@ pub struct LeaseRecord {
     /// Why the per-request wrapper was selected or skipped.
     #[serde(default)]
     pub cache_wrapper_status: CacheWrapperStatus,
+    /// Exact systemd scope owned by this lease, excluding nested caller scopes.
+    #[serde(default)]
+    pub memory_scope: Option<String>,
     /// Observed kernel OOM-kill counter for this command's memory scope.
     #[serde(default)]
     pub oom_kill_count: u64,
@@ -220,6 +223,11 @@ pub enum MemoryEnforcement {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Request {
+    /// Original caller identity, independent of later scheduler launches.
+    #[serde(default)]
+    pub client: Option<ProcessIdentity>,
+    #[serde(default)]
+    pub client_pid_namespace: Option<String>,
     #[serde(default)]
     pub telemetry: crate::telemetry::EventTelemetry,
     #[serde(default)]

@@ -50,27 +50,34 @@ pub(crate) fn install_tools(
     home: &Path,
     current_exe: &Path,
     search_path: Option<&OsStr>,
+    owner: &str,
+    transfer_from: Option<&str>,
 ) -> Result<()> {
-    let textfile = detect_textfile_directory()?;
-    install_npm_packages(&read_manifest(TOOL_MANIFEST)?)?;
-    install_tools_with_measurement(
+    if crate::build_info::DIRTY != "false" {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "install-tools refuses a dirty or unverifiable source tree; commit the build inputs and rebuild from clean source",
+        ));
+    }
+    install_tools_owned(
         home,
         current_exe,
         search_path,
         &crate::writable::shared_root()?,
+        owner,
+        transfer_from,
+        crate::build_info::COMMIT,
         Config::measured_default,
-    )?;
-    let shared = crate::writable::shared_root()?;
-    install_monitoring(
-        home,
-        &home.join(".local/bin/locked-build"),
-        &shared,
-        &shared.join("policy.json"),
-        &textfile,
-    )?;
-    activate_monitoring(home)
+        || install_npm_packages(&read_manifest(TOOL_MANIFEST)?),
+        || {
+            let shared = crate::writable::shared_root()?;
+            install_monitoring(home, &home.join(".local/bin/locked-build"), &shared, &shared.join("policy.json"), &detect_textfile_directory()?)?;
+            activate_monitoring(home)
+        },
+    )
 }
 
+#[cfg(test)]
 fn install_tools_with_measurement(
     home: &Path,
     current_exe: &Path,
@@ -78,6 +85,41 @@ fn install_tools_with_measurement(
     shared: &Path,
     measure_policy: impl FnOnce() -> Result<Config>,
 ) -> Result<()> {
+    install_tools_owned(
+        home,
+        current_exe,
+        search_path,
+        shared,
+        "fixture-rollout",
+        None,
+        "1111111111111111111111111111111111111111",
+        measure_policy,
+        || Ok(()),
+        || Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_tools_owned(
+    home: &Path,
+    current_exe: &Path,
+    search_path: Option<&OsStr>,
+    shared: &Path,
+    owner: &str,
+    transfer_from: Option<&str>,
+    source: &str,
+    measure_policy: impl FnOnce() -> Result<Config>,
+    prepare: impl FnOnce() -> Result<()>,
+    finish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let provenance = crate::provenance::InstallGuard::acquire(
+        home,
+        owner,
+        transfer_from,
+        source,
+        current_exe,
+        crate::runtime::now_ms()?,
+    )?;
     let manifest = read_manifest(TOOL_MANIFEST)?;
     let installed_path = home.join(".local/bin/locked-build");
     let installed_bin_dir = installed_path.parent().ok_or_else(|| {
@@ -114,6 +156,7 @@ fn install_tools_with_measurement(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    prepare()?;
     copy_file_if_changed(current_exe, &installed_path)?;
     crate::writable::install_host_namespace(&shared)?;
     let data_dir = home.join(".local/share/dev-tools");
@@ -195,6 +238,14 @@ fn install_tools_with_measurement(
     for profile in [".profile", ".bashrc", ".zshrc"] {
         ensure_profile_line(&home.join(profile), &path_line)?;
     }
+    if crate::provenance::artifact_hash(&installed_path)? != provenance.record.artifact_sha256 {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "installed binary changed during installation; provenance not published",
+        ));
+    }
+    finish()?;
+    provenance.publish()?;
 
     println!("installed locked-build {}", env!("CARGO_PKG_VERSION"));
     println!("policy: {}", policy_path.display());
@@ -343,6 +394,21 @@ pub(crate) fn check_install(manifest_path: Option<&Path>) -> Result<i32> {
     };
     let mut mismatches = 0_u32;
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = &home {
+        match crate::provenance::check(home) {
+            Ok((matches, line)) => {
+                println!("{line}");
+                mismatches += u32::from(!matches);
+            }
+            Err(error) => {
+                println!("mismatch locked-build provenance {}", error.message);
+                mismatches += 1;
+            }
+        }
+    } else {
+        println!("mismatch locked-build provenance HOME is not set");
+        mismatches += 1;
+    }
     let search_path = std::env::var_os("PATH");
     for pin in &manifest.tools {
         let expected = pin.version.as_deref().unwrap_or("present");
@@ -591,6 +657,35 @@ mod tests {
             Config::read(&shared.join("policy.json"))?.target_root,
             Some(target)
         );
+        Ok(())
+    }
+
+    /// Provenance: SWM-403. Trace: FR-011-AC-7
+    #[test]
+    fn install_records_the_exact_artifact_and_preserves_host_policy() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let artifact = root.path().join("artifact");
+        std::fs::write(&artifact, b"abc")?;
+        install_tools_with_measurement(&home, &artifact, None, &root.path().join("state"), || {
+            Ok(Config::default())
+        })?;
+        let record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join(".ix/locked-build/install.json"))?)?;
+        assert_eq!(
+            record["artifact_sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(
+            record["installed_at_ms"]
+                .as_u64()
+                .is_some_and(|time| time > 0)
+        );
+        assert_eq!(
+            record["source_commit"],
+            "1111111111111111111111111111111111111111"
+        );
+        assert_eq!(record["owner"], "fixture-rollout");
         Ok(())
     }
 

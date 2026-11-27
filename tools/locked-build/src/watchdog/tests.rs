@@ -4,6 +4,123 @@
 use super::*;
 use crate::model::ProcessIdentity;
 
+/// Provenance: SWM-400. Trace: FR-005-AC-2, FR-005-AC-4
+#[test]
+fn orphan_without_client_or_command_releases_lease_in_one_poll() -> Result<()> {
+    for (control, done) in [
+        ("orphan", true),
+        ("live-client", false),
+        ("live-command", false),
+        ("launched-orphan", true),
+        ("successful-command", true),
+        ("foreign-client", false),
+        ("kernel-occupied", false),
+    ] {
+        let root = tempfile::tempdir()?;
+        let policy = root.path().join("policy.json");
+        std::fs::write(&policy, include_bytes!("../../policy.example.json"))?;
+        let store = Store::open(&root.path().join("state"), &policy)?;
+        let id =
+            crate::runtime::enqueue(&store, "owner", "SWM-400", 1, 0, None, &["cargo".into()])?;
+        let worker = ProcessIdentity {
+            pid: 10_000,
+            started_seconds: 1,
+        };
+        let watchdog = ProcessIdentity {
+            pid: 20_000,
+            started_seconds: 1,
+        };
+        store.transaction(|state, _| {
+            let row = state.find_mut(&id)?;
+            row.client = Some(ProcessIdentity {
+                pid: 2_000_000_000,
+                started_seconds: 1,
+            });
+            if control == "foreign-client" {
+                row.client_pid_namespace = Some("foreign-namespace".into());
+            }
+            if matches!(control, "launched-orphan" | "successful-command") {
+                row.command_started_clock_ms = Some(60);
+                row.lease_record = Some(crate::model::LeaseRecord {
+                    command: Some(ProcessIdentity {
+                        pid: 2_000_000_001,
+                        started_seconds: 1,
+                    }),
+                    ..crate::model::LeaseRecord::default()
+                });
+                if control == "successful-command" {
+                    row.command_finished = Some(crate::model::CommandOutcome {
+                        code: Some(0),
+                        signal: None,
+                    });
+                }
+            }
+            row.worker = Some(worker.clone());
+            row.watchdog = Some(watchdog.clone());
+            row.worker_generation = 1;
+            row.phase = Phase::Running;
+            row.started_at_ms = Some(50);
+            row.started_clock_ms = Some(50);
+            Ok(())
+        })?;
+        let decision = observe_at(
+            &store,
+            &id,
+            1,
+            &worker,
+            &watchdog,
+            100,
+            100,
+            || {
+                let mut rows = vec![
+                    (
+                        worker.clone(),
+                        worker.pid,
+                        vec![id.0.clone(), "worker".into()],
+                    ),
+                    (
+                        watchdog.clone(),
+                        watchdog.pid,
+                        vec![id.0.clone(), "watchdog".into()],
+                    ),
+                ];
+                if control == "live-client" {
+                    rows.push((
+                        ProcessIdentity {
+                            pid: 2_000_000_000,
+                            started_seconds: 1,
+                        },
+                        2_000_000_000,
+                        vec!["caller".into()],
+                    ));
+                }
+                if control == "live-command" {
+                    rows.push((
+                        ProcessIdentity {
+                            pid: 20_001,
+                            started_seconds: 1,
+                        },
+                        20_000,
+                        vec!["rustc".into()],
+                    ));
+                }
+                Processes::test_snapshot(rows)
+            },
+            |_| Ok(control != "kernel-occupied"),
+        )?;
+        assert_eq!(matches!(decision, Decision::Done), done, "{control}");
+        let (state, _) = store.snapshot()?;
+        assert_eq!(state.used(), u32::from(!done), "{control}");
+        assert_eq!(
+            state.find(&id)?.trace.diagnostic.code,
+            (done && control != "successful-command")
+                .then_some(locked_build::wire::Code::SupervisionLost),
+            "{control}"
+        );
+    }
+    Ok(())
+}
+
 /// Provenance: SWM-380. Trace: FR-005-AC-2
 #[test]
 fn watchdog_startup_pins_the_admitted_store_and_policy_paths() -> Result<()> {

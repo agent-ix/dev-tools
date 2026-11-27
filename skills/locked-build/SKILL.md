@@ -150,14 +150,14 @@ An explicit `CARGO_TARGET_DIR` is preserved by `locked-build run` and the Cargo 
 Drain both queued and running leases before upgrading this version. Old
 binaries reject the new strict policy/lease fields. `install-tools` holds the
 queue lock and refuses an active queue. The Make target finishes its admitted
-Cargo install before running policy setup outside that lease. Installation
+Cargo build before running installation outside that lease. Installation
 backs up the old combined memory policy, removes `memory_per_job_bytes`, adds
 the 3 GB reservation and 8 GB hard-limit defaults, and preserves explicit new
 values and hand-set jobs, threads, disk reserve and hold duration. A distinct
 host policy wins over a competing fallback policy; the fallback is backed up.
 
 From the dev-tools repository root, install the binary, measured policy, and
-Cargo shim with `make install-tools`. The command is idempotent and puts the
+Cargo shim with `make install-tools ROLLOUT_OWNER=<stable-rollout-owner>`. The command puts the
 shim ahead of real Cargo in the supported shell startup files. Start a new
 shell after the first install. npm packages are installed with both
 `--registry=https://registry.npmjs.org/` and
@@ -169,6 +169,37 @@ and exit status are suitable for ix-board cadence checks. This host manifest
 does not pin Cargo or rustc; each repository owns its toolchain selection,
 using `rust-toolchain` where configured. A `rust-version` value sets an MSRV
 floor, not a host-wide toolchain pin.
+
+Only the rollout owner pinned in `~/.ix/locked-build/install.json` may install.
+Concurrent installs are rejected. The record stores source commit, artifact
+SHA256, UTC install milliseconds and ownership-transfer history. Use
+`locked-build install-tools --owner <new> --transfer-from <recorded-owner>` for
+an explicit transfer. `check-install` prints these values and fails if a direct
+binary write changed the installed artifact. Git builds embed HEAD; source
+archives need `LOCKED_BUILD_SOURCE_COMMIT=<full-sha>` at build time.
+
+`max_queued_per_owner` is a positive policy override. The default is
+`ceil(maximum_units/4)`, minimum one. Over-cap submissions get `LB_REFUSED_QUEUE`
+with `limit=policy.max_queued_per_owner`, the attempted count, and the setting
+to change. Only queued requests count. Status exports `queued_by_owner`
+(owner-to-count map) and effective `max_queued_per_owner` (integer).
+
+An abandoned launch with a proven-absent original client and no command members
+ends `LB_SUPERVISION_LOST` within one watchdog poll, freeing its lease. Client
+birth identities and PID namespaces are recorded separately from replaceable
+workers. Live clients, live command members, foreign namespaces and uncertain
+kernel group liveness retain capacity; a healthy command's exit remains authoritative.
+
+`run --memory 16GiB` selects a total reservation and hard cap for that request,
+without changing parallelism or class defaults. Sizes accept integer bytes or
+KB/MB/GB and KiB/MiB/GiB. In `lease_accounted` mode the positive policy
+`max_request_memory` ceiling defaults to half `memory_budget_bytes`;
+oversized requests get `LB_REFUSED_CLASS_CAP` naming that key. Absolute
+`memory_cap_by_class` and the host budget remain authoritative. Status/events
+show requested/granted hard memory and reservation bytes; an explicit cap's
+diagnostic limit source is `request.memory_bytes`. The status metrics and
+Prometheus gauges `ix_build_memory_reserved_bytes` / `ix_build_memory_limit_bytes`
+sum active sizes by `{host,class,state}`, where state is queued or running.
 
 ## Wrapper migration map
 
