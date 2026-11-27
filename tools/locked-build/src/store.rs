@@ -186,7 +186,7 @@ impl Store {
                 ));
             }
             metrics.bind_store(&state.store_id);
-            if history && !metrics.can_reconcile(&state) {
+            if !metrics.can_reconcile(&state) {
                 continue;
             }
             metrics.reconcile_events(&state.events, state.next_event)?;

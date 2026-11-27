@@ -3553,3 +3553,42 @@ fn scope_peak_records_success_and_watchdog_keeps_the_highest_sample() -> Result<
         Ok(())
     })
 }
+
+/// Trace: FR-005-AC-4, FR-015-AC-1, FR-015-AC-10
+/// Provenance: SWM-405, SR-001 FND-003
+#[test]
+fn pending_live_launch_does_not_count_as_repaired_until_replacement_registers() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let (generation, lease) = spawn_worker_with(&store, &id, false, |claim, lease| {
+        Ok((claim.generation, lease))
+    })?
+    .ok_or_else(|| Error::new(ErrorCode::State, "first claim absent"))?;
+    for _ in 0..2 {
+        assert!(recover_with_processes(&store, || Processes::test_snapshot([]))?.contains(&id));
+        assert!(
+            spawn_worker_with(&store, &id, false, |_, _| -> Result<()> {
+                panic!("live launch duplicated")
+            })?
+            .is_none()
+        );
+    }
+    let zero = metrics(&store)?;
+    assert!(zero.contains("ix_build_recover_events_total{host=\"your-build-host\"} 0"));
+    assert!(zero.contains("ix_build_supervisor_restarts_total{host=\"your-build-host\"} 0"));
+    let identity = Processes::self_identity()?;
+    assert!(claim_spawned_worker(&store, &id, &identity, generation)?.is_some());
+    drop(lease);
+    let (generation, _lease) = spawn_worker_with(&store, &id, true, |claim, lease| {
+        Ok((claim.generation, lease))
+    })?
+    .ok_or_else(|| Error::new(ErrorCode::State, "replacement claim absent"))?;
+    assert!(metrics(&store)?.contains("ix_build_recover_events_total{host=\"your-build-host\"} 0"));
+    assert!(claim_spawned_worker(&store, &id, &identity, generation)?.is_some());
+    assert!(claim_spawned_worker(&store, &id, &identity, generation)?.is_none());
+    let text = metrics(&store)?;
+    assert!(text.contains("ix_build_recover_events_total{host=\"your-build-host\"} 1"));
+    assert!(text.contains("ix_build_supervisor_restarts_total{host=\"your-build-host\"} 1"));
+    Ok(())
+}

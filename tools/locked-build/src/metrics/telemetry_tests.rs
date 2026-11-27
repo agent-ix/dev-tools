@@ -141,7 +141,7 @@ fn telemetry_capacity_policy_and_host_series_match_current_state() -> Result<()>
     for (name, expected) in [
         ("ix_build_running", 1.0),
         ("ix_build_units_used", 2.0),
-        ("ix_build_units_total", 8.0),
+        ("ix_build_units_capacity", 8.0),
         ("ix_build_memory_budget_used_bytes", 300.0),
         ("ix_build_memory_budget_total_bytes", 1_000.0),
         ("ix_build_running_memory_headroom_ratio", 0.75),
@@ -379,5 +379,62 @@ fn telemetry_class_policy_and_identity_parsing_are_exact() -> Result<()> {
                 .unwrap_or_default()
         );
     }
+    Ok(())
+}
+
+/// Trace: FR-015-AC-1, FR-015-AC-10
+/// Provenance: SWM-405, SR-001 FND-002
+#[test]
+fn telemetry_wait_keeps_pre_reboot_time_through_admission_and_cancellation() -> Result<()> {
+    let mut metrics = MetricsState::default();
+    metrics.record_pre_reboot_wait("store:r1", 4_000);
+    let waiting = state(vec![request(
+        1,
+        "draco:tooling:telemetry".into(),
+        Phase::Queued,
+    )]);
+    let before = metrics.exposition(&waiting, &policy()?, 3_000, 3_000)?;
+    assert_eq!(sample(&before, "ix_build_oldest_queued_seconds", &[]), 7.0);
+    let admitted = event(1, "running", 0, 3_000);
+    let mut started = event(2, "running", 0, 3_000);
+    started.request_id = admitted.request_id.clone();
+    started.kind = "command_started".into();
+    let mut done = event(3, "succeeded", 0, 3_000);
+    done.request_id = admitted.request_id.clone();
+    metrics.reconcile_events(&[admitted, started, done], 4)?;
+    metrics.record_pre_reboot_wait("store:r4", 4_000);
+    let cancelled = event(4, "cancelled", 0, 3_000);
+    metrics.reconcile_events(&[cancelled], 5)?;
+    let current = state(vec![]);
+    let text = metrics.exposition(&current, &policy()?, 0, 0)?;
+    assert_eq!(
+        sample(&text, "ix_build_wait_seconds_sum", &[("outcome", "ok")]),
+        7.0
+    );
+    assert_eq!(
+        sample(
+            &text,
+            "ix_build_wait_seconds_sum",
+            &[("outcome", "cancelled")]
+        ),
+        7.0
+    );
+    assert_eq!(
+        sample(
+            &text,
+            "ix_build_queue_wait_seconds_sum",
+            &[("class", "periodic")]
+        ),
+        7.0
+    );
+    let mut reboot = event(5, "failed", 0, 1_000);
+    reboot.reason = Some("host_rebooted".into());
+    reboot.hold_ms = Some(999_000);
+    reboot.trace.running_at_ms = Some(1);
+    reboot.trace.running_seconds = 999.0;
+    metrics.reconcile_events(&[reboot], 6)?;
+    let text = metrics.exposition(&current, &policy()?, 0, 0)?;
+    assert!(!text.contains("# TYPE ix_build_hold_seconds"));
+    assert!(!text.contains("# TYPE ix_build_run_seconds"));
     Ok(())
 }

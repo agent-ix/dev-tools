@@ -3,15 +3,13 @@
 
 use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
+use crate::metrics::{BUCKETS_SECONDS, PriorityClass};
 use crate::model::{Event, MemorySample, Phase, Request, State};
 use locked_build::wire::{Code, MetricFamily, MetricKind, MetricSample, MetricValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const SECONDS: &[f64] = &[
-    1., 5., 10., 30., 60., 120., 300., 600., 1200., 1800., 3600., 7200.,
-];
 const BYTES: &[f64] = &[
     1_000_000.,
     10_000_000.,
@@ -27,14 +25,6 @@ const BYTES: &[f64] = &[
 const RATIOS: &[f64] = &[0., 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 1., 2.];
 const MAX_IDENTITIES: usize = 128;
 const MAX_LANES: usize = 64;
-const CLASSES: &[&str] = &[
-    "must-fix",
-    "point",
-    "block",
-    "periodic",
-    "arch-test",
-    "kani",
-];
 const REASONS: &[&str] = &[
     "memory_budget",
     "fifo_or_priority_reservation",
@@ -119,6 +109,8 @@ pub(crate) struct Ledger {
     families: Vec<MetricFamily>,
     identities: BTreeSet<String>,
     lanes: BTreeSet<String>,
+    /// Admission wait stays until terminal reconciliation; bounded by active requests.
+    admitted_wait_ms: BTreeMap<String, u64>,
 }
 fn labels(values: &[(&str, &str)]) -> Labels {
     values
@@ -127,11 +119,7 @@ fn labels(values: &[(&str, &str)]) -> Labels {
         .collect()
 }
 fn class(value: &str) -> &str {
-    if CLASSES.contains(&value) {
-        value
-    } else {
-        "periodic"
-    }
+    PriorityClass::from_class(value).label()
 }
 fn outcome(event: &Event) -> &'static str {
     if event.kind == "refused" {
@@ -200,7 +188,7 @@ impl Ledger {
         }
         owners
     }
-    pub(crate) fn observe(&mut self, event: &Event) -> Result<()> {
+    pub(crate) fn observe(&mut self, event: &Event, pre_reboot_wait_ms: u64) -> Result<()> {
         self.register_lane(&event.owner);
         let system_name = match event.kind.as_str() {
             "supervisor_restart" => Some("ix_build_supervisor_restarts_total"),
@@ -215,24 +203,40 @@ impl Ledger {
                 Labels::new(),
             );
         }
-        if !event.state.terminal() || event.correction {
+        if event.correction {
             return Ok(());
         }
+        if event.state == Phase::Running {
+            self.admitted_wait_ms
+                .entry(event.request_id.0.clone())
+                .or_insert(event.wait_ms.saturating_add(pre_reboot_wait_ms));
+        }
+        if !event.state.terminal() {
+            return Ok(());
+        }
+        let seconds = BUCKETS_SECONDS.map(|bound| bound as f64);
+        let wait_ms = self
+            .admitted_wait_ms
+            .remove(&event.request_id.0)
+            .unwrap_or_else(|| event.wait_ms.saturating_add(pre_reboot_wait_ms));
         let base = labels(&[("class", class(&event.class)), ("outcome", outcome(event))]);
         self.histogram(
             "ix_build_wait_seconds",
             "Queue duration for every terminal request, including cancellations and refusals.",
             &base,
-            event.wait_ms as f64 / 1000.,
-            SECONDS,
+            wait_ms as f64 / 1000.,
+            &seconds,
         )?;
-        if let Some(hold) = event.hold_ms {
+        if let Some(hold) = event
+            .hold_ms
+            .filter(|_| event.reason.as_deref() != Some("host_rebooted"))
+        {
             self.histogram(
                 "ix_build_hold_seconds",
                 "Admitted lease duration including command startup.",
                 &base,
                 hold as f64 / 1000.,
-                SECONDS,
+                &seconds,
             )?;
             if let Some(limit) = event.telemetry.hold_limit_ms.filter(|n| *n > 0) {
                 self.histogram(
@@ -244,13 +248,13 @@ impl Ledger {
                 )?;
             }
         }
-        if event.trace.running_at_ms.is_some() {
+        if event.trace.running_at_ms.is_some() && event.reason.as_deref() != Some("host_rebooted") {
             self.histogram(
                 "ix_build_run_seconds",
                 "Command execution duration, excluding queue and startup.",
                 &base,
                 event.trace.running_seconds,
-                SECONDS,
+                &seconds,
             )?;
         }
         if let Some(reserved) = event.telemetry.reservation_bytes {
@@ -428,6 +432,7 @@ impl Ledger {
         config: &Config,
         now: u64,
         clock: u64,
+        pre_reboot_wait_ms: &BTreeMap<String, u64>,
     ) -> Vec<MetricFamily> {
         let mut families = self.families.clone();
         for name in [
@@ -481,7 +486,7 @@ impl Ledger {
         for (name, value) in [
             ("ix_build_running", running.len() as f64),
             ("ix_build_units_used", f64::from(state.used())),
-            ("ix_build_units_total", f64::from(config.capacity_units)),
+            ("ix_build_units_capacity", f64::from(config.capacity_units)),
             (
                 "ix_build_memory_budget_used_bytes",
                 state.memory_used(config) as f64,
@@ -494,7 +499,11 @@ impl Ledger {
                 "ix_build_oldest_queued_seconds",
                 queued
                     .iter()
-                    .map(|r| clock.saturating_sub(r.enqueued_clock_ms))
+                    .map(|r| {
+                        clock
+                            .saturating_sub(r.enqueued_clock_ms)
+                            .saturating_add(pre_reboot_wait_ms.get(&r.id.0).copied().unwrap_or(0))
+                    })
                     .max()
                     .unwrap_or(0) as f64
                     / 1000.,
@@ -563,13 +572,14 @@ impl Ledger {
                 minimum,
             );
         }
-        for priority in CLASSES {
+        for priority in PriorityClass::ALL {
+            let priority = priority.label();
             for (name, value) in [
                 (
                     "ix_build_policy_class_memory_reserve_per_job_bytes",
                     config
                         .memory_reserve_per_job_by_class
-                        .get(*priority)
+                        .get(priority)
                         .copied()
                         .unwrap_or(config.memory_reserve_per_job_bytes),
                 ),
@@ -577,7 +587,7 @@ impl Ledger {
                     "ix_build_policy_class_memory_limit_per_job_bytes",
                     config
                         .memory_per_job_by_class
-                        .get(*priority)
+                        .get(priority)
                         .copied()
                         .unwrap_or(config.memory_limit_per_job_bytes),
                 ),
@@ -585,7 +595,7 @@ impl Ledger {
                     "ix_build_policy_class_memory_cap_bytes",
                     config
                         .memory_cap_by_class
-                        .get(*priority)
+                        .get(priority)
                         .copied()
                         .unwrap_or(0),
                 ),
@@ -601,7 +611,7 @@ impl Ledger {
                 let count = queued
                     .iter()
                     .filter(|r| {
-                        class(&r.class) == *priority
+                        class(&r.class) == priority
                             && if *reason == "ready" {
                                 r.active_blocked_reasons.is_empty()
                             } else {

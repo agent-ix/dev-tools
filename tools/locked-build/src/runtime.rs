@@ -616,7 +616,7 @@ fn spawn_worker_with<T>(
     };
     let launcher = Processes::self_identity()?;
     let pid_namespace = crate::process::pid_namespace()?;
-    let claim = store.transaction(|state, config| {
+    let claim = store.transaction(|state, _| {
         let store_id = state.store_id.clone();
         let request = state.find_mut(id)?;
         if request.phase != Phase::Queued {
@@ -673,9 +673,6 @@ fn spawn_worker_with<T>(
             worker: None,
         };
         store.write_claim(&claim)?;
-        if claim.generation > 1 {
-            state.system_event("supervisor_restart", config, now_ms()?)?;
-        }
         Ok(Some(claim))
     })?;
     let Some(claim) = claim else {
@@ -931,11 +928,6 @@ fn recover_with_boot(
         }
         finish.sort_by(|left, right| left.0.cmp(&right.0));
         finish.dedup();
-        // Count actual repaired requests, not idle recover invocations.
-        let recovered = finish.iter().chain(&respawn).filter(|id| state.find(id).is_ok_and(|request| rebooted || request.worker_generation > 0)).count();
-        for _ in 0..recovered {
-            state.system_event("recovered", config, now)?;
-        }
         for id in finish {
             let outcome = state.find(&id)?.command_finished.as_ref();
             let code = outcome.and_then(|outcome| outcome.code);
@@ -955,6 +947,7 @@ fn recover_with_boot(
                 now,
                 clock,
             )?;
+            state.system_event("recovered", config, now)?;
         }
         state.boot_time = boot_time;
         state.boot_id = boot_id;
@@ -1249,7 +1242,7 @@ fn claim_worker(
     id: &RequestId,
     identity: &crate::model::ProcessIdentity,
 ) -> Result<Option<WorkerFence>> {
-    store.transaction(|state, _| {
+    store.transaction(|state, config| {
         let request = state.find_mut(id)?;
         if request.phase != Phase::Queued || request.worker.is_some() {
             return Ok(None);
@@ -1259,10 +1252,15 @@ fn claim_worker(
             .checked_add(1)
             .ok_or_else(|| Error::new(ErrorCode::State, "supervisor generation exhausted"))?;
         request.worker = Some(identity.clone());
-        Ok(Some(WorkerFence {
+        let fence = WorkerFence {
             identity: identity.clone(),
             generation: request.worker_generation,
-        }))
+        };
+        if fence.generation > 1 {
+            state.system_event("supervisor_restart", config, now_ms()?)?;
+            state.system_event("recovered", config, now_ms()?)?;
+        }
+        Ok(Some(fence))
     })
 }
 
@@ -1273,7 +1271,7 @@ fn claim_spawned_worker(
     generation: u64,
 ) -> Result<Option<WorkerFence>> {
     let namespace = crate::process::pid_namespace()?;
-    store.transaction(|state, _| {
+    store.transaction(|state, config| {
         let Some(mut claim) = store.claim(id)? else {
             return Ok(None);
         };
@@ -1296,6 +1294,10 @@ fn claim_spawned_worker(
         request.heartbeat_at_ms = Some(now_ms()?);
         claim.worker = Some(identity.clone());
         store.write_claim(&claim)?;
+        if generation > 1 {
+            state.system_event("supervisor_restart", config, now_ms()?)?;
+            state.system_event("recovered", config, now_ms()?)?;
+        }
         Ok(Some(WorkerFence {
             identity: identity.clone(),
             generation,

@@ -424,7 +424,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{__name__=~\"ix_build_running|ix_build_units_used|ix_build_units_total\",host=~\"$host\"}",
+          "expr": "{__name__=~\"ix_build_running|ix_build_units_used|ix_build_units_capacity\",host=~\"$host\"}",
           "legendFormat": "{{host}} {{__name__}} {{class}} {{outcome}} {{code}} {{cause}} {{reason}} {{measurement}} {{lane}} {{ticket}} {{repo}} {{subcommand}}",
           "range": true,
           "datasource": {

@@ -19,7 +19,7 @@ groups:
           summary: 'Build memory or supervision failure on {{ $labels.host }}: {{ $labels.code }}'
           description: 'Inspect status/events for the exact policy limit and measured value; compare kill-limit and kill-measured histograms.'
       - alert: LockedBuildQueueStuck
-        expr: (ix_build:queue_depth:sum > 0) and on (host) (changes(ix_build:queue_depth:sum[10m]) == 0) and on (host) (ix_build_units_used < ix_build_units_total) and on (host) (ix_build_oldest_queued_seconds > 600)
+        expr: (ix_build:queue_depth:sum > 0) and on (host) (changes(ix_build:queue_depth:sum[10m]) == 0) and on (host) (ix_build_units_used < ix_build_units_capacity) and on (host) (ix_build_oldest_queued_seconds > 600)
         for: 5m
         labels:
           severity: warning

@@ -11,13 +11,14 @@ use crate::config::Config;
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{Event, Request, State};
 
-const BUCKETS_SECONDS: [u64; 12] = [1, 5, 10, 30, 60, 120, 300, 600, 1_200, 1_800, 3_600, 7_200];
+pub(crate) const BUCKETS_SECONDS: [u64; 12] =
+    [1, 5, 10, 30, 60, 120, 300, 600, 1_200, 1_800, 3_600, 7_200];
 
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
 )]
 #[serde(rename_all = "snake_case")]
-enum PriorityClass {
+pub(crate) enum PriorityClass {
     MustFix,
     Point,
     Block,
@@ -27,7 +28,7 @@ enum PriorityClass {
 }
 
 impl PriorityClass {
-    const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::MustFix,
         Self::Point,
         Self::Block,
@@ -36,7 +37,7 @@ impl PriorityClass {
         Self::Kani,
     ];
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::MustFix => "must-fix",
             Self::Point => "point",
@@ -47,7 +48,7 @@ impl PriorityClass {
         }
     }
 
-    fn from_class(class: &str) -> Self {
+    pub(crate) fn from_class(class: &str) -> Self {
         match class {
             "must-fix" => Self::MustFix,
             "point" => Self::Point,
@@ -219,7 +220,9 @@ impl MetricsState {
         clock: u64,
     ) -> locked_build::wire::MetricsSnapshot {
         let mut snapshot = self.snapshot(state, clock);
-        snapshot.telemetry = self.telemetry.snapshot(state, config, now, clock);
+        snapshot.telemetry =
+            self.telemetry
+                .snapshot(state, config, now, clock, &self.pre_reboot_wait_ms);
         snapshot
     }
 
@@ -369,7 +372,12 @@ impl MetricsState {
             .collect();
         ordered.sort_by_key(|(sequence, _)| *sequence);
         for (sequence, event) in ordered {
-            self.telemetry.observe(event)?;
+            let pre_reboot_wait = self
+                .pre_reboot_wait_ms
+                .get(&event.request_id.0)
+                .copied()
+                .unwrap_or(0);
+            self.telemetry.observe(event, pre_reboot_wait)?;
             if event.correction
                 || matches!(
                     event.kind.as_str(),
@@ -764,7 +772,9 @@ impl MetricsState {
             ));
         }
         crate::telemetry::render(
-            &self.telemetry.snapshot(state, config, now_ms, clock_ms),
+            &self
+                .telemetry
+                .snapshot(state, config, now_ms, clock_ms, &self.pre_reboot_wait_ms),
             &mut output,
         );
         Ok(output)
