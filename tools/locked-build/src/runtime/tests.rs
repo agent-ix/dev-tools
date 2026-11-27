@@ -829,7 +829,7 @@ fn direct_test_binary_thread_limit_is_clamped_without_separator() {
 }
 
 #[test]
-fn caller_environment_overrides_are_recorded_and_preserved_without_policy_values() -> Result<()> {
+fn caller_environment_overrides_incremental_and_policy_target_values() -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let id = queued(&store)?;
@@ -1624,6 +1624,7 @@ fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Re
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
+    clear_caller_target_directory(&store, &id)?;
     let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     let target = target_directory(&policy, &request, true)?
         .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
@@ -1686,6 +1687,7 @@ fn target_lifecycle_skips_symlinks_and_size_cleans_oversized_targets() -> Result
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
+    clear_caller_target_directory(&store, &id)?;
     let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     let target = target_directory(&policy, &request, true)?
         .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
@@ -1723,6 +1725,13 @@ fn finish_started_request(store: &Store, id: &RequestId) -> Result<()> {
     })
 }
 
+fn clear_caller_target_directory(store: &Store, id: &RequestId) -> Result<()> {
+    store.transaction(|state, _| {
+        state.find_mut(id)?.caller_cargo_target_dir = None;
+        Ok(())
+    })
+}
+
 #[test]
 fn target_cleanup_treats_walk_bound_as_oversized_and_removes_symlink_tree() -> Result<()> {
     const TOO_MANY_ENTRIES: usize = 100_005;
@@ -1734,6 +1743,7 @@ fn target_cleanup_treats_walk_bound_as_oversized_and_removes_symlink_tree() -> R
     std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
 
     let id = queued(&store)?;
+    clear_caller_target_directory(&store, &id)?;
     let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
     let target = target_directory(&policy, &request, true)?
         .ok_or_else(|| Error::new(ErrorCode::Configuration, "target directory missing"))?;
