@@ -78,82 +78,207 @@ pub(crate) fn enqueue(
     let now = now_ms()?;
     let clock = clock_ms()?;
     store.transaction(|state, config| {
-        if units == 0 || units > config.maximum_units || priority > config.max_priority() {
-            return Err(Error::new(
-                ErrorCode::Request,
-                "units or priority outside configured bounds",
-            ));
-        }
-        if state.requests.len() >= crate::config::MAX_REQUESTS {
-            return Err(Error::new(
-                ErrorCode::State,
-                "retained request limit reached; prune terminal requests",
-            ));
-        }
         let sequence = state.next_sequence;
         state.next_sequence = sequence
             .checked_add(1)
             .ok_or_else(|| Error::new(ErrorCode::State, "request sequence exhausted"))?;
         let id = RequestId(format!("{}:r{sequence}", state.store_id));
         let class_name = class.unwrap_or("periodic");
-        let (memory_cargo_jobs, memory_rust_test_threads, memory_parallelism) =
-            resolve_build_parallelism(
-                config,
-                command,
-                caller_cargo_build_jobs.as_deref(),
-                caller_rust_test_threads.as_deref(),
-                units,
-                state.used().saturating_add(units),
-            );
-        let memory_cap_bytes =
-            if config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted {
-                Some(estimate_memory_lease(
-                    config,
+        let result = (|| {
+            if units > config.maximum_units {
+                return Err(
+                    Error::new(ErrorCode::Request, "units exceed configured maximum").with_failure(
+                        crate::diagnostics::Failure::refused(
+                            locked_build::wire::Code::RefusedQueue,
+                            class_name,
+                            "policy.maximum_units",
+                            config.maximum_units.into(),
+                            units.into(),
+                            "requested units",
+                        ),
+                    ),
+                );
+            }
+            if priority > config.max_priority() {
+                return Err(
+                    Error::new(ErrorCode::Request, "priority exceeds configured maximum")
+                        .with_failure(crate::diagnostics::Failure::refused(
+                            locked_build::wire::Code::InvalidRequest,
+                            class_name,
+                            "policy.priority_classes.maximum",
+                            config.max_priority().into(),
+                            priority.into(),
+                            "requested priority",
+                        )),
+                );
+            }
+            if units == 0 {
+                return Err(Error::new(
+                    ErrorCode::Request,
+                    "units or priority outside configured bounds",
+                ));
+            }
+            if state.requests.len() >= crate::config::MAX_REQUESTS {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "retained request limit reached; prune terminal requests",
+                )
+                .with_failure(crate::diagnostics::Failure::refused(
+                    locked_build::wire::Code::RefusedQueue,
                     class_name,
-                    memory_parallelism,
-                )?)
-            } else {
-                None
-            };
-        state.requests.push(Request {
-            id: id.clone(),
-            sequence,
-            owner: owner.to_owned(),
-            ticket: ticket.to_owned(),
-            units,
-            priority,
-            class: class_name.to_owned(),
-            memory_cap_bytes,
-            memory_cargo_jobs,
-            memory_rust_test_threads,
-            memory_parallelism: Some(memory_parallelism),
-            caller_cargo_build_jobs,
-            caller_rust_test_threads,
-            caller_cargo_incremental,
-            caller_cargo_target_dir,
-            lease_record: None,
-            enqueued_at_ms: now,
-            enqueued_clock_ms: clock,
-            started_at_ms: None,
-            started_clock_ms: None,
-            ended_at_ms: None,
-            ended_clock_ms: None,
-            heartbeat_at_ms: None,
-            worker: None,
-            worker_generation: 0,
-            watchdog: None,
-            command_finished: None,
-            phase: Phase::Queued,
-            stop: None,
-            exit_code: None,
-            signal: None,
-            reason: None,
-            command: command.to_vec(),
-            cwd,
-        });
-        state.event(&id, config, now, clock)?;
-        Ok(id)
-    })
+                    "policy.MAX_REQUESTS",
+                    (crate::config::MAX_REQUESTS as u64).into(),
+                    (state.requests.len() as u64).into(),
+                    "retained requests",
+                )));
+            }
+            let (memory_cargo_jobs, memory_rust_test_threads, memory_parallelism) =
+                resolve_build_parallelism(
+                    config,
+                    command,
+                    caller_cargo_build_jobs.as_deref(),
+                    caller_rust_test_threads.as_deref(),
+                    units,
+                    state.used().saturating_add(units),
+                );
+            let memory_cap_bytes =
+                if config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted {
+                    Some(estimate_memory_lease(
+                        config,
+                        class_name,
+                        memory_parallelism,
+                    )?)
+                } else {
+                    None
+                };
+            let mut raw_arguments = command.get(1..).unwrap_or_default().to_vec();
+            let requested_jobs = clamp_argument(&mut raw_arguments, &["--jobs", "-j"], false, None)
+                .and_then(|argument| argument.value)
+                .and_then(|value| u32::try_from(value).ok())
+                .or_else(|| {
+                    caller_cargo_build_jobs
+                        .as_ref()
+                        .and_then(|value| value.parse().ok())
+                });
+            let requested_threads = clamp_test_threads(&mut raw_arguments, None)
+                .and_then(|argument| argument.value)
+                .and_then(|value| u32::try_from(value).ok())
+                .or_else(|| {
+                    caller_rust_test_threads
+                        .as_ref()
+                        .and_then(|value| value.parse().ok())
+                });
+            let requested_memory = memory_cap_bytes.map(|_| {
+                let parallelism = requested_jobs
+                    .unwrap_or(memory_cargo_jobs.unwrap_or(units))
+                    .max(requested_threads.unwrap_or(memory_rust_test_threads.unwrap_or(0)));
+                u64::from(parallelism).saturating_mul(
+                    config
+                        .memory_per_job_by_class
+                        .get(class_name)
+                        .copied()
+                        .unwrap_or(config.memory_per_job_bytes),
+                )
+            });
+            state.requests.push(Request {
+                trace: locked_build::wire::RequestTrace {
+                    lifecycle_state: "queued".to_owned(),
+                    queue_depth_at_enqueue: u32::try_from(
+                        state
+                            .requests
+                            .iter()
+                            .filter(|request| request.phase == Phase::Queued)
+                            .count()
+                            .saturating_add(1),
+                    )
+                    .unwrap_or(u32::MAX),
+                    queued_at_ms: Some(now),
+                    requested_jobs,
+                    requested_memory_bytes: requested_memory,
+                    ..Default::default()
+                },
+                command_started_clock_ms: None,
+                blocked_at_clock_ms: None,
+                active_blocked_reasons: Vec::new(),
+                measured_memory_bytes: None,
+                id: id.clone(),
+                sequence,
+                owner: owner.to_owned(),
+                ticket: ticket.to_owned(),
+                units,
+                priority,
+                class: class_name.to_owned(),
+                memory_cap_bytes,
+                memory_cargo_jobs,
+                memory_rust_test_threads,
+                memory_parallelism: Some(memory_parallelism),
+                caller_cargo_build_jobs,
+                caller_rust_test_threads,
+                caller_cargo_incremental,
+                caller_cargo_target_dir,
+                lease_record: None,
+                enqueued_at_ms: now,
+                enqueued_clock_ms: clock,
+                started_at_ms: None,
+                started_clock_ms: None,
+                ended_at_ms: None,
+                ended_clock_ms: None,
+                heartbeat_at_ms: None,
+                worker: None,
+                worker_generation: 0,
+                watchdog: None,
+                command_finished: None,
+                phase: Phase::Queued,
+                stop: None,
+                exit_code: None,
+                signal: None,
+                reason: None,
+                command: command.to_vec(),
+                cwd,
+            });
+            state.event(&id, config, now, clock)?;
+            Ok(id.clone())
+        })();
+        if let Err(error) = result {
+            let mut failure = crate::diagnostics::unscoped(&error, id.0.clone());
+            failure.request_id = id.0.clone();
+            failure.class = class_name.to_owned();
+            if let Some(message) = &mut failure.diagnostic.message {
+                *message = message.replace("request=pending ", &format!("request={} ", id.0));
+            }
+            state.events.push(Event {
+                trace: locked_build::wire::RequestTrace {
+                    diagnostic: failure.diagnostic.clone(),
+                    lifecycle_state: "refused".to_owned(),
+                    finished_at_ms: Some(now),
+                    ..Default::default()
+                },
+                kind: "refused".to_owned(),
+                schema_version: 1,
+                event_id: format!("{}:e{}", state.store_id, state.next_event),
+                request_id: id,
+                host: state.host.clone(),
+                owner: owner.to_owned(),
+                ticket: ticket.to_owned(),
+                observed_at_ms: now,
+                state: Phase::Failed,
+                units,
+                priority,
+                class: class_name.to_owned(),
+                capacity_units: config.capacity_units,
+                free_units: config.capacity_units.saturating_sub(state.used()),
+                wait_ms: 0,
+                hold_ms: None,
+                reason: Some("refused".to_owned()),
+            });
+            state.next_event = state
+                .next_event
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorCode::State, "event sequence exhausted"))?;
+            return Ok(Err(error.with_failure(failure)));
+        }
+        Ok(result)
+    })?
 }
 
 fn estimate_memory_lease(
@@ -180,14 +305,35 @@ fn estimate_memory_lease(
         return Err(Error::new(
             ErrorCode::Request,
             format!("requested memory lease {lease_bytes} exceeds class `{class}` memory cap"),
-        ));
+        )
+        .with_failure(crate::diagnostics::Failure::refused(
+            locked_build::wire::Code::RefusedClassCap,
+            class,
+            &format!("policy.memory_cap_by_class.{class}"),
+            config
+                .memory_cap_by_class
+                .get(class)
+                .copied()
+                .unwrap_or(0)
+                .into(),
+            lease_bytes.into(),
+            "requested memory bytes",
+        )));
     }
     let budget = config.memory_budget_bytes.unwrap_or(0);
     if lease_bytes > budget {
         return Err(Error::new(
             ErrorCode::Request,
             format!("requested memory lease {lease_bytes} exceeds memory budget {budget}"),
-        ));
+        )
+        .with_failure(crate::diagnostics::Failure::refused(
+            locked_build::wire::Code::RefusedMemoryBudget,
+            class,
+            "policy.memory_budget_bytes",
+            budget.into(),
+            lease_bytes.into(),
+            "requested memory bytes",
+        )));
     }
     Ok(lease_bytes)
 }
@@ -407,6 +553,8 @@ pub(crate) fn spawn_worker(store: &Store, id: &RequestId) -> Result<Child> {
 /// Redacted snapshot suitable for deterministic monitoring consumers.
 #[derive(Serialize)]
 pub struct Report {
+    /// Durable counters and current queue timing metrics.
+    pub metrics: locked_build::wire::MetricsSnapshot,
     /// Effective shared admission state directory.
     pub state_path: std::path::PathBuf,
     /// Report schema version.
@@ -442,6 +590,13 @@ pub struct Report {
 /// One redacted request, including exact wait/hold ages and uncertainty.
 #[derive(Serialize)]
 pub struct RequestReport {
+    /// Shared diagnostic and queue analysis fields.
+    #[serde(flatten)]
+    pub trace: locked_build::wire::RequestTrace,
+    /// Memory needed by this queued request.
+    pub memory_needed_bytes: Option<u64>,
+    /// Currently unreserved host memory budget.
+    pub memory_free_budget_bytes: Option<u64>,
     /// Stable request identity.
     pub request_id: RequestId,
     /// Owner/lane, never inferred from a pane.
@@ -486,13 +641,29 @@ fn recover_with_processes(
     store: &Store,
     read_processes: impl FnOnce() -> Processes,
 ) -> Result<Vec<RequestId>> {
+    recover_with_boot(
+        store,
+        read_processes,
+        crate::process::boot_id(),
+        sysinfo::System::boot_time(),
+    )
+}
+
+fn recover_with_boot(
+    store: &Store,
+    read_processes: impl FnOnce() -> Processes,
+    boot_id: Option<String>,
+    boot_time: u64,
+) -> Result<Vec<RequestId>> {
     store.transaction(|state, config| {
         let now = now_ms()?;
         let clock = clock_ms()?;
         let processes = read_processes();
-        let rebooted = state.boot_time != sysinfo::System::boot_time();
+        // sysinfo's macOS backend reads kern.boottime. Other timestamp-only
+        // backends get the same 120-second tolerance; Linux uses the UUID.
+        let rebooted = state.rebooted(boot_id.as_deref(), boot_time);
         if rebooted {
-            let new_boot_ms = sysinfo::System::boot_time().saturating_mul(1_000);
+            let new_boot_ms = boot_time.saturating_mul(1_000);
             for request in state
                 .requests
                 .iter()
@@ -576,7 +747,8 @@ fn recover_with_processes(
                 clock,
             )?;
         }
-        state.boot_time = sysinfo::System::boot_time();
+        state.boot_time = boot_time;
+        state.boot_id = boot_id;
         Ok(respawn)
     })
 }
@@ -601,6 +773,10 @@ fn status_with_clock(
             Ok(sample) => (Some(sample), None),
             Err(error) => (None, Some(error.to_string())),
         };
+        let positions = state.queue_positions(config, clock);
+        let free_budget = config
+            .memory_budget_bytes
+            .map(|budget| budget.saturating_sub(state.memory_used(config)));
         let requests = state
             .requests
             .iter()
@@ -611,6 +787,15 @@ fn status_with_clock(
                     .as_ref()
                     .map(|worker| processes.identity(worker, &request.id));
                 RequestReport {
+                    trace: {
+                        let mut trace = request.trace_snapshot(clock);
+                        if request.phase == Phase::Queued {
+                            trace.position = positions.get(&request.id.0).copied();
+                        }
+                        trace
+                    },
+                    memory_needed_bytes: request.memory_cap_bytes,
+                    memory_free_budget_bytes: free_budget,
                     request_id: request.id.clone(),
                     owner: request.owner.clone(),
                     ticket: request.ticket.clone(),
@@ -642,6 +827,7 @@ fn status_with_clock(
             .collect();
         let used = state.used();
         Ok(Report {
+            metrics: state.metrics.snapshot(state, clock),
             state_path: store.path.clone(),
             schema_version: 1,
             store_id: state.store_id.clone(),
@@ -878,6 +1064,10 @@ fn admit_worker_with_clock(
         }
         let sample = sample_for(config, now);
         let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
+        let blockers = state.block_observations(id, config, sample.as_ref(), now, clock)?;
+        let position = state.queue_position(id, config, clock);
+        let changed = state.find_mut(id)?.observe_blocks(blockers, clock);
+        state.find_mut(id)?.trace.position = position;
         {
             let request = state.find_mut(id)?;
             request.heartbeat_at_ms = Some(now);
@@ -886,6 +1076,12 @@ fn admit_worker_with_clock(
         let blocked = current_block_reason(state, config, sample.as_ref(), now, clock)?;
         state.metrics.observe_block(blocked, now, clock)?;
         if reason.is_some() {
+            if changed {
+                state.event(id, config, now, clock)?;
+                if let Some(event) = state.events.last_mut() {
+                    event.kind = "blocked".to_owned();
+                }
+            }
             return Ok(Admission::Waiting(crate::config::POLL_INTERVAL_MS));
         }
         let admitted = {
@@ -991,7 +1187,13 @@ fn finish_refused_command(
         config,
         now_ms()?,
         clock_ms()?,
-    )
+    )?;
+    state.find_mut(id)?.trace.lifecycle_state = "refused".to_owned();
+    if let Some(event) = state.events.last_mut() {
+        event.kind = "refused".to_owned();
+        event.trace.lifecycle_state = "refused".to_owned();
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1008,6 +1210,9 @@ fn supervise_started_command(
     let enforcement = persisted_memory_enforcement(store, &request.id)?;
     let mut cgroup_oom_evidence = CgroupOomEvidence::default();
     let mut status = None;
+    let mut degraded = false;
+    let mut stop_degraded_group = false;
+    let grace = Config::read(&store.config_path)?.termination_grace_ms;
     loop {
         // A dead watchdog remains a group member until its parent reaps it.
         watchdog_child.try_wait()?;
@@ -1039,10 +1244,8 @@ fn supervise_started_command(
                 watchdog.pid,
             ) != IdentityState::Matching
             {
-                return Err(Error::new(
-                    ErrorCode::State,
-                    "watchdog supervision unavailable",
-                ));
+                degraded = true;
+                current.reason = Some("supervision_degraded".to_owned());
             }
             current.heartbeat_at_ms = Some(now_ms()?);
             if current.stop.is_none() {
@@ -1052,6 +1255,19 @@ fn supervise_started_command(
                     clock_ms().is_ok_and(|now| now.saturating_sub(start) >= config.hold_ms)
                 }) {
                     current.stop = Some(StopReason::TimedOut);
+                }
+            }
+            stop_degraded_group = degraded && current.stop.is_some();
+            if degraded
+                && current.stop.is_none()
+                && let Some(cap) = current.memory_cap_bytes
+                && let Some(used) =
+                    Processes::read().group_memory_bytes(watchdog.pid, &[watchdog.pid])
+            {
+                current.measured_memory_bytes = Some(used);
+                if used > cap {
+                    current.stop = Some(StopReason::MemoryCap);
+                    stop_degraded_group = true;
                 }
             }
             if let Some(outcome) = status
@@ -1069,7 +1285,12 @@ fn supervise_started_command(
                     Completion {
                         code: outcome.code(),
                         signal: outcome.signal(),
-                        reason: cgroup_cap_kill_reason(enforcement, cgroup_oom_evidence.detected()),
+                        reason: cgroup_cap_kill_reason(enforcement, cgroup_oom_evidence.detected())
+                            .or(if degraded && outcome.code() == Some(0) {
+                                Some("supervision_degraded")
+                            } else {
+                                None
+                            }),
                     },
                 )?;
                 return Ok(None);
@@ -1079,8 +1300,30 @@ fn supervise_started_command(
         let Some(poll_ms) = policy else {
             return Ok(());
         };
+        if stop_degraded_group {
+            terminate_degraded_group(watchdog.pid, grace)?;
+        }
         std::thread::sleep(Duration::from_millis(poll_ms));
     }
+}
+
+fn terminate_degraded_group(group: u32, grace_ms: u64) -> Result<()> {
+    let group = i32::try_from(group)
+        .map_err(|_| Error::new(ErrorCode::State, "command group out of range"))?;
+    let pid = nix::unistd::Pid::from_raw(group);
+    let signal = |signal| match nix::sys::signal::killpg(pid, signal) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(error) => Err(Error::new(ErrorCode::State, error.to_string())),
+    };
+    signal(nix::sys::signal::Signal::SIGTERM)?;
+    let deadline = std::time::Instant::now() + Duration::from_millis(grace_ms);
+    while !group_absent(u32::try_from(group).unwrap_or(0)) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !group_absent(u32::try_from(group).unwrap_or(0)) {
+        signal(nix::sys::signal::Signal::SIGKILL)?;
+    }
+    Ok(())
 }
 
 fn persisted_memory_enforcement(
@@ -1206,10 +1449,15 @@ fn start_command(
         lease_record.cargo_target_dir = target_dir;
         lease_record.cargo_target_dir_overwrote_caller = target_overwrote_caller;
         state.find_mut(&request.id)?.lease_record = Some(lease_record);
-        command
-            .spawn()
-            .map(CommandStart::Started)
-            .map_err(Into::into)
+        let child = command.spawn()?;
+        let running = state.find_mut(&request.id)?;
+        running.command_started_clock_ms = Some(clock_ms()?);
+        running.trace.running_at_ms = Some(now_ms()?);
+        state.event(&request.id, config, now_ms()?, clock_ms()?)?;
+        if let Some(event) = state.events.last_mut() {
+            event.kind = "command_started".to_owned();
+        }
+        Ok(CommandStart::Started(child))
     })
 }
 

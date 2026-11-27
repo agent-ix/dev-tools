@@ -33,6 +33,55 @@ change policy `hold_ms`.
 
 `rss_cap` means memory enforcement killed the command for exceeding its cap. `memory_cap_unavailable` means policy required memory enforcement that the launcher could not establish, so the command was not launched.
 
+Each refusal or abnormal completion prints one diagnostic line to the caller
+and saves that same text as `message` in the event ledger and status JSON:
+
+```text
+locked-build: <CODE> request=<id> limit=<policy key>=<value> measured=<value> (<what>) killed=<pid/command>
+```
+
+| Code | Limit source and measurement |
+|---|---|
+| `LB_RSS_CAP` | `policy.memory_per_job_bytes*parallelism` (or the class override); measured process-group RSS bytes |
+| `LB_OOM_KILLED` | The same memory cap; evidence from the scope's `memory.events` `oom_kill` counter |
+| `LB_HOLD_TIMEOUT` | `policy.hold_ms`; elapsed lease milliseconds |
+| `LB_SUPERVISION_LOST` | Built-in `policy.supervision_required=true`; worker/watchdog evidence, or degraded supervision with observed exit 0 |
+| `LB_REFUSED_MEMORY_BUDGET` | `policy.memory_budget_bytes`; requested lease bytes |
+| `LB_REFUSED_CLASS_CAP` | `policy.memory_cap_by_class.<class>`; requested lease bytes |
+| `LB_REFUSED_QUEUE` | `policy.MAX_REQUESTS` or `policy.maximum_units`; retained requests or requested units |
+| `LB_REFUSED_CAP_UNAVAILABLE` | `policy.on_missing_cgroup`; unavailable cap backend |
+| `LB_CANCELLED` | Built-in `policy.run_permitted=true`; caller revoked permission |
+| `LB_EXTERNAL_SIGNAL` | Built-in `policy.external_signals=none`; “terminated by signal N from outside locked-build” |
+| `LB_COMMAND_EXIT` | Built-in `policy.success_exit_code=0`; actual command exit status |
+| `LB_INVALID_REQUEST` | Built-in `policy.valid_request=true` or configured priority bound; rejected input |
+| `LB_STATE_UNAVAILABLE` | Built-in `policy.state_access=read_write`; unavailable state/configuration |
+
+Built-in rule names describe required behavior; they are not configurable
+policy keys. An unavailable historical measurement is explicit. `killed`
+identifies the process group or `not-started/command` for a refusal.
+`locked-build error-codes` lists the enum. `code`, `limit_key`, `limit_value`,
+`measured_value`, `measured_what` and `killed` are separate JSON fields.
+When the worker can continue supervising after a watchdog glitch, it records
+the real command exit status. A successful command stays successful and reports
+that supervision was degraded. Linux reboot recovery uses the kernel boot UUID;
+macOS uses `kern.boottime`. Timestamp-only fallback tolerates 120 seconds of
+jitter, so small clock changes do not expire live leases.
+
+Queued requests expose `memory_needed_bytes`, `memory_free_budget_bytes`,
+`position`, `queue_depth_at_enqueue`, requested/granted jobs and memory,
+per-state timestamps/durations, and cumulative `blocked_reasons` with observed
+value, limit and seconds. Reasons can overlap. Memory-blocked heads allow
+fitting backfill until `(maximum priority + 1) * aging_ms`, then reserve
+admission to prevent starvation. Must-fix always precedes aged lower classes.
+Backfill never exceeds the memory budget.
+
+`metrics` exports `ix_build_requests_total{host,class,outcome}`,
+`ix_build_terminations_total{host,class,code}`,
+`ix_build_queue_wait_seconds{host,class}` (histogram), and
+`ix_build_blocked_seconds_total{host,class,reason}`. Status JSON's `metrics`
+object carries the same families. Counts survive reopening and explicit
+pruning; no request ids or owners become metric labels.
+
 Use `locked-build policy show` to inspect the effective policy. `locked-build policy init --force` regenerates it.
 
 Tool manifest entries without `version` require executable presence; `check-install` runs `--help` and passes only when it exits successfully.

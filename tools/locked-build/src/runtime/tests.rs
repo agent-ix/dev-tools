@@ -8,6 +8,196 @@ use super::*;
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
 
+/// Trace: FR-005-AC-8
+#[test]
+fn injected_boot_jitter_keeps_a_running_lease_but_real_reboot_expires_it() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let worker = ProcessIdentity {
+        pid: u32::MAX - 1,
+        started_seconds: 7,
+    };
+    store.transaction(|state, _| {
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.worker = Some(worker.clone());
+        request.worker_generation = 1;
+        request.started_clock_ms = Some(clock_ms()?);
+        request.started_at_ms = Some(now_ms()?);
+        state.boot_time = 10_000;
+        state.boot_id = None;
+        Ok(())
+    })?;
+    for boot in [10_001, 10_090] {
+        let processes = Processes::test_snapshot([(
+            worker.clone(),
+            worker.pid,
+            vec!["locked-build".into(), "worker".into(), id.0.clone()],
+        )]);
+        recover_with_boot(&store, || processes, None, boot)?;
+        assert_eq!(
+            store.transaction(|state, _| Ok(state.find(&id)?.phase))?,
+            Phase::Running
+        );
+    }
+    recover_with_boot(&store, Processes::read, None, 10_600)?;
+    let finished = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    assert_eq!(finished.phase, Phase::Failed);
+    assert_eq!(finished.reason.as_deref(), Some("host_rebooted"));
+    assert_eq!(
+        finished.trace.diagnostic.code,
+        Some(locked_build::wire::Code::SupervisionLost)
+    );
+    Ok(())
+}
+
+/// Trace: FR-005-AC-8, FR-015-AC-3
+#[test]
+fn vanished_watchdog_keeps_worker_supervision_and_real_success() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let mut command = Command::new("/bin/cat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    let input = command.stdin.take();
+    // Inject a watchdog identity that vanished; the command's group still exists.
+    let watchdog = ProcessIdentity {
+        pid: command.id(),
+        started_seconds: 1,
+    };
+    let worker = ProcessIdentity {
+        pid: u32::MAX - 1,
+        started_seconds: 1,
+    };
+    let fence = claim_worker(&store, &id, &worker)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "fixture claim missing"))?;
+    let request = store.transaction(|state, _| {
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now_ms()?);
+        request.started_clock_ms = Some(clock_ms()?);
+        request.watchdog = Some(watchdog.clone());
+        request.lease_record = Some(LeaseRecord {
+            memory_enforcement: MemoryEnforcement::RssWatchdog,
+            ..Default::default()
+        });
+        Ok(request.clone())
+    })?;
+    let mut watchdog_child = Command::new("/usr/bin/true").spawn()?;
+    let path = store.path.clone();
+    let config_path = store.config_path.clone();
+    // Keep the command alive until the worker has durably observed degradation.
+    let release = std::thread::spawn(move || -> Result<()> {
+        let observer = Store::open(&path, &config_path)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if observer.transaction(|state, _| {
+                Ok(state
+                    .requests
+                    .iter()
+                    .any(|request| request.reason.as_deref() == Some("supervision_degraded")))
+            })? {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "fixture did not observe degradation",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(input);
+        Ok(())
+    });
+    supervise_started_command(
+        &store,
+        &request,
+        &fence,
+        &watchdog,
+        &mut watchdog_child,
+        &AtomicBool::new(false),
+        command,
+        |_, _, _| {},
+    )?;
+    release
+        .join()
+        .map_err(|_| Error::new(ErrorCode::State, "fixture observer panicked"))??;
+    let finished = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    assert_eq!(finished.exit_code, Some(0));
+    assert_eq!(finished.phase, Phase::Succeeded);
+    assert_eq!(finished.reason.as_deref(), Some("supervision_degraded"));
+    assert!(
+        finished
+            .trace
+            .diagnostic
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("supervision degraded; command exited 0"))
+    );
+    assert!(group_absent(watchdog.pid));
+    Ok(())
+}
+
+/// Trace: FR-005-AC-1, FR-015-AC-3
+#[test]
+fn refusal_ledger_metrics_and_requested_parallelism_use_hand_written_values() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 4, 49_400_000_000, 0)?;
+    let mut policy = Config::read(&store.config_path)?;
+    policy.memory_per_job_bytes = 6_000_000_000;
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let id = enqueue(
+        &store,
+        "fixture",
+        "SWM-379",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j8".into()],
+    )?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    assert_eq!(request.trace.requested_jobs, Some(8));
+    assert_eq!(request.trace.requested_memory_bytes, Some(48_000_000_000));
+    assert_eq!(request.memory_cap_bytes, Some(24_000_000_000));
+    let refused = enqueue(&store, "fixture", "SWM-379", 5, 0, None, &["true".into()]);
+    let failure = refused
+        .err()
+        .and_then(|error| error.failure)
+        .ok_or_else(|| Error::new(ErrorCode::State, "fixture refusal missing"))?;
+    assert_eq!(failure.diagnostic.message.as_deref(), Some("locked-build: LB_REFUSED_QUEUE request=PLACEHOLDER limit=policy.maximum_units=4 measured=5 (requested units) killed=not-started/command".replace("PLACEHOLDER", &failure.request_id).as_str()));
+    let report = status(&store)?;
+    let refusal_event = report
+        .events
+        .last()
+        .ok_or_else(|| Error::new(ErrorCode::State, "fixture event missing"))?;
+    assert_eq!(
+        refusal_event.trace.diagnostic.message,
+        failure.diagnostic.message
+    );
+    assert!(
+        report
+            .metrics
+            .ix_build_requests_total
+            .iter()
+            .any(|row| row.class == "periodic" && row.outcome == "refused" && row.value == 1)
+    );
+    assert!(
+        report
+            .metrics
+            .ix_build_terminations_total
+            .iter()
+            .any(|row| row.class == "periodic"
+                && row.code == locked_build::wire::Code::RefusedQueue
+                && row.value == 1)
+    );
+    Ok(())
+}
+
 /// Provenance: SWM-374. Trace: FR-011-AC-7
 #[test]
 fn readonly_target_root_uses_shared_writable_targets() -> Result<()> {
@@ -2248,6 +2438,7 @@ fn outcome_counters_survive_store_reopen_and_prune() -> Result<()> {
         });
         request.worker_generation = 1;
         state.boot_time = u64::MAX;
+        state.boot_id = Some("previous-kernel-boot".to_owned());
         Ok(())
     })?;
     recover(&store)?;

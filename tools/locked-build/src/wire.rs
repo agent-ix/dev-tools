@@ -320,6 +320,10 @@ pub struct MetricsSnapshot {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct RequestProjection {
+    /// Memory required for admission, exposed by status.
+    pub memory_needed_bytes: Option<u64>,
+    /// Currently unreserved host memory budget, exposed by status.
+    pub memory_free_budget_bytes: Option<u64>,
     /// Legacy queue entry timestamp.
     pub enqueued_at_ms: Option<u64>,
     /// Legacy admission timestamp.
@@ -382,4 +386,150 @@ pub struct StatusProjection {
     /// Shared metrics snapshot.
     #[serde(default)]
     pub metrics: MetricsSnapshot,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trace: FR-005-AC-8, FR-015-AC-3
+    #[test]
+    fn every_code_has_a_stable_complete_hand_written_diagnostic() {
+        let cases = [
+            (
+                Code::RssCap,
+                "memory_per_job_bytes*parallelism",
+                "24000000000",
+                "25000000000",
+                "rss_bytes",
+                "locked-build: LB_RSS_CAP request=host:r7 limit=memory_per_job_bytes*parallelism=24000000000 measured=25000000000 (rss_bytes) killed=pgid:42/cargo",
+            ),
+            (
+                Code::OomKilled,
+                "memory_per_job_bytes*parallelism",
+                "24000000000",
+                "1",
+                "cgroup oom_kill",
+                "locked-build: LB_OOM_KILLED request=host:r7 limit=memory_per_job_bytes*parallelism=24000000000 measured=1 (cgroup oom_kill) killed=pgid:42/cargo",
+            ),
+            (
+                Code::HoldTimeout,
+                "hold_ms",
+                "5400000",
+                "5400100",
+                "elapsed_ms",
+                "locked-build: LB_HOLD_TIMEOUT request=host:r7 limit=hold_ms=5400000 measured=5400100 (elapsed_ms) killed=pgid:42/cargo",
+            ),
+            (
+                Code::SupervisionLost,
+                "supervision_required",
+                "true",
+                "false",
+                "watchdog absent",
+                "locked-build: LB_SUPERVISION_LOST request=host:r7 limit=supervision_required=true measured=false (watchdog absent) killed=pgid:42/cargo",
+            ),
+            (
+                Code::RefusedMemoryBudget,
+                "memory_budget_bytes",
+                "49400000000",
+                "54000000000",
+                "requested memory bytes",
+                "locked-build: LB_REFUSED_MEMORY_BUDGET request=host:r7 limit=memory_budget_bytes=49400000000 measured=54000000000 (requested memory bytes) killed=pgid:42/cargo",
+            ),
+            (
+                Code::RefusedClassCap,
+                "memory_cap_by_class.point",
+                "24000000000",
+                "30000000000",
+                "requested memory bytes",
+                "locked-build: LB_REFUSED_CLASS_CAP request=host:r7 limit=memory_cap_by_class.point=24000000000 measured=30000000000 (requested memory bytes) killed=pgid:42/cargo",
+            ),
+            (
+                Code::RefusedQueue,
+                "MAX_REQUESTS",
+                "100000",
+                "100000",
+                "retained requests",
+                "locked-build: LB_REFUSED_QUEUE request=host:r7 limit=MAX_REQUESTS=100000 measured=100000 (retained requests) killed=pgid:42/cargo",
+            ),
+            (
+                Code::RefusedCapUnavailable,
+                "on_missing_cgroup",
+                "refuse",
+                "unavailable",
+                "memory cap backend",
+                "locked-build: LB_REFUSED_CAP_UNAVAILABLE request=host:r7 limit=on_missing_cgroup=refuse measured=unavailable (memory cap backend) killed=pgid:42/cargo",
+            ),
+            (
+                Code::Cancelled,
+                "run_permitted",
+                "true",
+                "false",
+                "cancelled by caller",
+                "locked-build: LB_CANCELLED request=host:r7 limit=run_permitted=true measured=false (cancelled by caller) killed=pgid:42/cargo",
+            ),
+            (
+                Code::ExternalSignal,
+                "external_signals",
+                "none",
+                "15",
+                "terminated by signal 15 from outside locked-build",
+                "locked-build: LB_EXTERNAL_SIGNAL request=host:r7 limit=external_signals=none measured=15 (terminated by signal 15 from outside locked-build) killed=pgid:42/cargo",
+            ),
+            (
+                Code::CommandExit,
+                "success_exit_code",
+                "0",
+                "101",
+                "command exit status",
+                "locked-build: LB_COMMAND_EXIT request=host:r7 limit=success_exit_code=0 measured=101 (command exit status) killed=pgid:42/cargo",
+            ),
+            (
+                Code::InvalidRequest,
+                "valid_request",
+                "true",
+                "false",
+                "invalid request",
+                "locked-build: LB_INVALID_REQUEST request=host:r7 limit=valid_request=true measured=false (invalid request) killed=pgid:42/cargo",
+            ),
+            (
+                Code::StateUnavailable,
+                "state_access",
+                "read_write",
+                "unavailable",
+                "state inaccessible",
+                "locked-build: LB_STATE_UNAVAILABLE request=host:r7 limit=state_access=read_write measured=unavailable (state inaccessible) killed=pgid:42/cargo",
+            ),
+        ];
+        assert_eq!(cases.map(|case| case.0), Code::ALL);
+        for (code, key, limit, measured, what, expected) in cases {
+            let diagnostic = Diagnostic::failure(
+                code,
+                "host:r7",
+                key,
+                limit.into(),
+                measured.into(),
+                what,
+                "pgid:42/cargo",
+            );
+            assert_eq!(diagnostic.message.as_deref(), Some(expected));
+            assert!(
+                diagnostic.limit_key.is_some()
+                    && diagnostic.limit_value.is_some()
+                    && diagnostic.measured_value.is_some()
+            );
+            let json = serde_json::to_value(&diagnostic).unwrap_or_default();
+            assert_eq!(json["code"], code.as_str());
+        }
+    }
+
+    /// Trace: FR-015-AC-3
+    #[test]
+    fn monitoring_envelope_rejects_missing_records_but_accepts_additive_fields() {
+        assert!(serde_json::from_str::<StatusProjection>(r#"{"events":[]}"#).is_err());
+        assert!(serde_json::from_str::<StatusProjection>(r#"{"requests":[]}"#).is_err());
+        let status =
+            serde_json::from_str::<StatusProjection>(r#"{"requests":[],"events":[],"future":42}"#);
+        assert!(status.is_ok());
+    }
 }

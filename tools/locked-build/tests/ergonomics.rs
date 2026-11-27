@@ -155,7 +155,7 @@ fn nested_shim_passes_through_without_state_or_policy_writes()
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500))?;
     for legacy in [false, true] {
         let mut cmd = Command::new(shim.join("cargo"));
-        cmd.arg("--version")
+        cmd.arg("fixture-version")
             .env("HOME", &home)
             .env_remove("IX_HOME")
             .env_remove("LOCKED_BUILD_CONFIG")
@@ -178,7 +178,7 @@ fn nested_shim_passes_through_without_state_or_policy_writes()
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(output.stdout, b"--version\n");
+        assert_eq!(output.stdout, b"fixture-version\n");
         assert!(output.stderr.is_empty());
         assert_eq!(std::fs::read_dir(&home)?.count(), 0);
     }

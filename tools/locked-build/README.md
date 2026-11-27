@@ -5,6 +5,20 @@ type: readme
 
 locked-build queues shared-host builds and starts each command when its resource lease is admitted.
 
+Refusals and abnormal completions report stable `LB_*` codes with the request,
+policy limit, measurement and affected process in one stderr line. The same
+diagnostic appears in status and the event ledger. Queue traces include rank,
+resource blockers, per-state timing and requested/granted jobs and memory;
+Prometheus counters and histograms summarize these by host and class. See the
+[operator skill](../../skills/locked-build/SKILL.md) for the code catalog and
+metric labels.
+
+Memory-blocked heads permit fitting backfill until their bounded aging
+reservation. Must-fix requests precede aged lower classes; admission never
+overcommits the memory budget. Queued status includes required memory and free
+budget. Linux reboot checks use the kernel boot UUID, macOS uses
+`kern.boottime`, and timestamp-only fallback ignores jitter up to 120 seconds.
+
 ## Install all host admission tools
 
 From the repository root, install locked-build, the Cargo shim, and a measured

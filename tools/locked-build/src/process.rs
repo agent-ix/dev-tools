@@ -11,6 +11,20 @@ use sysinfo::{ProcessRefreshKind, ProcessStatus, RefreshKind, System};
 use crate::error::{Error, ErrorCode, Result};
 use crate::model::{ProcessIdentity, RequestId};
 
+pub(crate) fn boot_id() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .ok()
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Only a kernel ESRCH result proves that no process can still fork in a group.
 /// Permission errors and reused group IDs retain occupancy conservatively.
 pub(crate) fn group_absent(group: u32) -> bool {

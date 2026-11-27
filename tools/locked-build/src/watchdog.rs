@@ -211,7 +211,10 @@ fn observe_with_clock(
                 .is_some_and(|cap| {
                     processes
                         .group_memory_bytes(watchdog.pid, &[watchdog.pid])
-                        .is_some_and(|used| used > cap)
+                        .is_some_and(|used| {
+                            request.measured_memory_bytes = Some(used);
+                            used > cap
+                        })
                 })
         {
             request.stop = Some(StopReason::MemoryCap);

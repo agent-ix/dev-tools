@@ -5,6 +5,14 @@ type: reference
 
 A host policy is a JSON document defining build admission and supervision limits.
 
+Status and events carry a flat diagnostic (`code`, `message`, `limit_key`,
+`limit_value`, `measured_value`, `measured_what`, `killed`) and queue trace.
+The [locked-build skill](../../skills/locked-build/SKILL.md) lists the stable
+error codes and metrics. `memory_needed_bytes` and `memory_free_budget_bytes`
+in each status request explain memory-budget waits. Backfill can use free
+budget until the head's `(maximum priority + 1) * aging_ms` reservation;
+must-fix always precedes aged lower classes.
+
 ## Fields
 
 Every policy field has a serde default; unknown fields are rejected. A small
