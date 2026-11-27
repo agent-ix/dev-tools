@@ -22,18 +22,10 @@ pub(crate) fn launch(
     worker: &ProcessIdentity,
     generation: u64,
 ) -> Result<(ProcessIdentity, Child)> {
-    let mut child = Command::new(std::env::current_exe()?)
-        .arg("--state")
-        .arg(&store.path)
-        .arg("--config")
-        .arg(&store.config_path)
-        .arg("watchdog")
-        .arg(&id.0)
-        .arg(generation.to_string())
-        .process_group(0)
-        .spawn()?;
+    let mut command = startup_command(store, id, generation)?;
+    let mut child = command.spawn()?;
     loop {
-        let ready = store.transaction(|state, config| {
+        let ready = match store.transaction(|state, config| {
             let request = state.find_mut(id)?;
             if request.phase != Phase::Running
                 || request.worker.as_ref() != Some(worker)
@@ -41,14 +33,12 @@ pub(crate) fn launch(
             {
                 return Err(Error::new(
                     ErrorCode::State,
-                    "watchdog lease changed before startup",
+                    format!("watchdog lease changed before startup: request={} state={} phase={:?} expected_worker={} expected_generation={} actual_worker={:?} actual_generation={}", id.0, store.path.display(), request.phase, worker.pid, generation, request.worker.as_ref().map(|identity| identity.pid), request.worker_generation),
                 ));
             }
-            let processes = Processes::read();
             if let Some(watchdog) = &request.watchdog
                 && watchdog.pid == child.id()
-                && processes.role_identity(watchdog, id, "watchdog", watchdog.pid)
-                    == IdentityState::Matching
+                && !crate::process::owned_child_exited(&child)?
             {
                 return Ok((Some(watchdog.clone()), crate::config::POLL_INTERVAL_MS));
             }
@@ -62,7 +52,16 @@ pub(crate) fn launch(
                 ));
             }
             Ok((None, crate::config::POLL_INTERVAL_MS))
-        })?;
+        }) {
+            Ok(ready) => ready,
+            Err(error) => {
+                let group = child.id();
+                let grace = Config::read(&store.config_path).map(|config| config.termination_grace_ms).unwrap_or(10_000);
+                crate::runtime::terminate_supervision_group(&mut child, None, group, grace)?;
+                eprintln!("request={} reason=supervision_lost detail={error}", id.0);
+                return Err(error);
+            }
+        };
         if let Some(identity) = ready.0 {
             return Ok((identity, child));
         }
@@ -74,6 +73,20 @@ pub(crate) fn launch(
         }
         std::thread::sleep(Duration::from_millis(ready.1));
     }
+}
+
+fn startup_command(store: &Store, id: &RequestId, generation: u64) -> Result<Command> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("--state")
+        .arg(&store.path)
+        .arg("--config")
+        .arg(&store.config_path)
+        .arg("watchdog")
+        .arg(&id.0)
+        .arg(generation.to_string())
+        .process_group(0);
+    Ok(command)
 }
 
 pub(crate) fn run(store: &Store, id: &RequestId, generation: u64) -> Result<()> {
@@ -201,20 +214,26 @@ fn observe_with_clock(
         {
             request.stop = Some(StopReason::TimedOut);
         }
-        if request.stop.is_none()
-            && request
-                .lease_record
-                .as_ref()
-                .and_then(|record| {
-                    rss_fallback_cap(record.memory_enforcement, request.memory_cap_bytes)
-                })
-                .is_some_and(|cap| {
-                    processes
-                        .group_memory_bytes(watchdog.pid, &[watchdog.pid])
-                        .is_some_and(|used| used > cap)
-                })
-        {
-            request.stop = Some(StopReason::MemoryCap);
+        if request.stop.is_none() {
+            let cap = request.lease_record.as_ref().and_then(|record| {
+                rss_fallback_cap(record.memory_enforcement, request.memory_cap_bytes)
+            });
+            if let Some(cap) = cap {
+                let sample = request.lease_record.as_ref().and_then(|record| record.command.as_ref()).and_then(|root| processes.command_memory_sample(root));
+                if let Some(sample) = sample {
+                    if let Some(record) = &mut request.lease_record {
+                        if record.memory_sample.is_none() {
+                            let contributions = sample.contributors.iter().map(|row| format!("{}:{}", row.pid, row.bytes)).collect::<Vec<_>>().join(",");
+                            eprintln!("request={} memory_sample metric={} measured_bytes={} memory_cap_bytes={cap} pids={contributions}", id.0, sample.metric.as_str(), sample.bytes);
+                            record.memory_sample = Some(sample.clone());
+                        }
+                        if sample.bytes > cap { record.memory_sample = Some(sample.clone()); }
+                    }
+                    if sample.bytes > cap { request.stop = Some(StopReason::MemoryCap); }
+                } else if processes.group_has_live_members(watchdog.pid, Some(watchdog.pid)) {
+                    return Err(Error::new(ErrorCode::State, "command-tree memory supervision unavailable"));
+                }
+            }
         }
         let worker_state = processes.identity(worker, id);
         let worker_lost = matches!(

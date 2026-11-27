@@ -107,6 +107,7 @@ impl Store {
                 config_path: self.config_path.clone(),
                 host: config.host.clone(),
                 boot_time: sysinfo::System::boot_time(),
+                boot_id: crate::process::boot_id()?,
                 next_sequence: 1,
                 next_event: 1,
                 pruned_events: 0,
@@ -116,20 +117,24 @@ impl Store {
             },
             Err(error) => return Err(error.into()),
         };
-        if state.schema_version != 1
-            || state.config_path != self.config_path
-            || state.host != config.host
-        {
+        if state.schema_version != 1 || state.host != config.host {
             return Err(Error::new(
                 ErrorCode::State,
                 "unsupported schema or different host/configuration",
             ));
         }
+        // The random store ID and host identify the queue, not the location
+        // from which a lane happened to read identical host policy.
+        let policy_path_changed = state.config_path != self.config_path;
+        state.config_path = self.config_path.clone();
         let metrics_path = self.path.join(METRICS_FILE);
         state.metrics = load_metrics(&metrics_path);
         let metrics_before = serde_json::to_vec(&state.metrics)?;
         let metrics_identity_changed = state.metrics.bind_store(&state.store_id);
-        if state.boot_time != sysinfo::System::boot_time() {
+        if state.rebooted(
+            crate::process::boot_id()?.as_deref(),
+            sysinfo::System::boot_time(),
+        ) {
             let last_host_poll_at_ms = state
                 .requests
                 .iter()
@@ -182,7 +187,8 @@ impl Store {
         state.validate(&config)?;
         let bytes = serde_json::to_vec(&state)?;
         let metrics_bytes = serde_json::to_vec(&state.metrics)?;
-        let state_changed = bytes != before || !self.path.join("state.json").try_exists()?;
+        let state_changed =
+            policy_path_changed || bytes != before || !self.path.join("state.json").try_exists()?;
         let metrics_changed = metrics_identity_changed || metrics_bytes != metrics_before;
         if !state_changed && !metrics_changed {
             return Ok(output);
@@ -240,7 +246,7 @@ impl Store {
     }
 }
 
-fn random_id() -> Result<String> {
+pub(crate) fn random_id() -> Result<String> {
     let mut bytes = [0_u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())

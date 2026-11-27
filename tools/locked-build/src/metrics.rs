@@ -665,6 +665,7 @@ mod tests {
             config_path: "/policy.json".into(),
             host: "draco".to_owned(),
             boot_time: 1,
+            boot_id: None,
             next_sequence: 100,
             next_event: 1,
             pruned_events: 0,
@@ -676,6 +677,7 @@ mod tests {
 
     fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
         Request {
+            pid_namespace: None,
             id: crate::model::RequestId(format!("store:r{sequence}")),
             sequence,
             owner,
@@ -1123,6 +1125,7 @@ mod tests {
     #[test]
     fn exposition_excludes_ticket_request_command_and_environment_values() -> Result<()> {
         let mut request = crate::model::Request {
+            pid_namespace: None,
             id: crate::model::RequestId("request-secret-id".to_owned()),
             sequence: 1,
             owner: "draco:ix-relay:build-metrics".to_owned(),

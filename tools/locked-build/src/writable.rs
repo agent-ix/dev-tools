@@ -7,16 +7,49 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, ErrorCode, Result};
 
-// Same resolution as quoin-modules::paths::IxHome::resolve: nonempty
-// IX_HOME wins (including relative paths), then HOME/.ix, then .ix.
-pub(crate) fn ix_home(ix_home: Option<PathBuf>, home: Option<&Path>) -> PathBuf {
-    ix_home
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| home.map_or_else(|| PathBuf::from(".ix"), |home| home.join(".ix")))
+pub(crate) fn host_root(home: Option<&Path>) -> PathBuf {
+    home.map_or_else(|| PathBuf::from(".ix"), |home| home.join(".ix"))
+        .join("locked-build")
+}
+
+pub(crate) fn publish_file(path: &Path, bytes: &[u8], force: bool) -> Result<bool> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "policy path has no parent"))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    let next = parent.join(format!(".policy-{}.next", crate::store::random_id()?));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&next)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        if force {
+            fs::rename(&next, path)?;
+            return Ok(true);
+        }
+        match fs::hard_link(&next, path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    })();
+    let _ = fs::remove_file(next);
+    result
 }
 
 pub(crate) fn shared_root() -> Result<PathBuf> {
-    private_directory(&Path::new("/tmp").join(format!("locked-build-{}", nix::unistd::geteuid())))
+    private_directory(&shared_path())
+}
+
+pub(crate) fn shared_path() -> PathBuf {
+    Path::new("/tmp").join(format!("locked-build-{}", nix::unistd::geteuid()))
 }
 
 pub(crate) fn shared_state(default: &Path, shared: &Path) -> Result<PathBuf> {
@@ -101,22 +134,33 @@ pub(crate) fn access_denied(error: &std::io::Error) -> bool {
 mod tests {
     use super::*;
 
+    /// Provenance: SWM-380. Trace: FR-011-AC-7
+    #[test]
+    fn concurrent_policy_creation_publishes_one_complete_file() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("policy.json");
+        let first_path = path.clone();
+        let first =
+            std::thread::spawn(move || publish_file(&first_path, b"first-complete-policy", false));
+        let second = publish_file(&path, b"second-complete-policy", false)?;
+        let first = first
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "publisher panicked"))??;
+        assert_ne!(first, second);
+        let bytes = fs::read(path)?;
+        assert!(bytes == b"first-complete-policy" || bytes == b"second-complete-policy");
+        assert_eq!(fs::read_dir(root.path())?.count(), 1);
+        Ok(())
+    }
+
     /// Provenance: SWM-374. Trace: FR-011-AC-7
     #[test]
-    fn ix_home_matches_quoin_resolution() {
+    fn host_paths_ignore_lane_ix_home() {
         assert_eq!(
-            ix_home(Some("/ix".into()), Some(Path::new("/home/u"))),
-            Path::new("/ix")
+            host_root(Some(Path::new("/home/u"))),
+            Path::new("/home/u/.ix/locked-build")
         );
-        assert_eq!(
-            ix_home(Some("".into()), Some(Path::new("/home/u"))),
-            Path::new("/home/u/.ix")
-        );
-        assert_eq!(ix_home(None, None), Path::new(".ix"));
-        assert_eq!(
-            ix_home(Some("relative".into()), None),
-            Path::new("relative")
-        );
+        assert_eq!(host_root(None), Path::new(".ix/locked-build"));
     }
 
     /// Provenance: SWM-374. Trace: FR-011-AC-7
