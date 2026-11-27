@@ -483,7 +483,6 @@ impl HostSample {
 mod tests {
     use super::*;
 
-    /// Trace: FR-005-AC-4
     #[test]
     fn default_policy_hold_limit_is_ninety_minutes() {
         assert_eq!(Config::default().hold_ms, 5_400_000);

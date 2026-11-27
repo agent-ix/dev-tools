@@ -86,7 +86,6 @@ fn state(requests: Vec<Request>) -> State {
     }
 }
 
-/// Trace: FR-005-AC-4
 #[test]
 fn hold_timeout_reason_names_limit_value_and_policy_field() {
     assert_eq!(
