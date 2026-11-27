@@ -37,8 +37,12 @@ shell after the first install.
 
 All lanes use `/tmp/locked-build-<uid>` and its `policy.json`, independent of
 lane `IX_HOME`. `~/.ix/locked-build/state` and `policy.json` are host aliases.
-Generated targets default to
-`~/.ix/locked-build/targets`. Installation moves an existing policy from
+New policies select writable local build storage by device class: NVMe before
+other SSDs, then HDDs. Equal classes prefer HOME; another disk needs at least
+100 GB free. Read-only, removable and known network/temporary mounts are
+excluded. Targets use `<mount>/locked-build-<uid>/targets`, or
+`~/.ix/locked-build/targets` when HOME is the selected fallback. Existing host
+policies retain their paths. Installation moves an existing policy from
 `~/.config/locked-build/policy.json`, preserving host settings. Conflicting
 legacy and host policies stop installation and leave both files intact.
 
@@ -50,6 +54,12 @@ atomically once in the shared directory. Unwritable generated
 target roots fall back to its `targets` directory. Explicit state and policy
 paths remain authoritative. `status` reports `state_path`; `policy show` prints
 the state and policy paths to stderr alongside policy JSON on stdout.
+
+Each leased job with an effective target gets `TMPDIR=<target>/.tmp` on the
+same target path. Explicit relative or absolute `CARGO_TARGET_DIR` remains
+authoritative; relative paths resolve from the command's working directory.
+A `.tmp` symlink is refused. For a sandbox that cannot write the host's shared
+target, select a writable target inside its worktree on the build disk.
 
 Inside an admitted run, the Cargo shim executes real Cargo directly, without
 state access or policy creation. It recognizes `LOCKED_BUILD_LEASE=1` and the

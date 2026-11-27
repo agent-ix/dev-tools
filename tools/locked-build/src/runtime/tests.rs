@@ -1633,7 +1633,8 @@ fn caller_environment_overrides_incremental_and_policy_target_values() -> Result
     policy.target_root = Some(policy_target_root.clone());
     let mut request = request;
     request.caller_cargo_incremental = Some("1".to_owned());
-    request.caller_cargo_target_dir = Some("/caller/target".to_owned());
+    let caller_target = root.path().join("caller-target");
+    request.caller_cargo_target_dir = Some(caller_target.to_string_lossy().into_owned());
     let mut command = Command::new("/usr/bin/env");
     command
         .env_remove("CARGO_INCREMENTAL")
@@ -1655,16 +1656,18 @@ fn caller_environment_overrides_incremental_and_policy_target_values() -> Result
     assert!(
         environment
             .lines()
-            .any(|line| line == "CARGO_TARGET_DIR=/caller/target")
+            .any(|line| line == format!("CARGO_TARGET_DIR={}", caller_target.display()))
     );
     assert_eq!(incremental.as_deref(), Some("1"));
     assert!(!incremental_overwrote);
-    assert_eq!(
-        target.as_deref(),
-        Some(std::path::Path::new("/caller/target"))
-    );
+    assert_eq!(target.as_deref(), Some(caller_target.as_path()));
     assert!(!target_overwrote);
     assert!(!policy_target_root.exists());
+    assert!(
+        environment
+            .lines()
+            .any(|line| line == format!("TMPDIR={}", caller_target.join(".tmp").display()))
+    );
 
     let mut policy_override = policy;
     policy_override.cargo_incremental = Some(false);
@@ -1673,6 +1676,49 @@ fn caller_environment_overrides_incremental_and_policy_target_values() -> Result
         apply_incremental_environment(&mut command, &policy_override, Some("1"));
     assert_eq!(effective.as_deref(), Some("0"));
     assert!(overwritten);
+    Ok(())
+}
+
+/// Provenance: SWM-412. Trace: FR-011-AC-7
+#[test]
+fn relative_caller_target_gets_an_absolute_temporary_directory_on_its_disk() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let (state, policy) = store.snapshot()?;
+    let mut request = state.find(&id)?.clone();
+    request.cwd = root.path().to_owned();
+    request.caller_cargo_target_dir = Some("relative-target".into());
+    let mut command = Command::new("/usr/bin/env");
+    command
+        .current_dir(root.path())
+        .env("TMPDIR", "/slow-root-tmp");
+    let (target, _) = apply_target_environment(&mut command, &policy, &request)?;
+    assert_eq!(target.as_deref(), Some(Path::new("relative-target")));
+    let expected = root.path().join("relative-target/.tmp");
+    let output = command.output()?;
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == format!("TMPDIR={}", expected.display()))
+    );
+    assert!(expected.is_dir());
+    Ok(())
+}
+
+/// Provenance: SWM-412. Trace: FR-011-AC-7
+#[test]
+fn temporary_directory_symlink_cannot_redirect_io_to_a_slow_disk() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let target = root.path().join("nvme-target");
+    let slow = root.path().join("slow-root-tmp");
+    std::fs::create_dir_all(&target)?;
+    std::fs::create_dir_all(&slow)?;
+    std::os::unix::fs::symlink(&slow, target.join(".tmp"))?;
+    let mut command = Command::new("/usr/bin/true");
+    assert!(apply_tmp_environment(&mut command, &target, root.path()).is_err());
+    assert!(!command.get_envs().any(|(key, _)| key == "TMPDIR"));
     Ok(())
 }
 
@@ -2853,6 +2899,13 @@ fn target_lifecycle_assigns_owner_directory_and_deletes_oversized_target() -> Re
     let mut command = Command::new("/usr/bin/env");
     command.env_remove("CARGO_TARGET_DIR");
     apply_target_environment(&mut command, &policy, &request)?;
+    let expected_tmp = target.join(".tmp");
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == "TMPDIR" && value == Some(expected_tmp.as_os_str()))
+    );
+    assert!(expected_tmp.is_dir());
     let output = command.output()?;
     assert!(output.status.success());
     let expected_target = format!("CARGO_TARGET_DIR={}", target.display());

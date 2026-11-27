@@ -2713,14 +2713,34 @@ fn apply_target_environment(
     if let Some(caller_value) = &request.caller_cargo_target_dir {
         let target = std::path::PathBuf::from(caller_value);
         command.env("CARGO_TARGET_DIR", caller_value);
+        apply_tmp_environment(command, &target, &request.cwd)?;
         return Ok((Some(target), false));
     }
     if let Some(target) = target_directory(config, request, true)? {
         command.env("CARGO_TARGET_DIR", &target);
+        apply_tmp_environment(command, &target, &request.cwd)?;
         return Ok((Some(target), false));
     }
     command.env_remove("CARGO_TARGET_DIR");
     Ok((None, false))
+}
+
+fn apply_tmp_environment(command: &mut Command, target: &Path, cwd: &Path) -> Result<()> {
+    let target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        cwd.join(target)
+    };
+    let tmp = target.join(".tmp");
+    std::fs::create_dir_all(&tmp)?;
+    if std::fs::symlink_metadata(&tmp)?.file_type().is_symlink() {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "target temporary directory is a symlink",
+        ));
+    }
+    command.env("TMPDIR", &tmp);
+    Ok(())
 }
 
 fn owner_target_key(owner: &str) -> String {
