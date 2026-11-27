@@ -156,3 +156,9 @@ the command. When `hold_ms` ends a command, status and `run` output report the
 configured limit and identify policy `hold_ms` as the setting to change.
 See [reference.md](reference.md) for policy fields, telemetry, recovery, and
 host setup.
+
+## Export build telemetry
+
+[Scrape build telemetry](monitoring/README.md) installs a per-host textfile refresh,
+Prometheus alert rules, and a Grafana dashboard. [Metric semantics](monitoring/metrics.md)
+defines duration, memory, capacity, failure, identity, and host-policy series.

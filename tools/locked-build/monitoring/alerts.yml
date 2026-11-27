@@ -1,0 +1,51 @@
+groups:
+  - name: locked-build
+    rules:
+      - record: ix_build:queue_depth:sum
+        expr: sum by (host) (ix_build_queue_depth)
+      - alert: LockedBuildQueueWaitHigh
+        expr: histogram_quantile(0.95, sum by (host, le) (rate(ix_build_wait_seconds_bucket[15m]))) > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Build queue wait p95 exceeds five minutes on {{ $labels.host }}'
+          description: 'Inspect locked-build status and queue reasons. Check admission policy and load before raising capacity.'
+      - alert: LockedBuildKilled
+        expr: sum by (host, code) (increase(ix_build_terminations_total{code=~"LB_OOM_KILLED|LB_RSS_CAP|LB_SUPERVISION_LOST"}[10m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Build memory or supervision failure on {{ $labels.host }}: {{ $labels.code }}'
+          description: 'Inspect status/events for the exact policy limit and measured value; compare kill-limit and kill-measured histograms.'
+      - alert: LockedBuildQueueStuck
+        expr: (ix_build:queue_depth:sum > 0) and on (host) (changes(ix_build:queue_depth:sum[10m]) == 0) and on (host) (ix_build_units_used < ix_build_units_total) and on (host) (ix_build_oldest_queued_seconds > 600)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Build queue is unchanged with free units on {{ $labels.host }}'
+          description: 'Check memory_budget and fifo_or_priority_reservation reasons, host probes and supervisor health; free units alone do not guarantee admission.'
+      - alert: LockedBuildMemoryHeadroomLow
+        expr: ix_build_running_memory_headroom_ratio < 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A running build has less than ten percent memory headroom on {{ $labels.host }}'
+          description: 'Inspect the lease hard cap and sampled peak. Watchdog measurements are lower bounds between polls.'
+      - alert: LockedBuildHostNoMetrics
+        expr: (up{job="locked-build"} == 0) or (up{job="locked-build"} unless on (host) ix_build_export_timestamp_seconds)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Build metrics have been unavailable for ten minutes on {{ $labels.host }}'
+          description: 'Check node_exporter, its textfile directory and the locked-build metrics timer or launch agent.'
+      - alert: LockedBuildExportStale
+        expr: time() - ix_build_export_timestamp_seconds > 600
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Build textfile has not refreshed in ten minutes on {{ $labels.host }}'
+          description: 'Check the export service logs. Restore the durable metrics ledger if it is missing, corrupt or has a sequence gap.'

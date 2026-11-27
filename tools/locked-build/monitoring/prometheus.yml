@@ -1,0 +1,16 @@
+# Merge these entries into the Prometheus server's existing configuration.
+rule_files:
+  - alerts.yml
+scrape_configs:
+  - job_name: locked-build
+    scrape_interval: 15s
+    honor_labels: true
+    static_configs:
+      - targets: ['draco:9100']
+        labels: {host: draco}
+      - targets: ['luna:9100']
+        labels: {host: luna}
+      - targets: ['terra:9100']
+        labels: {host: terra}
+      - targets: ['titan:9100']
+        labels: {host: titan}
