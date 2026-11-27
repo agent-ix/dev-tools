@@ -158,6 +158,22 @@ pub(crate) enum IdentityState {
 }
 
 impl Processes {
+    pub(crate) fn self_identity() -> Result<ProcessIdentity> {
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::everything().without_tasks(),
+        );
+        let process = system
+            .process(pid)
+            .ok_or_else(|| Error::new(ErrorCode::State, "cannot verify launcher identity"))?;
+        Ok(ProcessIdentity {
+            pid: pid.as_u32(),
+            started_seconds: process.start_time(),
+        })
+    }
     #[cfg(test)]
     pub(crate) fn test_snapshot(
         rows: impl IntoIterator<Item = (ProcessIdentity, u32, Vec<String>)>,
@@ -189,6 +205,22 @@ impl Processes {
             // rustc's memory once per compiler thread instead of once per PID.
             RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_tasks()),
         );
+        Self::from_system(system)
+    }
+
+    pub(crate) fn read_workers(pids: &[u32]) -> Self {
+        let mut pids: Vec<_> = pids.iter().copied().map(sysinfo::Pid::from_u32).collect();
+        pids.push(sysinfo::Pid::from_u32(std::process::id()));
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&pids),
+            true,
+            ProcessRefreshKind::everything().without_tasks(),
+        );
+        Self::from_system(system)
+    }
+
+    fn from_system(system: System) -> Self {
         let rows: BTreeMap<u32, Row> = system
             .processes()
             .iter()
@@ -416,12 +448,22 @@ fn anonymous_memory_bytes(proc_root: &std::path::Path, pid: u32) -> Option<u64> 
     let path = proc_root.join(pid.to_string()).join("smaps_rollup");
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(_) => {
+            // A task may lose its mm between enumeration and this read.
+            // Linux reports ESRCH as well as ENOENT for that race.
+            let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok();
+            if stat
+                .as_deref()
+                .and_then(|stat| stat.rsplit_once(')'))
+                .and_then(|(_, tail)| tail.split_whitespace().next())
+                .is_some_and(|state| matches!(state, "Z" | "X"))
+            {
+                return Some(0);
+            }
             let native = i32::try_from(pid).ok()?;
             return (getpgid(Some(Pid::from_raw(native))) == Err(nix::errno::Errno::ESRCH))
                 .then_some(0);
         }
-        Err(_) => return None,
     };
     let mut fields = contents
         .lines()
@@ -719,6 +761,93 @@ mod tests {
                 )
                 .map(|sample| sample.bytes),
             None
+        );
+        Ok(())
+    }
+
+    /// Provenance: SWM-392. Trace: FR-005-AC-4
+    #[test]
+    fn child_becoming_a_zombie_during_memory_sampling_does_not_fail_live_cargo() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let cargo = ProcessIdentity {
+            pid: 78,
+            started_seconds: 1,
+        };
+        // Use an existing PID so ESRCH alone cannot hide this race.
+        let rustc = std::process::id();
+        std::fs::create_dir(root.path().join("78"))?;
+        std::fs::write(root.path().join("78/smaps_rollup"), "Pss_Anon: 100 kB\n")?;
+        std::fs::create_dir(root.path().join(rustc.to_string()))?;
+        std::fs::write(
+            root.path().join(rustc.to_string()).join("stat"),
+            format!("{rustc} (rustc) Z 78 77 77\n"),
+        )?;
+        let mut processes = Processes::test_snapshot([
+            (cargo.clone(), 77, vec!["cargo".into()]),
+            (
+                ProcessIdentity {
+                    pid: rustc,
+                    started_seconds: 1,
+                },
+                77,
+                vec!["rustc".into()],
+            ),
+        ]);
+        processes
+            .rows
+            .get_mut(&rustc)
+            .ok_or_else(|| Error::new(ErrorCode::State, "fixture child missing"))?
+            .parent = Some(78);
+        let sample = processes.command_memory_sample_with(
+            &cargo,
+            crate::model::MemoryMetric::PssAnon,
+            |pid, _| anonymous_memory_bytes(root.path(), pid),
+        );
+        assert_eq!(sample.map(|sample| sample.bytes), Some(102_400));
+        std::fs::write(
+            root.path().join(rustc.to_string()).join("stat"),
+            format!("{rustc} (rustc) R 78 77 77\n"),
+        )?;
+        assert_eq!(
+            anonymous_memory_bytes(root.path(), rustc),
+            None,
+            "a live unreadable task must remain unknown"
+        );
+        Ok(())
+    }
+
+    /// Provenance: SWM-392. Trace: FR-005-AC-4
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_zombie_smaps_error_does_not_abort_the_outer_cargo_tree() -> Result<()> {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()?;
+        let processes = Processes::read();
+        let root = processes
+            .member_identity(std::process::id())
+            .ok_or_else(|| Error::new(ErrorCode::State, "fixture parent missing"))?;
+        assert!(processes.member_identity(child.id()).is_some());
+        drop(child.stdin.take());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !owned_child_exited(&child)? {
+            if std::time::Instant::now() >= deadline {
+                child.kill()?;
+                child.wait()?;
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "fixture did not become a zombie",
+                ));
+            }
+            std::thread::yield_now();
+        }
+        let sample = processes.command_memory_sample(&root);
+        assert!(child.wait()?.success());
+        assert!(
+            sample.is_some(),
+            "a dead compiler child must contribute zero, not terminate its live parent"
         );
         Ok(())
     }

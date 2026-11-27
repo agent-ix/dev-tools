@@ -19,6 +19,89 @@ use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[test]
+fn scheduler_restarts_while_queued_workers_live_and_status_ignores_a_stuck_writer() -> TestResult {
+    let harness = Harness::new(0, 15000)?;
+    let marker = harness.root.path().join("outer");
+    let release = harness.root.path().join("release");
+    let mut child = harness.command("block", &marker, &release, 1)?;
+    let owner = || -> Option<u32> {
+        let bytes = fs::read(harness.state.join("scheduler.lock")).ok()?;
+        Some(u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?))
+    };
+    observed(|| owner().is_some());
+    let original = owner().ok_or("scheduler owner absent")?;
+    kill(Pid::from_raw(i32::try_from(original)?), Signal::SIGKILL)?;
+    observed(|| owner().is_some_and(|pid| pid != original));
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(harness.state.join("lock"))?;
+    lock.lock()?;
+    let started = Instant::now();
+    let output = harness.cli().arg("status").output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    drop(lock);
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["capacity_units"] = json!(1);
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let started = Instant::now();
+    observed(|| marker.exists());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    fs::write(release, "release")?;
+    assert!(complete(&mut child)?.success());
+    assert_eq!(fs::read_to_string(marker)?, "invoked\n");
+    Ok(())
+}
+
+/// Provenance: SWM-392. Trace: FR-011-AC-7, FR-005-AC-4
+#[test]
+fn nested_shim_failure_never_signals_or_readmits_the_outer_lease() -> TestResult {
+    let harness = Harness::new(1, 15000)?;
+    let shim = harness.root.path().join("shim");
+    fs::create_dir(&shim)?;
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_locked-build"), shim.join("cargo"))?;
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["real_cargo"] = json!("/usr/bin/false");
+    policy["memory_admission"] = json!("lease_accounted");
+    policy["memory_budget_bytes"] = json!(8_000_000_000_u64);
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let marker = harness.root.path().join("outer");
+    let release = harness.root.path().join("survived");
+    let mut child = harness
+        .cli()
+        .arg("run")
+        .args(["--owner", "nested-fixture", "--ticket", "SWM-392", "--"])
+        .arg(std::env::current_exe()?)
+        .args(["--exact", "subprocess_fixture", "--ignored", "--nocapture"])
+        .env("LOCKED_BUILD_FIXTURE_MODE", "nested-failure")
+        .env("LOCKED_BUILD_FIXTURE_MARKER", &marker)
+        .env("LOCKED_BUILD_FIXTURE_RELEASE", &release)
+        .env(
+            "PATH",
+            std::env::join_paths([shim, PathBuf::from("/usr/bin"), PathBuf::from("/bin")])?,
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    assert!(complete(&mut child)?.success());
+    assert_eq!(
+        fs::read_to_string(&release)?,
+        "inner failed but outer survived"
+    );
+    let state = harness.persisted()?;
+    assert_eq!(state["requests"].as_array().map(Vec::len), Some(1));
+    assert_eq!(state["requests"][0]["phase"], "succeeded");
+    assert!(!harness.state.join("failures.jsonl").exists());
+    Ok(())
+}
+
 struct Harness {
     root: TempDir,
     state: PathBuf,
@@ -473,6 +556,16 @@ fn supervisor_crash_keeps_lease_until_its_child_group_is_verified_stopped() -> T
     let pid = state["requests"][0]["worker"]["pid"]
         .as_u64()
         .ok_or("PID missing")?;
+    #[cfg(target_os = "linux")]
+    {
+        let watchdog = state["requests"][0]["watchdog"]["pid"]
+            .as_u64()
+            .ok_or("watchdog missing")?;
+        assert_eq!(
+            fs::read_link(format!("/proc/{watchdog}/fd/0"))?,
+            PathBuf::from("/dev/null")
+        );
+    }
     kill(Pid::from_raw(i32::try_from(pid)?), Signal::SIGKILL)?;
     observed(|| {
         harness
@@ -534,9 +627,18 @@ fn dead_queued_supervisor_is_restarted_without_duplicate_command_execution() -> 
     let release = harness.root.path().join("release");
     let mut child = harness.command("block", &marker, &release, 1)?;
     observed(|| {
-        harness
-            .persisted()
-            .is_ok_and(|state| state["requests"][0]["worker"]["pid"].is_u64())
+        harness.persisted().is_ok_and(|state| {
+            let request = &state["requests"][0];
+            let Some(id) = request["id"].as_str() else {
+                return false;
+            };
+            fs::read(harness.state.join(format!("{id}.launch.json")))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|claim| {
+                    claim["worker"]["pid"].is_u64() && claim["worker"] == request["worker"]
+                })
+        })
     });
     let original = harness.persisted()?["requests"][0]["worker"]["pid"]
         .as_u64()
@@ -731,6 +833,13 @@ fn hold_deadline_survives_supervisor_loss_and_stops_term_resistant_descendants()
 #[test]
 #[ignore = "subprocess workload, invoked by supervision tests"]
 fn subprocess_fixture() -> TestResult {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::FileTypeExt;
+    let stdin: fs::File = std::io::stdin().as_fd().try_clone_to_owned()?.into();
+    assert!(
+        stdin.metadata()?.file_type().is_char_device(),
+        "workload inherited a coordination lock as stdin"
+    );
     let mode = std::env::var("LOCKED_BUILD_FIXTURE_MODE")?;
     let marker =
         PathBuf::from(std::env::var_os("LOCKED_BUILD_FIXTURE_MARKER").ok_or("marker missing")?);
@@ -761,6 +870,14 @@ fn subprocess_fixture() -> TestResult {
     writeln!(file, "invoked")?;
     file.sync_all()?;
     match mode.as_str() {
+        "nested-failure" => {
+            use std::os::unix::process::ExitStatusExt;
+            let output = Command::new("cargo").arg("inner-failure").output()?;
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(output.status.signal(), None);
+            assert!(output.stderr.is_empty());
+            fs::write(&release, "inner failed but outer survived")?;
+        }
         "exit75" | "exit75-descendant" => std::process::exit(75),
         "signal" => {
             kill(Pid::this(), Signal::SIGTERM)?;

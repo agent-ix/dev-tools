@@ -8,6 +8,320 @@ use super::*;
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
 
+/// Provenance: SWM-391. Trace: FR-005-AC-1, FR-005-AC-4
+#[test]
+#[ignore = "explicit 300-request release performance lane; set IX_BUILD_LOCKED_BUILD_BIN"]
+fn three_hundred_launches_claim_before_spawn_and_wait_without_the_state_lock() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let first = queued(&store)?;
+    let ids = store.transaction(|state, _| {
+        let template = state.find(&first)?.clone();
+        let mut ids = vec![first.clone()];
+        for sequence in 2..=300 {
+            let mut request = template.clone();
+            request.sequence = sequence;
+            request.id = RequestId(format!("{}:r{sequence}", state.store_id));
+            ids.push(request.id.clone());
+            state.requests.push(request);
+        }
+        state.next_sequence = 301;
+        Ok(ids)
+    })?;
+    let mut leases = Vec::new();
+    for id in &ids {
+        let lease = spawn_worker_with(&store, id, false, |claim, lease| {
+            let (state, _) = store.snapshot()?;
+            assert_eq!(state.find(id)?.worker_generation, claim.generation);
+            assert_eq!(
+                store.claim(id)?.map(|row| row.generation),
+                Some(claim.generation)
+            );
+            assert!(claim.worker.is_none(), "claim must precede fork");
+            Ok(lease)
+        })?
+        .ok_or_else(|| Error::new(ErrorCode::State, "launch missing"))?;
+        leases.push(lease);
+    }
+    let lock = File::options()
+        .read(true)
+        .write(true)
+        .open(store.path.join("lock"))?;
+    lock.lock()?;
+    let started = std::time::Instant::now();
+    // A stuck state writer cannot block either a repeated launch attempt or status.
+    for id in &ids {
+        assert!(
+            spawn_worker_with(&store, id, false, |_, _| -> Result<()> {
+                panic!("duplicate worker fork")
+            })?
+            .is_none()
+        );
+    }
+    let report = status(&store)?;
+    assert_eq!(report.requests.len(), 300);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "read-only status / duplicate claims stalled"
+    );
+    if let Some(binary) = std::env::var_os("IX_BUILD_LOCKED_BUILD_BIN") {
+        let started = std::time::Instant::now();
+        let output = std::process::Command::new(binary)
+            .arg("--state")
+            .arg(&store.path)
+            .arg("--config")
+            .arg(&store.config_path)
+            .arg("status")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(report["requests"].as_array().map(Vec::len), Some(300));
+        eprintln!(
+            "300-request CLI status with writer lock held: {:?}",
+            started.elapsed()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+    drop(lock);
+    let identity = Processes::self_identity()?;
+    for id in ids.iter().take(1) {
+        let claim = store
+            .claim(id)?
+            .ok_or_else(|| Error::new(ErrorCode::State, "claim absent"))?;
+        claim_spawned_worker(&store, id, &identity, claim.generation)?;
+    }
+    // Register the rest as fixture preparation in one commit; generation
+    // registration itself is exercised above and by the failed-fork tests.
+    store.transaction(|state, _| {
+        for id in ids.iter().skip(1) {
+            let mut claim = store
+                .claim(id)?
+                .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+            claim.worker = Some(identity.clone());
+            store.write_claim(&claim)?;
+            let request = state.find_mut(id)?;
+            request.worker = Some(identity.clone());
+            request.pid_namespace = crate::process::pid_namespace()?;
+            request.heartbeat_at_ms = Some(now_ms()?);
+        }
+        Ok(())
+    })?;
+    let started = std::time::Instant::now();
+    let config = Config::read(&store.config_path)?;
+    let sample = HostSample {
+        host: config.host.clone(),
+        observed_at_ms: now_ms()?,
+        memory_available_bytes: 1_000_000,
+        disk_available_bytes: 1_000_000,
+        load_one: 0.0,
+    };
+    std::fs::write(
+        config
+            .sample_file
+            .ok_or_else(|| Error::new(ErrorCode::State, "sample missing"))?,
+        serde_json::to_vec(&sample)?,
+    )?;
+    schedule_queue(&store)?;
+    eprintln!("300-request batch admission: {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "batch admission stalled"
+    );
+    let (state, _) = store.snapshot()?;
+    assert_eq!(
+        state
+            .requests
+            .iter()
+            .filter(|r| r.phase == Phase::Running)
+            .count(),
+        1
+    );
+    assert_eq!(state.find(&first)?.phase, Phase::Running);
+    drop(leases);
+    Ok(())
+}
+
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[test]
+fn failed_fork_releases_launch_claim_and_fences_the_stale_child() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let failed = spawn_worker_with(&store, &id, false, |_, _| -> Result<()> {
+        Err(Error::new(ErrorCode::State, "injected fork failure"))
+    });
+    assert!(failed.is_err());
+    let old = store
+        .claim(&id)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "claim absent"))?;
+    let replacement = spawn_worker_with(&store, &id, false, |claim, lease| {
+        Ok((claim.generation, lease))
+    })?
+    .ok_or_else(|| Error::new(ErrorCode::State, "replacement missing"))?;
+    assert_eq!(replacement.0, old.generation + 1);
+    assert!(
+        claim_spawned_worker(&store, &id, &Processes::self_identity()?, old.generation)?.is_none()
+    );
+    Ok(())
+}
+
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[test]
+fn concurrent_waiters_claim_before_spawning_exactly_one_worker() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let barrier = std::sync::Barrier::new(8);
+    let leases = std::thread::scope(|scope| -> Result<Vec<Option<File>>> {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    spawn_worker_with(&store, &id, false, |claim, lease| {
+                        let state = store.snapshot()?.0;
+                        assert_eq!(state.find(&id)?.worker_generation, claim.generation);
+                        assert_eq!(
+                            store.claim(&id)?.map(|row| row.generation),
+                            Some(claim.generation)
+                        );
+                        Ok(lease)
+                    })
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| Error::new(ErrorCode::State, "launch fixture panicked"))?
+            })
+            .collect()
+    })?;
+    assert_eq!(leases.iter().filter(|lease| lease.is_some()).count(), 1);
+    Ok(())
+}
+
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[test]
+fn dead_registered_worker_cannot_be_admitted_from_its_stale_claim() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let (generation, lease) = spawn_worker_with(&store, &id, false, |claim, lease| {
+        Ok((claim.generation, lease))
+    })?
+    .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+    claim_spawned_worker(&store, &id, &Processes::self_identity()?, generation)?;
+    drop(lease);
+    schedule_queue(&store)?;
+    assert_eq!(store.snapshot()?.0.find(&id)?.phase, Phase::Queued);
+    Ok(())
+}
+
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
+fn queued_handoff_preserves_age_and_ids_and_never_replaces_running_workers() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let running = queued(&store)?;
+    let waiting = queued(&store)?;
+    let mut legacy_process = Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()?;
+    let group = legacy_process.id();
+    let legacy = ProcessIdentity {
+        pid: group,
+        started_seconds: 1,
+    };
+    let live_fence = claim_worker(&store, &running, &legacy)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "running claim missing"))?;
+    let old_fence = claim_worker(&store, &waiting, &legacy)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "queued claim missing"))?;
+    store.transaction(|state, config| {
+        grant_request(state, config, &running, now_ms()?, clock_ms()?)
+    })?;
+    let before = store.snapshot()?.0.find(&waiting)?.clone();
+    assert!(
+        spawn_worker_with(&store, &waiting, false, |_, _| -> Result<()> {
+            panic!("legacy worker duplicated")
+        })?
+        .is_none()
+    );
+    assert!(
+        spawn_worker_with(&store, &running, true, |_, _| -> Result<()> {
+            panic!("running worker replaced")
+        })?
+        .is_none()
+    );
+    let (_claim, _lease) = spawn_worker_with(&store, &waiting, true, |claim, lease| {
+        Ok((claim.clone(), lease))
+    })?
+    .ok_or_else(|| Error::new(ErrorCode::State, "handoff missing"))?;
+    let state = store.snapshot()?.0;
+    let after = state.find(&waiting)?;
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.enqueued_at_ms, before.enqueued_at_ms);
+    assert_eq!(after.enqueued_clock_ms, before.enqueued_clock_ms);
+    assert!(!old_fence.owns(after));
+    assert!(live_fence.owns(state.find(&running)?));
+    assert_eq!(state.find(&running)?.phase, Phase::Running);
+    stop_child_group(&mut legacy_process)?;
+    Ok(())
+}
+
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[test]
+fn foreign_pending_launch_cannot_be_spawned_or_registered_locally() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let generation = spawn_worker_with(&store, &id, false, |claim, _| Ok(claim.generation))?
+        .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+    let mut claim = store
+        .claim(&id)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+    claim.pid_namespace = Some("pid:[hand-written-foreign]".into());
+    store.write_claim(&claim)?;
+    assert!(
+        spawn_worker_with(&store, &id, false, |_, _| -> Result<()> {
+            panic!("foreign fork")
+        })?
+        .is_none()
+    );
+    assert!(claim_spawned_worker(&store, &id, &Processes::self_identity()?, generation)?.is_none());
+    assert_eq!(store.snapshot()?.0.find(&id)?.worker_generation, generation);
+    Ok(())
+}
+
+/// Provenance: SWM-391. Trace: FR-005-AC-4
+#[test]
+fn failed_notice_and_snapshot_publication_cannot_undo_a_terminal_commit() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    std::fs::remove_file(store.path.join("snapshot.json"))?;
+    std::fs::create_dir(store.path.join("snapshot.json"))?;
+    let notice = store.path.join(format!("{}.notice.json", id.0));
+    std::fs::remove_file(&notice)?;
+    std::fs::create_dir(&notice)?;
+    cancel(&store, &id)?;
+    let (state, _) = store.snapshot()?;
+    assert_eq!(state.find(&id)?.phase, Phase::Cancelled);
+    assert_eq!(wait(&store, &id, Vec::new())?.0, 130);
+    std::fs::remove_dir(&notice)?;
+    store.repair_notices(&state);
+    // Terminal notices may be absent: authoritative snapshot fallback still returns.
+    assert_eq!(wait(&store, &id, Vec::new())?.0, 130);
+    Ok(())
+}
+
 /// Trace: FR-005-AC-1, FR-005-AC-8
 #[test]
 fn titan_reservations_bound_admission_independently_of_hard_caps() -> Result<()> {
@@ -43,7 +357,7 @@ fn titan_reservations_bound_admission_independently_of_hard_caps() -> Result<()>
                 .ok_or_else(|| Error::new(ErrorCode::State, "fixture claim missing"))?;
             if matches!(
                 admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
-                Admission::Granted(_)
+                Admission::Granted
             ) {
                 admitted += 1;
             }
@@ -111,7 +425,7 @@ fn jobs_four_records_twelve_gb_reservation_and_thirty_two_gb_limit_and_refusals_
         .ok_or_else(|| Error::new(ErrorCode::State, "fixture claim missing"))?;
     assert!(matches!(
         admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
-        Admission::Granted(_)
+        Admission::Granted
     ));
     let report = status(&store)?;
     assert_eq!(report.requests[0].trace.requested_jobs, Some(4));
@@ -694,7 +1008,7 @@ fn runtime_admission_and_completion_update_exported_metrics() -> Result<()> {
         .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
     assert!(matches!(
         admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
-        Admission::Granted(_)
+        Admission::Granted
     ));
 
     let admitted = metrics(&store)?;
@@ -763,11 +1077,11 @@ fn runtime_counts_one_blocked_interval_for_multiple_waiters_and_closes_it_on_las
     let clock = TestClock::new()?;
     assert!(matches!(
         admit_at(&store, &first, &first_fence, clock)?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
     assert!(matches!(
         admit_at(&store, &second, &second_fence, clock)?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
 
     let blocked = metrics_at_clock(&store, clock.advance(1_000))?;
@@ -831,11 +1145,11 @@ fn host_blocked_accumulator_survives_late_polls_recovery_and_interrupts() -> Res
         .ok_or_else(|| Error::new(ErrorCode::State, "second worker claim missing"))?;
     assert!(matches!(
         admit_worker(&store, &first, &first_fence, &AtomicBool::new(false))?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
     assert!(matches!(
         admit_worker(&store, &second, &second_fence, &AtomicBool::new(false))?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
 
     store.transaction(|state, _| {
@@ -950,7 +1264,7 @@ fn expired_last_waiter_checkpoints_and_persists_without_counter_regression() -> 
         .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
     assert!(matches!(
         admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
     std::thread::sleep(Duration::from_millis(
         2 * crate::config::POLL_INTERVAL_MS + 50,
@@ -1010,7 +1324,7 @@ fn metrics_exposition_checkpoints_monotonic_and_utc_block_starts() -> Result<()>
     let clock = TestClock::new()?;
     assert!(matches!(
         admit_at(&store, &id, &fence, clock)?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
 
     let first = metrics_at_clock(&store, clock)?;
@@ -1112,7 +1426,7 @@ fn host_interval_reselects_the_next_queued_reason_after_head_cancellation() -> R
         .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
         assert!(matches!(
             admit_worker(&store, id, &fence, &AtomicBool::new(false))?,
-            Admission::Waiting(_)
+            Admission::Waiting
         ));
     }
     let before = metrics(&store)?;
@@ -1826,21 +2140,21 @@ fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Resu
     let clock = TestClock::new()?;
     assert!(matches!(
         admit_at(&store, &requests[0], &fences[0], clock)?,
-        Admission::Granted(_)
+        Admission::Granted
     ));
     assert!(matches!(
         admit_at(&store, &requests[1], &fences[1], clock)?,
-        Admission::Granted(_)
+        Admission::Granted
     ));
     assert!(matches!(
         admit_at(&store, &requests[2], &fences[2], clock)?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
 
     let reopened = Store::open(&store.path, &store.config_path)?;
     assert!(matches!(
         admit_at(&reopened, &requests[2], &fences[2], clock)?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
     reopened.transaction_with_clock(
         || Ok((clock.now_ms, clock.clock_ms)),
@@ -1857,11 +2171,11 @@ fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Resu
     )?;
     assert!(matches!(
         admit_at(&reopened, &requests[2], &fences[2], clock)?,
-        Admission::Granted(_)
+        Admission::Granted
     ));
     assert!(matches!(
         admit_at(&reopened, &requests[3], &fences[3], clock)?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
     reopened.transaction_with_clock(
         || Ok((clock.now_ms, clock.clock_ms)),
@@ -1880,7 +2194,7 @@ fn memory_budget_survives_reopen_and_releases_on_completion_and_cancel() -> Resu
     )?;
     assert!(matches!(
         admit_at(&reopened, &requests[3], &fences[3], clock)?,
-        Admission::Granted(_)
+        Admission::Granted
     ));
     Ok(())
 }
@@ -2774,7 +3088,7 @@ fn status_and_repeat_wait_polls_do_not_rewrite_unchanged_metrics_sidecar() -> Re
     let clock = TestClock::new()?;
     assert!(matches!(
         admit_at(&store, &id, &fence, clock)?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
     let sidecar = store.path.join("metrics.json");
     let first_inode = std::fs::metadata(&sidecar)?.ino();
@@ -2782,7 +3096,7 @@ fn status_and_repeat_wait_polls_do_not_rewrite_unchanged_metrics_sidecar() -> Re
     assert_eq!(std::fs::metadata(&sidecar)?.ino(), first_inode);
     assert!(matches!(
         admit_at(&store, &id, &fence, clock)?,
-        Admission::Waiting(_)
+        Admission::Waiting
     ));
     assert_eq!(std::fs::metadata(&sidecar)?.ino(), first_inode);
     Ok(())
@@ -2816,7 +3130,7 @@ fn priorities_above_two_are_admitted_and_counted_under_gate() -> Result<()> {
     .ok_or_else(|| Error::new(ErrorCode::State, "worker claim missing"))?;
     assert!(matches!(
         admit_worker(&store, &id, &fence, &AtomicBool::new(false))?,
-        Admission::Granted(_)
+        Admission::Granted
     ));
     store.transaction(|state, config| {
         state.finish(
@@ -2907,7 +3221,7 @@ fn metrics_scrape_completes_while_a_request_is_being_admitted() -> Result<()> {
             .map_err(|_| Error::new(ErrorCode::State, "admission thread panicked"))?;
         assert!(scrape.contains("# TYPE ix_build_queue_depth gauge"));
         assert!(scrape.contains("ix_build_slots_busy{host=\"your-build-host\"}"));
-        assert!(matches!(admitted, Admission::Granted(_)));
+        assert!(matches!(admitted, Admission::Granted));
         Ok(())
     })?;
     Ok(())
@@ -3001,7 +3315,7 @@ fn superseded_worker_cannot_admit_or_complete_a_replacement_generation() -> Resu
     let store = store(root.path())?;
     let id = queued(&store)?;
     let identity = ProcessIdentity {
-        pid: u32::MAX - 1,
+        pid: i32::MAX as u32 - 1,
         started_seconds: 1,
     };
     let old = claim_worker(&store, &id, &identity)?
@@ -3022,7 +3336,7 @@ fn superseded_worker_cannot_admit_or_complete_a_replacement_generation() -> Resu
     })?;
     assert!(matches!(
         admit_worker(&store, &id, &replacement, &interrupted)?,
-        Admission::Granted(_)
+        Admission::Granted
     ));
     assert!(
         store
@@ -3068,7 +3382,7 @@ fn recovery_keeps_actual_occupancy_for_a_command_born_after_pid_capture() -> Res
     let fence = claim_worker(&store, &id, &identity)?
         .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
     let admission = admit_worker(&store, &id, &fence, &AtomicBool::new(false))?;
-    assert!(matches!(admission, Admission::Granted(_)));
+    assert!(matches!(admission, Admission::Granted));
     recover_with_processes(&store, || snapshot)?;
     let used_while_alive = store.transaction(|state, _| Ok(state.used()))?;
     let alive = child.try_wait()?.is_none();

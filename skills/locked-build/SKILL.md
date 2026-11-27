@@ -22,9 +22,28 @@ Choose `--class must-fix`, `--class point`, `--class block`, or `--class periodi
 ```sh
 locked-build status
 locked-build cancel REQUEST-ID
+locked-build wait REQUEST-ID
 ```
 
 `queued` means the request is accepted and waiting for admission. Its command has not started. `running` means it owns a lease and its command has started. Use the request id from status to cancel queued or running work.
+
+One elected scheduler batches admissions every 250 ms and recovery every two
+seconds. Queued workers and callers read notices, with a snapshot check at
+least every two seconds. Status reads an atomic snapshot without taking the
+state write lock. `wait` reattaches to an accepted request without enqueueing.
+
+For a live Linux queue upgrade with an unchanged policy schema, stop only legacy
+queued `run` callers. Fence queued workers using `recover --handoff-queued` in
+their owning PID namespace. Reattach those request ids using `wait`.
+Request ids and queue age survive. Keep running commands and their callers
+alive. Other hosts require a drained legacy queue. Policy migrations retain
+the installer's drain requirement. See the [queue reference](../../tools/locked-build/reference.md#queue-coordination).
+
+Nested Cargo inherits `LOCKED_BUILD_REAL_CARGO` from the admitted outer runner.
+Its success or failure passes directly to that command without state access,
+additional supervision, or signalling the outer lease. Linux memory sampling
+rechecks children that disappear during a procfs read. Zombies contribute zero;
+unreadable live processes retain the supervision-failure cleanup rule.
 
 The generated `hold_ms` default is 5,400,000 ms (90 minutes), the ceiling for
 any command; tune it in each host's policy. If the limit ends a command,

@@ -13,6 +13,31 @@ in each status request explain memory-budget waits. Backfill can use free
 budget until the head's `(maximum priority + 1) * aging_ms` reservation;
 must-fix always precedes aged lower classes.
 
+## Queue coordination
+
+One short-lived scheduler owns `scheduler.lock` until the queue empties.
+It batches admission every 250 ms and recovery every two seconds. Each worker
+has a durable launch claim written before process creation and a lifetime lock.
+The scheduler admits registered workers whose lifetime locks are held.
+Queued workers and callers read notices, with an authoritative snapshot check
+at least every two seconds. Notices and snapshots are reconstructible caches.
+Status reads an atomic state/metrics snapshot without acquiring the write lock.
+
+`locked-build wait REQUEST-ID` attaches to an accepted request. On Linux,
+`locked-build recover --handoff-queued` fences and replaces legacy queued
+workers in the caller's PID namespace. Running requests retain their workers.
+During a live queue upgrade, the operator must stop legacy queued `run` callers
+and reattach with `wait`; their old global polling otherwise continues.
+Keep running commands and their callers alive. Other hosts require a drained
+queue before replacing legacy callers. Policy-schema migrations still require
+the drain enforced by `install-tools`.
+
+Nested Cargo uses the outer lease's `LOCKED_BUILD_REAL_CARGO`, or PATH discovery,
+without reading policy or state. A failed nested executable returns its own
+status to the command. The outer runner owns outcome recording and cleanup.
+Linux memory sampling rechecks a disappearing child's procfs state; zombies
+contribute zero. An unreadable live process still fails supervision safely.
+
 ## Fields
 
 Every policy field has a serde default; unknown fields are rejected. A small
