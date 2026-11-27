@@ -1156,7 +1156,6 @@ fn metrics_with_clock(
         &host,
         size as f64,
     );
-    config.cache.append_info(&mut text, &state.host);
     crate::sample::kache::append(
         &mut text,
         &state.host,

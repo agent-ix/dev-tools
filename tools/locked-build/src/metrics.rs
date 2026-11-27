@@ -350,6 +350,7 @@ impl MetricsState {
                 .telemetry,
             &mut output,
         );
+        config.cache.append_info(&mut output, &state.host);
         Ok(output)
     }
     fn active_elapsed(&self, clock_ms: u64, reason: BlockReason) -> u64 {
