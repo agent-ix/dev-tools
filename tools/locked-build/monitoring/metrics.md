@@ -115,3 +115,58 @@ Upgrade all writers together before resuming the queue.
 `ix_build:lease_overhead_seconds_per_second` subtracts execution time from lease time per class.
 The [dashboard](dashboard.json) groups the named recording queries into fifteen queue-health questions.
 The [alert rules](alerts.yml) share those recordings.
+
+## Kache cache observations
+
+Kache observations measure host cache activity and capacity. Both `sample` and the scheduled `metrics` exporter discover `kache` on `PATH`.
+Set `IX_BUILD_KACHE` to an absolute executable path when the scheduled service has a restricted path.
+The scheduled service needs the same `HOME` and configuration location as its kache daemon.
+The probe preserves only home, XDG location variables, `KACHE_CONFIG`, and `KACHE_DIR` in its child environment.
+
+Collection runs `config list --json`, `stats --json --since 1000000h`, and `explain --all --json` directly.
+All three commands share a five-second deadline and each output is limited to one MiB.
+An absent executable emits no kache series. A failed probe emits `ix_kache_up=0` and `ix_kache_scrape_error=1` while other telemetry continues.
+When configuration is unreadable, those failure series omit `store` until its classification is known.
+
+Successful observations use `host` and `store` labels. `store` is `shared` when the effective configuration contains `remote` and disables `cache.local_only`; otherwise it is `local`.
+The label describes the host's cache mode; remote capacity is unavailable from the local stats report.
+Raw paths, crate names, remote URLs, and error messages never become labels.
+`ix_kache_info{version}` identifies the connected daemon version.
+`ix_kache_daemon_expected{host}` defaults to one when kache is discovered; set `IX_BUILD_KACHE_EXPECT_DAEMON=0` for intentional daemon absence.
+
+These metric families describe the observed data:
+
+| Family prefix `ix_kache_` | Type | Source |
+| --- | --- | --- |
+| `up`, `scrape_error` | Gauge | Daemon connection and probe outcome |
+| `store_bytes`, `store_limit_bytes` | Gauge | Physical disk usage and configured cap |
+| `entries` | Gauge | Sum of readable local store entries |
+| `hits_total`, `misses_total`, `remote_hits_total` | Counter | Retained-history compile results |
+| `hit_compile_seconds_total` | Counter | Compile time saved on hits |
+| `miss_compile_seconds_total` | Counter | Miss elapsed time, including overhead |
+| `hit_elapsed_seconds_total` | Counter | Hit elapsed time |
+| `permit_wait_seconds_total` | Counter | Compiler permit wait |
+| `gc_evicted_entries_total`, `gc_evicted_bytes_total` | Counter | Accumulated observed GC runs |
+| `gc_last_run_timestamp` | Gauge | Last observed GC Unix timestamp |
+| `counter_epoch` | Gauge | Unix timestamp of `lifetime.since` |
+| `passthrough_total{reason}` | Counter | Retained-history reason counts |
+
+The ledger `kache-metrics.json` lives beside scheduler state. `sample` uses a `.kache.json` sibling of its output file.
+Each ledger has a nonblocking lock and atomic publication. A malformed ledger fails the probe and remains available for diagnosis.
+Back up this ledger with scheduler state. Deleting it resets exporter counters.
+
+The long stats window avoids treating the default sliding 24-hour view as a cumulative counter.
+Counter differences accumulate in the ledger; a changed `lifetime.since` starts a new source epoch and adds its initial counts.
+A decreasing source count starts a new baseline. Retained-history deletion can lose accuracy because the ledger counts only observed changes.
+GC reports describe the latest run. Each distinct `last_run` contributes once, even across exporter restarts.
+Multiple GC runs between observations cannot be recovered from that snapshot.
+Passthrough reasons use three bounded buckets: `not_a_compile`, `unsupported`, and `other`.
+A successful host emits 21 series, below the tested budget of 60.
+
+The dashboard adds cache hit ratio, store fill, hourly evictions, permit wait share, and scrape availability.
+Hit-ratio and permit-wait alerts require at least ten observed compiler results in an hour.
+Capacity, eviction, and scrape alerts require fifteen minutes of sustained failure.
+Scrape alerts require `daemon_expected=1`; an undiscovered executable emits no expectation series.
+
+Kache reports an activity session identifier, but a session may span Cargo commands. Observed events expose roots and timestamps without a locked-build request identifier.
+Per-build cache attribution requires an identifier shared with the admission request; host counters remain independent of build ownership.

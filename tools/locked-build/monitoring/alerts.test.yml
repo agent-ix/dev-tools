@@ -665,6 +665,348 @@
           ]
         }
       ]
+    },
+    {
+      "name": "kache active warning cases and pending durations",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\"}",
+          "values": "0+9x120"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\"}",
+          "values": "95+0x120"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "0+3x120"
+        },
+        {
+          "series": "ix_kache_permit_wait_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+30x120"
+        },
+        {
+          "series": "ix_kache_miss_compile_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+90x120"
+        },
+        {
+          "series": "ix_kache_hit_elapsed_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+10x120"
+        },
+        {
+          "series": "ix_kache_up{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_daemon_expected{host=\"luna\"}",
+          "values": "1+0x120"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "1m",
+          "alertname": "KacheHitRatioCollapse",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheHitRatioCollapse",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache hit ratio below 20% while compiles are active"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "1m",
+          "alertname": "KacheStoreNearLimit",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheStoreNearLimit",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache store above 90% of its limit"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "1m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache evicted more than one store capacity in an hour"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "1m",
+          "alertname": "KacheScrapeFailing",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheScrapeFailing",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache unavailable while this host expects its daemon"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "1m",
+          "alertname": "KachePermitWaitHigh",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KachePermitWaitHigh",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache permit wait exceeds 20% of compile elapsed time"
+              }
+            }
+          ]
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_kache:hit_ratio",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:hit_ratio\",host=\"luna\",store=\"local\"}",
+              "value": 0.1
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:permit_wait_share",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:permit_wait_share\",host=\"luna\",store=\"local\"}",
+              "value": 0.3
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:store_fill_ratio",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:store_fill_ratio\",host=\"luna\",store=\"local\"}",
+              "value": 0.95
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:evicted_bytes_1h",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:evicted_bytes_1h\",host=\"luna\",store=\"local\"}",
+              "value": 180
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache_up",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache_up\",host=\"luna\",store=\"local\"}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "kache idle and daemon not expected do not alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\"}",
+          "values": "10+0x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\"}",
+          "values": "90+0x120"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\"}",
+          "values": "90+0x120"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_permit_wait_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_miss_compile_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_hit_elapsed_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_up{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "90m",
+          "alertname": "KacheHitRatioCollapse",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheStoreNearLimit",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheScrapeFailing",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KachePermitWaitHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "kache active healthy thresholds do not alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\"}",
+          "values": "0+8x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\"}",
+          "values": "90+0x120"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_permit_wait_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_kache_miss_compile_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+9x120"
+        },
+        {
+          "series": "ix_kache_hit_elapsed_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_kache_up{host=\"luna\",store=\"local\"}",
+          "values": "1+0x120"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "90m",
+          "alertname": "KacheHitRatioCollapse",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheStoreNearLimit",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheScrapeFailing",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KachePermitWaitHigh",
+          "exp_alerts": []
+        }
+      ]
     }
   ]
 }

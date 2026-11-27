@@ -1139,6 +1139,11 @@ fn metrics_with_clock(
         &host,
         size as f64,
     );
+    crate::sample::kache::append(
+        &mut text,
+        &state.host,
+        &store.path.join("kache-metrics.json"),
+    );
     let checkpoint = crate::model::ExportCheckpoint {
         store_id: state.store_id.clone(),
         sequence: state.metrics.exported_sequence(),

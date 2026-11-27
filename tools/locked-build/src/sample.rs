@@ -10,6 +10,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub(crate) mod kache;
+
 use crate::error::{Error, ErrorCode, Result};
 use serde::Deserialize;
 
@@ -496,8 +498,18 @@ fn titan_cargo_slot_lane_paths(wrapper_path: &Path) -> Option<Vec<PathBuf>> {
 }
 
 pub(crate) fn run(config_path: &Path, output_path: &Path) -> Result<i32> {
+    run_with_kache(config_path, output_path, kache::executable().as_deref())
+}
+
+fn run_with_kache(config_path: &Path, output_path: &Path, binary: Option<&Path>) -> Result<i32> {
     let config = SamplerConfig::read(config_path)?;
-    let sampled = sample(&config);
+    let mut sampled = sample(&config);
+    kache::append_with_binary(
+        &mut sampled.exposition,
+        &config.host,
+        &output_path.with_extension("kache.json"),
+        binary,
+    );
     for (source, reason) in &sampled.failures {
         eprintln!("locked-build sample: source={source} unavailable: {reason}");
     }
@@ -1502,7 +1514,7 @@ mod tests {
             }))?,
         )?;
 
-        assert_eq!(run(&config_path, &output_path)?, 0);
+        assert_eq!(run_with_kache(&config_path, &output_path, None)?, 0);
         let exposition = fs::read_to_string(&output_path)?;
         assert!(exposition.contains("ix_build_units_capacity{host=\"terra\"} 12"));
         assert!(!exposition.contains("ix_build_units_used"));

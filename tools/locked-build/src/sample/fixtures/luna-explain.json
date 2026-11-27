@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "command": "explain",
+  "success": true,
+  "scope": "retained history",
+  "root": null,
+  "passthroughs": 8,
+  "skipped": 0,
+  "probes": 12,
+  "reasons": [
+    {
+      "result": "passthrough",
+      "route": "direct",
+      "reason": "not-a-compile|query / probe (--print, -vV)",
+      "count": 10,
+      "failures": 0,
+      "max_elapsed_ms": 79
+    },
+    {
+      "result": "passthrough",
+      "route": "direct",
+      "reason": "unsupported|rustc build-script probe — not yet",
+      "count": 8,
+      "failures": 4,
+      "max_elapsed_ms": 47
+    },
+    {
+      "result": "passthrough",
+      "route": "direct",
+      "reason": "not-a-compile|query / probe (--print, -vV); rustc build-script probe — not yet",
+      "count": 2,
+      "failures": 0,
+      "max_elapsed_ms": 97
+    }
+  ],
+  "entries": []
+}
