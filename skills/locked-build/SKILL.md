@@ -35,6 +35,8 @@ change policy `hold_ms`.
 
 Use `locked-build policy show` to inspect the effective policy. `locked-build policy init --force` regenerates it.
 
+Tool manifest entries without `version` require executable presence; `check-install` runs `--help` and passes only when it exits successfully.
+
 ## Install and verify a host
 
 From the dev-tools repository root, install the binary, measured policy, and
