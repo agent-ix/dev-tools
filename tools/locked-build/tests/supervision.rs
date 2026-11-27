@@ -19,6 +19,217 @@ use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[cfg(target_os = "linux")]
+struct NamespaceChild(Child);
+
+#[cfg(target_os = "linux")]
+impl Drop for NamespaceChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "explicit native Linux unshare --pid/no-user-bus regression"]
+fn unshare_pid_namespace_keeps_supervision_through_child_exit() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let stdout = root.path().join("namespace.stdout");
+    let stderr = root.path().join("namespace.stderr");
+    let mut namespace = NamespaceChild(
+        Command::new("unshare")
+            .args([
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+                "--kill-child=KILL",
+            ])
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "namespace_local_watchdog_survives_mutation_style_child_churn",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=4",
+            ])
+            .env("IX_BUILD_PID_NAMESPACE_FIXTURE", "1")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent-locked-build-test-bus",
+            )
+            .env("XDG_RUNTIME_DIR", "/nonexistent-locked-build-test-runtime")
+            .env("TMPDIR", root.path())
+            .stdout(Stdio::from(fs::File::create(&stdout)?))
+            .stderr(Stdio::from(fs::File::create(&stderr)?))
+            .spawn()?,
+    );
+    let child = &mut namespace.0;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        let mut failed = false;
+        for entry in fs::read_dir(root.path())? {
+            let state = entry?.path().join("state/state.json");
+            if state.is_file() {
+                let bytes = match fs::read(state) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let state: Value = serde_json::from_slice(&bytes)?;
+                for request in state["requests"].as_array().into_iter().flatten() {
+                    if request["supervision_detail"].is_string() {
+                        eprintln!(
+                            "namespace supervision failure: worker={} watchdog={} command={} phase={} detail={}",
+                            request["worker"],
+                            request["watchdog"],
+                            request["lease_record"]["command"],
+                            request["phase"],
+                            request["supervision_detail"]
+                        );
+                        failed = true;
+                    }
+                }
+            }
+        }
+        if failed || Instant::now() >= deadline {
+            // unshare owns the namespace init; killing its owned Child handle
+            // with --kill-child also reaps all namespace-local process groups.
+            child.kill()?;
+            let status = child.wait()?;
+            for entry in fs::read_dir(root.path())? {
+                let state = entry?.path().join("state/state.json");
+                if state.is_file() {
+                    let state: Value = serde_json::from_slice(&fs::read(state)?)?;
+                    for request in state["requests"].as_array().into_iter().flatten() {
+                        eprintln!(
+                            "namespace timeout: request={} worker={} watchdog={} phase={} detail={}",
+                            request["id"],
+                            request["worker"],
+                            request["watchdog"],
+                            request["phase"],
+                            request["supervision_detail"]
+                        );
+                    }
+                }
+            }
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        status.success(),
+        "unshare PID fixture failed (not skipped):\n{}\n{}",
+        fs::read_to_string(stdout)?,
+        fs::read_to_string(stderr)?
+    );
+    eprintln!("{}", fs::read_to_string(stderr)?);
+    Ok(())
+}
+
+/// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "native Linux PID namespace/no-user-bus churn lane"]
+fn namespace_local_watchdog_survives_mutation_style_child_churn() -> TestResult {
+    let harness = Harness::new(1, 120000)?;
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["memory_admission"] = json!("lease_accounted");
+    policy["memory_budget_bytes"] = json!(16_000_000_000_u64);
+    policy["memory_limit_per_job_bytes"] = json!(8_000_000_000_u64);
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let binary = std::env::var_os("IX_BUILD_TEST_INSTALLED_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_locked-build").into());
+    let marker = harness.root.path().join("churn");
+    let output = Command::new(binary)
+        .arg("--state")
+        .arg(&harness.state)
+        .arg("--config")
+        .arg(&harness.config)
+        .args([
+            "run",
+            "--owner",
+            "namespace-churn",
+            "--ticket",
+            "SWM-394",
+            "--",
+        ])
+        .arg(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "subprocess_fixture",
+            "--ignored",
+            "--nocapture",
+            "--skip",
+        ])
+        .arg(&marker)
+        .env("LOCKED_BUILD_FIXTURE_MODE", "churn")
+        .env("LOCKED_BUILD_FIXTURE_MARKER", &marker)
+        .env(
+            "LOCKED_BUILD_FIXTURE_RELEASE",
+            harness.root.path().join("unused"),
+        )
+        .env_remove("CARGO_BUILD_JOBS")
+        .env_remove("RUST_TEST_THREADS")
+        .stdout(Stdio::null())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = harness.request(0)?;
+    assert_eq!(request["state"], "succeeded");
+    assert_eq!(request["exit_code"], 0);
+    assert!(request["code"].is_null());
+    assert_eq!(
+        request["lease_record"]["memory_enforcement"],
+        "rss_watchdog"
+    );
+    assert_eq!(
+        request["pid_namespace"],
+        fs::read_link("/proc/self/ns/pid")?
+            .to_string_lossy()
+            .as_ref()
+    );
+    if std::env::var_os("IX_BUILD_PID_NAMESPACE_FIXTURE").is_some() {
+        let state: Value = serde_json::from_slice(&fs::read(harness.state.join("state.json"))?)?;
+        let request = &state["requests"][0];
+        for role in ["worker", "watchdog"] {
+            assert!(
+                request[role]["pid"]
+                    .as_u64()
+                    .is_some_and(|pid| (2..128).contains(&pid)),
+                "expected namespace-local {role} PID: {request}"
+            );
+            assert!(
+                request[role]["started_seconds"]
+                    .as_u64()
+                    .is_some_and(|start| start > 0)
+            );
+        }
+        assert!(
+            request["lease_record"]["command"]["pid"]
+                .as_u64()
+                .is_some_and(|pid| (2..128).contains(&pid))
+        );
+        eprintln!(
+            "namespace-local lease survived: worker={} watchdog={} command={} namespace={}",
+            request["worker"]["pid"],
+            request["watchdog"]["pid"],
+            request["lease_record"]["command"]["pid"],
+            request["pid_namespace"]
+        );
+    }
+    Ok(())
+}
+
 /// Provenance: SWM-391. Trace: FR-005-AC-4
 #[test]
 fn scheduler_restarts_while_queued_workers_live_and_status_ignores_a_stuck_writer() -> TestResult {
@@ -870,6 +1081,11 @@ fn subprocess_fixture() -> TestResult {
     writeln!(file, "invoked")?;
     file.sync_all()?;
     match mode.as_str() {
+        "churn" => {
+            for _ in 0..12_000 {
+                assert!(Command::new("/usr/bin/true").status()?.success());
+            }
+        }
         "nested-failure" => {
             use std::os::unix::process::ExitStatusExt;
             let output = Command::new("cargo").arg("inner-failure").output()?;

@@ -184,6 +184,13 @@ An external sample includes exactly these fields:
 The host must match the policy; stale or future samples block admission.
 
 Status reports measured `memory_available_bytes` in both admission modes.
+
+Linux memory sampling uses the lease's namespace-local `/proc` and the recorded
+command birth identity. A short-lived child can lose its address space while
+`stat` still says running. `smaps_rollup` ESRCH means there is no address space
+to charge at that instant. Empty or failed samples also recheck zombie/exited
+state and kernel-proven process disappearance. An unreadable or malformed live
+address space remains unavailable; it does not silently disable the cap.
 Local sampling reads RAM counters without enumerating host processes.
 Lease-accounted admission uses reservations and the configured budget;
 low available RAM does not add a memory-pressure admission gate.

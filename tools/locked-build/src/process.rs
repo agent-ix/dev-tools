@@ -445,26 +445,54 @@ impl Processes {
 }
 
 fn anonymous_memory_bytes(proc_root: &std::path::Path, pid: u32) -> Option<u64> {
+    anonymous_memory_bytes_with(proc_root, pid, |path| std::fs::read_to_string(path))
+}
+
+fn anonymous_memory_bytes_with(
+    proc_root: &std::path::Path,
+    pid: u32,
+    read_smaps: impl FnOnce(&std::path::Path) -> std::io::Result<String>,
+) -> Option<u64> {
     let path = proc_root.join(pid.to_string()).join("smaps_rollup");
-    let contents = match std::fs::read_to_string(path) {
+    let contents = match read_smaps(&path) {
         Ok(contents) => contents,
-        Err(_) => {
-            // A task may lose its mm between enumeration and this read.
-            // Linux reports ESRCH as well as ENOENT for that race.
-            let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok();
-            if stat
-                .as_deref()
-                .and_then(|stat| stat.rsplit_once(')'))
-                .and_then(|(_, tail)| tail.split_whitespace().next())
-                .is_some_and(|state| matches!(state, "Z" | "X"))
-            {
+        Err(error) => {
+            // smaps_rollup returns ESRCH when the task has no mm. During exit
+            // or exec its PID/group can still exist and stat can still say R.
+            if error.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32) {
                 return Some(0);
             }
-            let native = i32::try_from(pid).ok()?;
-            return (getpgid(Some(Pid::from_raw(native))) == Err(nix::errno::Errno::ESRCH))
-                .then_some(0);
+            return exited_process_memory(proc_root, pid);
         }
     };
+    parse_anonymous_memory(&contents).or_else(|| exited_process_memory(proc_root, pid))
+}
+
+fn exited_process_memory(proc_root: &std::path::Path, pid: u32) -> Option<u64> {
+    exited_process_memory_with(proc_root, pid, |pid| {
+        i32::try_from(pid).is_ok_and(|native| {
+            getpgid(Some(Pid::from_raw(native))) == Err(nix::errno::Errno::ESRCH)
+        })
+    })
+}
+
+fn exited_process_memory_with(
+    proc_root: &std::path::Path,
+    pid: u32,
+    is_gone: impl FnOnce(u32) -> bool,
+) -> Option<u64> {
+    if let Ok(stat) = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat"))
+        && stat
+            .rsplit_once(')')
+            .and_then(|(_, tail)| tail.split_whitespace().next())
+            .is_some_and(|state| matches!(state, "Z" | "X"))
+    {
+        return Some(0);
+    }
+    is_gone(pid).then_some(0)
+}
+
+fn parse_anonymous_memory(contents: &str) -> Option<u64> {
     let mut fields = contents
         .lines()
         .filter_map(|line| line.strip_prefix("Pss_Anon:"));
@@ -700,9 +728,16 @@ mod tests {
     #[test]
     fn linux_anonymous_accounting_excludes_shared_file_and_tmpfs_mappings() -> Result<()> {
         let root = tempfile::tempdir()?;
-        for pid in [78, 79] {
+        let parent_pid = std::process::id();
+        let child_pid = u32::try_from(nix::unistd::getppid().as_raw())
+            .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+        for pid in [parent_pid, child_pid] {
             let directory = root.path().join(pid.to_string());
             std::fs::create_dir(&directory)?;
+            std::fs::write(
+                directory.join("stat"),
+                format!("{pid} (live fixture) R 77 77 77\n"),
+            )?;
             std::fs::write(
                 directory.join("smaps_rollup"),
                 "Rss: 1000 kB\nPss: 600 kB\nPss_Anon: 100 kB\nPss_File: 200 kB\nPss_Shmem: 300 kB\n",
@@ -711,7 +746,7 @@ mod tests {
         let mut processes = Processes::test_snapshot([
             (
                 ProcessIdentity {
-                    pid: 78,
+                    pid: parent_pid,
                     started_seconds: 1,
                 },
                 77,
@@ -719,16 +754,16 @@ mod tests {
             ),
             (
                 ProcessIdentity {
-                    pid: 79,
+                    pid: child_pid,
                     started_seconds: 1,
                 },
                 77,
                 vec![],
             ),
         ]);
-        if let Some(descendant) = processes.rows.get_mut(&79) {
-            descendant.parent = Some(78);
-            descendant.group = Some(79);
+        if let Some(descendant) = processes.rows.get_mut(&child_pid) {
+            descendant.parent = Some(parent_pid);
+            descendant.group = Some(child_pid);
         } else {
             return Err(Error::new(ErrorCode::State, "descendant fixture missing"));
         }
@@ -736,7 +771,7 @@ mod tests {
             processes
                 .command_memory_sample_with(
                     &ProcessIdentity {
-                        pid: 78,
+                        pid: parent_pid,
                         started_seconds: 1
                     },
                     crate::model::MemoryMetric::PssAnon,
@@ -746,14 +781,16 @@ mod tests {
             Some(204_800)
         );
         std::fs::write(
-            root.path().join("78/smaps_rollup"),
+            root.path()
+                .join(parent_pid.to_string())
+                .join("smaps_rollup"),
             "Rss: 999999 kB\nPss_Anon: invalid kB\n",
         )?;
         assert_eq!(
             processes
                 .command_memory_sample_with(
                     &ProcessIdentity {
-                        pid: 78,
+                        pid: parent_pid,
                         started_seconds: 1
                     },
                     crate::model::MemoryMetric::PssAnon,
@@ -813,6 +850,131 @@ mod tests {
             None,
             "a live unreadable task must remain unknown"
         );
+        Ok(())
+    }
+
+    /// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
+    #[test]
+    fn empty_smaps_from_an_exiting_child_is_not_lost_supervision() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let pid = std::process::id();
+        let path = root.path().join(pid.to_string());
+        std::fs::create_dir(&path)?;
+        std::fs::write(
+            path.join("stat"),
+            format!("{pid} (compiler child) Z 78 77 77\n"),
+        )?;
+        std::fs::write(path.join("smaps_rollup"), "")?;
+        assert_eq!(
+            anonymous_memory_bytes(root.path(), pid),
+            Some(0),
+            "an empty successful read from a zombie must not invalidate its live parent's memory cap"
+        );
+        std::fs::write(
+            path.join("stat"),
+            format!("{pid} (compiler child) R 78 77 77\n"),
+        )?;
+        assert_eq!(
+            anonymous_memory_bytes(root.path(), pid),
+            None,
+            "an unreadable live child must remain an explicit supervision failure"
+        );
+        Ok(())
+    }
+
+    /// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
+    #[test]
+    fn esrch_from_a_still_running_task_means_its_address_space_is_gone() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let pid = std::process::id();
+        let path = root.path().join(pid.to_string());
+        std::fs::create_dir(&path)?;
+        // Native reproduction: the task remains R with vsize/RSS0 after
+        // exiting its mm, before becoming Z or losing its PID/group.
+        std::fs::write(path.join("stat"), format!("{pid} (true) R 78 77 77\n"))?;
+        let value = anonymous_memory_bytes_with(root.path(), pid, |_| {
+            Err(std::io::Error::from_raw_os_error(
+                nix::errno::Errno::ESRCH as i32,
+            ))
+        });
+        assert_eq!(value, Some(0));
+        let denied = anonymous_memory_bytes_with(root.path(), pid, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(
+            denied, None,
+            "an unreadable live address space must fail closed"
+        );
+        Ok(())
+    }
+
+    /// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
+    #[test]
+    fn task_disappearing_after_a_running_stat_is_rechecked_by_the_kernel_probe() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("23");
+        std::fs::create_dir(&path)?;
+        std::fs::write(path.join("stat"), "23 (short lived) R 8 11 11\n")?;
+        assert_eq!(
+            exited_process_memory_with(root.path(), 23, |_| true),
+            Some(0)
+        );
+        assert_eq!(exited_process_memory_with(root.path(), 23, |_| false), None);
+        Ok(())
+    }
+
+    /// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "native Linux procfs/PID-namespace churn lane"]
+    fn namespace_local_memory_sampling_survives_short_lived_children() -> Result<()> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let root = Processes::self_identity()?;
+        let done = Arc::new(AtomicBool::new(false));
+        let finished = done.clone();
+        let child_thread = std::thread::spawn(move || -> std::io::Result<()> {
+            let result = (|| {
+                for _ in 0..2000 {
+                    std::process::Command::new("/usr/bin/true").status()?;
+                }
+                Ok(())
+            })();
+            finished.store(true, Ordering::Relaxed);
+            result
+        });
+        let mut failed = None;
+        let mut samples = 0;
+        while !done.load(Ordering::Relaxed) {
+            let processes = Processes::read();
+            let sample =
+                processes.command_memory_sample_with(&root, watchdog_memory_metric(), |pid, _| {
+                    let value = anonymous_memory_bytes(std::path::Path::new("/proc"), pid);
+                    if value.is_none() {
+                        eprintln!(
+                            "failed memory pid={pid} stat={:?} smaps={:?}",
+                            std::fs::read_to_string(format!("/proc/{pid}/stat")),
+                            std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
+                        );
+                    }
+                    value
+                });
+            if sample.is_none() {
+                failed = Some(format!(
+                    "root={root:?}, observed={:?}",
+                    processes.rows.get(&root.pid).map(|row| row.start)
+                ));
+                break;
+            }
+            samples += 1;
+        }
+        child_thread
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "churn fixture panicked"))??;
+        assert!(failed.is_none(), "{failed:?}");
+        assert!(samples > 0);
         Ok(())
     }
 
