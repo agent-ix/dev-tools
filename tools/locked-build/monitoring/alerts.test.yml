@@ -245,11 +245,11 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "ix_build_info{host=\"draco\",version=\"a\"}",
+          "series": "ix_build_info{host=\"draco\",version=\"0.2.0\",commit=\"1111111111111111111111111111111111111111\",dirty=\"false\"}",
           "values": "1+0x30"
         },
         {
-          "series": "ix_build_info{host=\"luna\",version=\"b\"}",
+          "series": "ix_build_info{host=\"luna\",version=\"0.2.0\",commit=\"2222222222222222222222222222222222222222\",dirty=\"false\"}",
           "values": "1+0x30"
         }
       ],
@@ -1066,6 +1066,27 @@
         {
           "eval_time": "50m",
           "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "same compiled commit does not cause version skew",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_info{host=\"draco\",version=\"0.2.0\",commit=\"1111111111111111111111111111111111111111\",dirty=\"false\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "ix_build_info{host=\"luna\",version=\"0.2.0\",commit=\"1111111111111111111111111111111111111111\",dirty=\"false\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "20m",
+          "alertname": "LockedBuildVersionSkew",
           "exp_alerts": []
         }
       ]

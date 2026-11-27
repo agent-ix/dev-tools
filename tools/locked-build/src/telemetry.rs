@@ -630,6 +630,8 @@ impl Ledger {
             "Exporter version and effective policy fingerprint (FNV-1a, not a security digest).",
             labels(&[
                 ("version", env!("CARGO_PKG_VERSION")),
+                ("commit", crate::build_info::COMMIT),
+                ("dirty", crate::build_info::DIRTY),
                 ("policy_hash", &policy_hash),
             ]),
             1.,

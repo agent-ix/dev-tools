@@ -167,7 +167,7 @@
         },
         {
           "alert": "LockedBuildVersionSkew",
-          "expr": "count(count by (version) (ix_build_info)) > 1",
+          "expr": "count(count by (version, commit, dirty) (ix_build_info)) > 1",
           "for": "10m",
           "labels": {
             "severity": "warning"

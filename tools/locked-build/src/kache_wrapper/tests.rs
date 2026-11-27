@@ -49,7 +49,7 @@ fn kache_wrapper_policy_changes_disable_the_prepared_choice() {
         status: CacheWrapperStatus::Enabled,
     };
     let mut changed = CachePolicy {
-        mode: crate::config::CacheMode::Both,
+        mode: crate::config::CacheMode::Shared,
         ..Default::default()
     };
     let mut command = Command::new("/usr/bin/true");
@@ -128,5 +128,79 @@ fn kache_wrapper_policy_paths_resolve_from_the_configuration_directory()
         policy.remote_status_file,
         Some(root.path().join("doctor.json"))
     );
+    Ok(())
+}
+
+/// Provenance: SWM-409 delta review; accepted mode spellings and roles have a complete policy matrix.
+#[test]
+fn kache_wrapper_mode_role_matrix_and_caller_local_override()
+-> Result<(), Box<dyn std::error::Error>> {
+    for mode in ["local", "shared", "both"] {
+        for role in ["client", "server"] {
+            let policy: CachePolicy =
+                serde_json::from_value(serde_json::json!({"mode":mode,"cache_role":role}))?;
+            let mut command = Command::new("/usr/bin/true");
+            command.env_remove("KACHE_LOCAL_ONLY");
+            policy.apply(&mut command);
+            let expected = if mode == "local" { "true" } else { "false" };
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == "KACHE_LOCAL_ONLY"
+                        && value == Some(std::ffi::OsStr::new(expected)))
+            );
+            assert_eq!(
+                policy.mode_label(),
+                if mode == "local" { "local" } else { "shared" }
+            );
+            assert_eq!(policy.role_label(), role);
+        }
+    }
+    let policy = CachePolicy::default();
+    for truthy in ["true", "TRUE", "1"] {
+        let mut command = Command::new("/usr/bin/true");
+        command.env("KACHE_LOCAL_ONLY", truthy);
+        policy.apply(&mut command);
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "KACHE_LOCAL_ONLY"
+                    && value == Some(std::ffi::OsStr::new(truthy)))
+        );
+    }
+    Ok(())
+}
+
+/// Provenance: SWM-409 delta review; errors name the invalid policy field, and legacy files still load.
+#[test]
+fn kache_wrapper_config_loader_reports_bad_mode_and_role_and_loads_legacy_policy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("policy.json");
+    for (key, field, expected) in [
+        ("mode", "cache.mode", "local or shared"),
+        ("cache_role", "cache.cache_role", "client or server"),
+    ] {
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"cache":{(key):"invalid"}}))?,
+        )?;
+        let error = crate::config::Config::read(&path)
+            .err()
+            .ok_or("invalid enum accepted")?;
+        assert!(matches!(error.code, crate::error::ErrorCode::Configuration));
+        assert!(error.to_string().contains(field), "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    let mut old = serde_json::to_value(crate::config::Config::default())?;
+    old.as_object_mut()
+        .ok_or("policy object missing")?
+        .remove("cache");
+    std::fs::write(&path, serde_json::to_vec(&old)?)?;
+    let loaded = crate::config::Config::read(&path)?;
+    assert!(loaded.cache.enabled);
+    assert_eq!(loaded.cache.mode, crate::config::CacheMode::Local);
+    assert_eq!(loaded.cache.cache_role, crate::config::CacheRole::Client);
+    assert!(loaded.cache.executable.is_none());
     Ok(())
 }

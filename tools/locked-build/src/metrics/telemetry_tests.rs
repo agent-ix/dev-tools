@@ -341,3 +341,23 @@ fn telemetry_atomic_publication_preserves_inode_when_content_is_unchanged() -> R
     assert_eq!(fs::read_to_string(output)?, "metric 2\n");
     Ok(())
 }
+
+/// Provenance: SWM-425; compile with the documented fixed provenance inputs for an independent label oracle.
+#[test]
+#[ignore = "build with IX_BUILD_COMMIT=1111111111111111111111111111111111111111 IX_BUILD_DIRTY=false"]
+fn provenance_info_contains_hand_written_compile_labels() -> Result<()> {
+    let text = MetricsState::default().exposition(&state(vec![]), &policy()?, 0, 0)?;
+    let info = text
+        .lines()
+        .find(|line| line.starts_with("ix_build_info{"))
+        .ok_or_else(|| Error::new(ErrorCode::State, "missing info metric"))?;
+    assert!(info.contains("commit=\"1111111111111111111111111111111111111111\""));
+    assert!(info.contains("dirty=\"false\""));
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("ix_build_info{"))
+            .count(),
+        1
+    );
+    Ok(())
+}

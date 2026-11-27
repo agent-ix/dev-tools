@@ -64,6 +64,7 @@ fn kache_wrapper_admitted_commands_default_on_off_unhealthy_and_remote_fallback(
             .env_remove("LOCKED_BUILD_LEASE")
             .env_remove("LOCKED_BUILD_STATE")
             .env_remove("LOCKED_BUILD_CONFIG")
+            .env("KACHE_LOCAL_ONLY", "1")
             .env("RUSTC_WRAPPER", "/missing/inherited-wrapper")
             .output()?;
         assert!(
@@ -81,7 +82,7 @@ fn kache_wrapper_admitted_commands_default_on_off_unhealthy_and_remote_fallback(
         assert_eq!(compiled["compiled"], true);
         assert_eq!(
             compiled["local_only"],
-            if mode == "local" { "true" } else { "false" }
+            if mode == "local" { "1" } else { "false" }
         );
         assert_eq!(
             compiled["wrapper"].as_str().is_some_and(|p| !p.is_empty()),

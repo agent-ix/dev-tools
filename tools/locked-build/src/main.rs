@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod build_disk;
+mod build_info;
 mod config;
 mod diagnostics;
 mod error;
@@ -38,7 +39,7 @@ const DEFAULT_CARGO_CLASS: &str = "point";
 const DEFAULT_CARGO_TICKET: &str = "MANUAL";
 
 #[derive(Parser)]
-#[command(version, about = "Fair persistent build admission for shared hosts")]
+#[command(version = build_info::VERSION, about = "Fair persistent build admission for shared hosts")]
 struct Cli {
     #[arg(long, global = true)]
     state: Option<PathBuf>,

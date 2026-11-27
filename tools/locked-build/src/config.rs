@@ -44,9 +44,8 @@ pub enum CacheMode {
     #[default]
     Local,
     /// Permit the configured shared remote, retaining local fallback.
+    #[serde(alias = "both")]
     Shared,
-    /// Permit both local reuse and the configured shared remote.
-    Both,
 }
 
 /// Role used to join cache-server disk/network panels to host telemetry.
@@ -69,8 +68,10 @@ pub struct CachePolicy {
     /// Optional executable path, resolved relative to the host policy file.
     pub executable: Option<PathBuf>,
     /// Local is the default; shared access requires an explicit policy change.
+    #[serde(deserialize_with = "deserialize_cache_mode")]
     pub mode: CacheMode,
     /// Server or client role; never inferred from a host name.
+    #[serde(deserialize_with = "deserialize_cache_role")]
     pub cache_role: CacheRole,
     /// Optional recent read-only full stats snapshot, instead of an extra CLI call.
     pub remote_report_file: Option<PathBuf>,
@@ -125,7 +126,6 @@ impl CachePolicy {
         match self.mode {
             CacheMode::Local => "local",
             CacheMode::Shared => "shared",
-            CacheMode::Both => "both",
         }
     }
     pub(crate) fn role_label(&self) -> &'static str {
@@ -135,18 +135,43 @@ impl CachePolicy {
         }
     }
     pub(crate) fn apply(&self, command: &mut std::process::Command) {
-        command.env(
-            "KACHE_LOCAL_ONLY",
-            if self.shared_enabled() {
-                "false"
-            } else {
-                "true"
-            },
-        );
+        let explicit = command
+            .get_envs()
+            .find(|(key, _)| *key == "KACHE_LOCAL_ONLY");
+        let caller = match explicit {
+            Some((_, value)) => value.map(std::ffi::OsStr::to_owned),
+            None => std::env::var_os("KACHE_LOCAL_ONLY"),
+        };
+        let caller_local = caller
+            .as_deref()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        if self.shared_enabled() {
+            command.env("KACHE_LOCAL_ONLY", "false");
+        } else if !caller_local {
+            command.env("KACHE_LOCAL_ONLY", "true");
+        }
     }
     pub(crate) fn append_info(&self, text: &mut String, host: &str) {
         text.push_str(&format!("# HELP ix_build_cache_policy_info Host cache permissions and role.\n# TYPE ix_build_cache_policy_info gauge\nix_build_cache_policy_info{{host=\"{}\",cache_role=\"{}\",cache_mode=\"{}\"}} 1\n", crate::metrics::escape_label(host), self.role_label(), self.mode_label()));
     }
+}
+
+fn deserialize_cache_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<CacheMode, D::Error> {
+    CacheMode::deserialize(deserializer).map_err(|error| {
+        serde::de::Error::custom(format!(
+            "cache.mode (local or shared; both is an alias): {error}"
+        ))
+    })
+}
+fn deserialize_cache_role<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<CacheRole, D::Error> {
+    CacheRole::deserialize(deserializer).map_err(|error| {
+        serde::de::Error::custom(format!("cache.cache_role (client or server): {error}"))
+    })
 }
 
 /// Admission policy. Every capacity and limit is explicitly configured.
