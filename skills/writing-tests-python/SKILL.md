@@ -28,15 +28,25 @@ Follow the **Agent-IX style** for test docstrings.
 -   **Description**: What is being tested.
 -   **Assumptions**: Preconditions or context (e.g. data state, mocking).
 -   **Criteria**: Pass conditions, in prose. Criterion ids here bind nothing.
--   **Trace**: One `Trace:` line listing the criterion ids the test asserts, comma
-    separated (`Trace: FR-001-AC-01, FR-005-AC-1`). This line is the tag `quire matrix`
-    reads to compute the Test Matrix; a test without it is untagged. Do not add rows to
-    `spec/tests.md`.
+
+Attach `@pytest.mark.trace("FR-001-AC-01", "FR-005-AC-1")` to each test, listing
+the criteria it actually asserts. Import `pytest`. Quire reads these marker
+attributes statically under the module's declared traceability model. Docstring
+criterion mentions are prose, not a replacement for the marker. Do not add rows
+to `spec/tests.md`.
+
+This is the canonical Python form in Quire's
+[trace-tag grammar](https://github.com/agent-ix/quire-rs/blob/main/spec/functional/FR-051-source-symbol-extraction.md#trace-tag-grammar),
+verified with Quire CLI 0.53.3.
 
 ```python
+import pytest
+
+
 class TestMathOperations:
     """Tests for basic math operations."""
 
+    @pytest.mark.trace("FR-001-AC-01")
     def test_addition(self):
         """
         Description:
@@ -49,7 +59,6 @@ class TestMathOperations:
             - Result equals the mathematical sum of inputs
             - Result is a positive integer
 
-        Trace: FR-001-AC-01
         """
         assert add(1, 2) == 3
 ```
