@@ -183,8 +183,9 @@ impl Config {
         let safe_jobs = (memory_budget / config.memory_reserve_per_job_bytes).max(1);
         config.cargo_build_jobs = Some(cores.min(u32::try_from(safe_jobs).unwrap_or(u32::MAX)));
 
-        let disk_path = crate::writable::shared_root()?;
         let disks = Disks::new_with_refreshed_list();
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let disk_path = crate::build_disk::default_root(home.as_deref(), &disks)?;
         let disk = disks
             .list()
             .iter()
@@ -197,6 +198,7 @@ impl Config {
                 )
             })?;
         config.disk_path = disk_path;
+        config.target_root = Some(config.disk_path.join("targets"));
         config.disk_reserve_bytes = disk.available_space() / 10;
         config.validate()?;
         Ok(config)

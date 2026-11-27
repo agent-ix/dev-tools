@@ -2,6 +2,7 @@
 //! Shared persistent build admission and safe supervision (FR-005).
 #![forbid(unsafe_code)]
 
+mod build_disk;
 mod config;
 mod diagnostics;
 mod error;
@@ -473,8 +474,6 @@ fn ensure_policy_with_discovery(
         return Ok(());
     }
     let mut policy = crate::config::Config::measured_default()?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    policy.target_root = Some(writable::host_root(home.as_deref()).join("targets"));
     policy.target_root = policy.target_root.map(std::path::absolute).transpose()?;
     policy.real_cargo =
         search_path.and_then(|search_path| discover_real_cargo(search_path, current_exe));

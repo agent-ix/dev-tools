@@ -52,6 +52,19 @@ On first use, locked-build measures the host and writes a conservative policy.
 Use `locked-build policy show` to print it or `locked-build policy init --force`
 to regenerate it.
 
+Measured defaults rank eligible writable local disks NVMe, SSD, HDD, using
+device metadata and a small file-creation probe rather than throughput tests.
+Ties prefer HOME; a secondary disk needs100GB available. Known network,
+temporary, removable and read-only mounts are excluded. HOME is the fallback
+when mount metadata is unavailable; on macOS an actual HOME write probe handles
+APFS Data firmlinks beneath the sealed root mount. The selected base holds
+`targets/` and is also `disk_path`, so admission measures the build filesystem.
+Existing policies are not regenerated during installation.
+
+`TMPDIR` is set to the effective target's `.tmp` directory, overriding an
+inherited root-disk temp path. Caller targets remain authoritative and relative
+targets resolve against the recorded command cwd. `.tmp` symlinks are refused.
+
 `make install-tools` builds and copies the locked-build executable only when it
 changes, generates a measured policy on first install, installs the `cargo`
 shim, and writes `~/.local/share/dev-tools/installed.json`. It places the shim

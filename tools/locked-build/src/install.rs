@@ -133,7 +133,9 @@ fn install_tools_with_measurement(
         let mut policy = measure_policy()?;
         policy.host = policy.host.to_ascii_lowercase();
         policy.real_cargo = discover_executable(search_path, "cargo", current_exe);
-        policy.target_root = Some(config_dir.join("targets"));
+        if policy.target_root.is_none() {
+            policy.target_root = Some(config_dir.join("targets"));
+        }
         policy
     };
     policy
@@ -560,6 +562,27 @@ fn shell_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Provenance: SWM-412. Trace: FR-011-AC-7
+    #[test]
+    fn install_preserves_the_measured_fast_disk_default() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let shared = root.path().join("shared");
+        let target = root.path().join("nvme/targets");
+        install_tools_with_measurement(&home, &std::env::current_exe()?, None, &shared, || {
+            Ok(Config {
+                target_root: Some(target.clone()),
+                disk_path: root.path().join("nvme"),
+                ..Config::default()
+            })
+        })?;
+        assert_eq!(
+            Config::read(&shared.join("policy.json"))?.target_root,
+            Some(target)
+        );
+        Ok(())
+    }
 
     /// Trace: FR-011-AC-7, FR-005-AC-4
     #[test]

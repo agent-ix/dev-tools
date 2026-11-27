@@ -13,7 +13,17 @@ Use the installed `locked-build` command to submit and inspect builds. Do not wr
 locked-build run -- cargo test -p package-name
 ```
 
-Every lane of a user shares `/tmp/locked-build-<uid>` (owned, mode `0700`) and its `policy.json`, regardless of lane `IX_HOME`. `~/.ix/locked-build/state` and `policy.json` are host aliases. The canonical policy is read if present and created atomically once if absent; generated host targets default to `~/.ix/locked-build/targets`, with a writable shared fallback. Explicit state/config overrides remain available for isolated fixtures. `status` reports `state_path`; `policy show` prints effective paths to stderr. Installation preserves the policy selected by existing host state, moves old `~/.config/locked-build/policy.json` when applicable, and archives a competing fallback policy before host migration. Nested Cargo calls pass directly to real Cargo without state access when `LOCKED_BUILD_LEASE=1`, or when the legacy runner sets a nonempty `CARGO_TARGET_DIR` and equal positive `CARGO_BUILD_JOBS`/`RUST_TEST_THREADS`.
+Every lane of a user shares `/tmp/locked-build-<uid>` (owned, mode `0700`) and its `policy.json`, regardless of lane `IX_HOME`. `~/.ix/locked-build/state` and `policy.json` are host aliases. The canonical policy is read if present and created atomically once if absent. Explicit state/config overrides remain available for isolated fixtures. `status` reports `state_path`; `policy show` prints effective paths to stderr. Installation preserves the policy selected by existing host state, moves old `~/.config/locked-build/policy.json` when applicable, and archives a competing fallback policy before host migration. Nested Cargo calls pass directly to real Cargo without state access when `LOCKED_BUILD_LEASE=1`, or when the legacy runner sets a nonempty `CARGO_TARGET_DIR` and equal positive `CARGO_BUILD_JOBS`/`RUST_TEST_THREADS`.
+
+New policy init ranks eligible writable local disks by device class: NVMe,
+other SSD, HDD. Equal classes prefer HOME; secondary disks need100GB free.
+Known read-only, removable, network and temporary mounts are excluded. Targets
+use `<mount>/locked-build-<uid>/targets`, with `~/.ix/locked-build/targets` as
+the HOME fallback; `disk_path` measures that selected filesystem. Existing
+policies keep their hand-set paths. Jobs get `TMPDIR=<effective-target>/.tmp`,
+including explicit caller targets; relative target paths resolve from command
+cwd. A `.tmp` symlink is refused. Sandboxed lanes should select a writable
+worktree target on the build disk when the shared host target is read-only.
 
 Choose `--class must-fix`, `--class point`, `--class block`, or `--class periodic`. The default is `periodic`. Direct runs and the Cargo shim derive the owner from the user, host, and current worktree directory; `LOCKED_BUILD_OWNER` overrides it. Ticket labels derive from the Git branch; `LOCKED_BUILD_TICKET` overrides them. This gives each worktree its own Cargo target directory.
 
