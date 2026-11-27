@@ -2101,29 +2101,13 @@ fn supervise_command_loop(
             return Ok(());
         };
         if stop_degraded_group {
-            terminate_degraded_group(watchdog.pid, grace)?;
+            // The command may have moved into its own group. Both Child
+            // handles pin ownership even after watchdog supervision was lost.
+            terminate_supervision_group(watchdog_child, Some(child), watchdog.pid, grace)?;
+            watchdog_reaped = true;
         }
         std::thread::sleep(Duration::from_millis(poll_ms));
     }
-}
-
-fn terminate_degraded_group(group: u32, grace_ms: u64) -> Result<()> {
-    let group = i32::try_from(group)
-        .map_err(|_| Error::new(ErrorCode::State, "command group out of range"))?;
-    let pid = nix::unistd::Pid::from_raw(group);
-    let signal = |signal| match nix::sys::signal::killpg(pid, signal) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-        Err(error) => Err(Error::new(ErrorCode::State, error.to_string())),
-    };
-    signal(nix::sys::signal::Signal::SIGTERM)?;
-    let deadline = std::time::Instant::now() + Duration::from_millis(grace_ms);
-    while !group_absent(u32::try_from(group).unwrap_or(0)) && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    if !group_absent(u32::try_from(group).unwrap_or(0)) {
-        signal(nix::sys::signal::Signal::SIGKILL)?;
-    }
-    Ok(())
 }
 
 fn persisted_memory_enforcement(
