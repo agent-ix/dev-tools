@@ -14,6 +14,8 @@ use crate::error::{Error, ErrorCode, Result};
 
 const TOOL_MANIFEST: &str = include_str!("../tool-versions.json");
 const MANIFEST_VERSION: u32 = 1;
+const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
+const NPM_SCOPE_REGISTRY: &str = "--@agent-ix:registry=https://registry.npmjs.org/";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +31,8 @@ struct ToolPin {
     executable: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    npm_package: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -47,6 +51,7 @@ pub(crate) fn install_tools(
     current_exe: &Path,
     search_path: Option<&OsStr>,
 ) -> Result<()> {
+    install_npm_packages(&read_manifest(TOOL_MANIFEST)?)?;
     install_tools_with_measurement(home, current_exe, search_path, Config::measured_default)
 }
 
@@ -123,6 +128,48 @@ fn install_tools_with_measurement(
     println!("binary: {}", installed_path.display());
     println!("version record: {}", record_path.display());
     Ok(())
+}
+
+fn install_npm_packages(manifest: &ToolManifest) -> Result<()> {
+    let arguments = npm_install_arguments(&manifest.tools)?;
+    if arguments.is_empty() {
+        return Ok(());
+    }
+    let status = Command::new("npm").args(arguments).status()?;
+    if !status.success() {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            format!("npm install failed with status {status}"),
+        ));
+    }
+    Ok(())
+}
+
+fn npm_install_arguments(tools: &[ToolPin]) -> Result<Vec<String>> {
+    let mut packages = Vec::new();
+    for tool in tools {
+        let Some(package) = tool.npm_package.as_deref() else {
+            continue;
+        };
+        let version = tool.version.as_deref().ok_or_else(|| {
+            Error::new(
+                ErrorCode::Configuration,
+                format!("npm package for {} has no pinned version", tool.name),
+            )
+        })?;
+        packages.push(format!("{package}@{version}"));
+    }
+    if packages.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut arguments = vec![
+        "install".to_owned(),
+        "--global".to_owned(),
+        format!("--registry={NPM_REGISTRY}"),
+        NPM_SCOPE_REGISTRY.to_owned(),
+    ];
+    arguments.extend(packages);
+    Ok(arguments)
 }
 
 /// Compares installed command versions against the checked-in pinned manifest.
@@ -353,14 +400,24 @@ mod tests {
     fn checked_in_pins_have_hand_written_version_requirements_and_executable_names() -> Result<()> {
         let manifest = read_manifest(TOOL_MANIFEST)?;
         let expected = [
-            ("locked-build", "locked-build", Some("0.1.0")),
-            ("quire", "quire", Some("0.53.3")),
-            ("quoin", "quoin", Some("0.36.10")),
-            ("ix-board", "ix-board", Some("0.12.2")),
-            ("ix-flow", "ix-flow", Some("0.3.5")),
-            ("ix-trace-run", "ix-trace-run", None),
-            ("cargo", "cargo", Some("1.98.1")),
-            ("rustc", "rustc", Some("1.98.1")),
+            ("locked-build", "locked-build", Some("0.1.0"), None),
+            (
+                "quire",
+                "quire",
+                Some("0.53.3"),
+                Some("@agent-ix/quire-cli"),
+            ),
+            ("quoin", "quoin", Some("0.37.0"), Some("@agent-ix/quoin")),
+            ("ix-board", "ix-board", Some("0.12.2"), None),
+            (
+                "ix-flow",
+                "ix-flow",
+                Some("0.3.5"),
+                Some("@agent-ix/ix-flow"),
+            ),
+            ("ix-trace-run", "ix-trace-run", None, None),
+            ("cargo", "cargo", Some("1.98.1"), None),
+            ("rustc", "rustc", Some("1.98.1"), None),
         ];
         let actual: Vec<_> = manifest
             .tools
@@ -370,10 +427,49 @@ mod tests {
                     tool.name.as_str(),
                     tool.executable.as_str(),
                     tool.version.as_deref(),
+                    tool.npm_package.as_deref(),
                 )
             })
             .collect();
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn npm_install_argv_uses_explicit_public_registry_and_pinned_packages() -> Result<()> {
+        let tools = [
+            ToolPin {
+                name: "quire".to_owned(),
+                executable: "quire".to_owned(),
+                version: Some("0.53.3".to_owned()),
+                npm_package: Some("@agent-ix/quire-cli".to_owned()),
+            },
+            ToolPin {
+                name: "quoin".to_owned(),
+                executable: "quoin".to_owned(),
+                version: Some("0.37.0".to_owned()),
+                npm_package: Some("@agent-ix/quoin".to_owned()),
+            },
+            ToolPin {
+                name: "ix-flow".to_owned(),
+                executable: "ix-flow".to_owned(),
+                version: Some("0.3.5".to_owned()),
+                npm_package: Some("@agent-ix/ix-flow".to_owned()),
+            },
+        ];
+
+        assert_eq!(
+            npm_install_arguments(&tools)?,
+            vec![
+                "install",
+                "--global",
+                "--registry=https://registry.npmjs.org/",
+                "--@agent-ix:registry=https://registry.npmjs.org/",
+                "@agent-ix/quire-cli@0.53.3",
+                "@agent-ix/quoin@0.37.0",
+                "@agent-ix/ix-flow@0.3.5",
+            ]
+        );
         Ok(())
     }
 
@@ -413,6 +509,7 @@ mod tests {
             name: "presence-tool".to_owned(),
             executable: "missing-tool".to_owned(),
             version: None,
+            npm_package: None,
         };
         assert_eq!(
             check_tool(&missing, Some(&search_path), None),
@@ -428,15 +525,15 @@ mod tests {
             "0.53.3",
             "quire 0.53.3 (engine 0.63.2)"
         ));
-        assert!(version_matches("quoin", "0.36.10", "0.36.10"));
-        assert!(!version_matches("quoin", "0.36.10", "quoin 0.36.10-rc.1"));
-        assert!(!version_matches("quoin", "0.36.10", "quoin 0.36.10+local"));
+        assert!(version_matches("quoin", "0.37.0", "0.37.0"));
+        assert!(!version_matches("quoin", "0.37.0", "quoin 0.37.0-rc.1"));
+        assert!(!version_matches("quoin", "0.37.0", "quoin 0.37.0+local"));
         assert!(version_matches(
             "quoin",
-            "0.36.10+local",
-            "quoin 0.36.10+local"
+            "0.37.0+local",
+            "quoin 0.37.0+local"
         ));
-        assert!(!version_matches("quoin", "0.36.10", "0.36.9"));
+        assert!(!version_matches("quoin", "0.37.0", "0.36.9"));
     }
 
     #[test]
