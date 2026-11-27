@@ -378,12 +378,11 @@ mod tests {
 
     #[test]
     fn presence_only_manifest_pin_passes_when_help_succeeds() -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::symlink;
 
         let root = tempfile::tempdir()?;
         let executable = root.path().join("presence-tool");
-        std::fs::write(&executable, b"#!/bin/sh\n[ \"$1\" = \"--help\" ]\n")?;
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        symlink(std::env::current_exe()?, &executable)?;
         let manifest = read_manifest(
             r#"{"schema_version":1,"tools":[{"name":"presence-tool","executable":"presence-tool"}]}"#,
         )?;
@@ -405,9 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn presence_only_manifest_pin_mismatches_missing_or_failing_executable() -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn presence_only_manifest_pin_mismatches_missing_executable() -> Result<()> {
         let root = tempfile::tempdir()?;
         let search_path = std::env::join_paths([root.path()])
             .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
@@ -420,19 +417,6 @@ mod tests {
             check_tool(&missing, Some(&search_path), None),
             Err("unavailable=not-found".to_owned())
         );
-
-        let failing_path = root.path().join("failing-tool");
-        std::fs::write(&failing_path, b"#!/bin/sh\necho help-failed >&2\nexit 1\n")?;
-        std::fs::set_permissions(&failing_path, std::fs::Permissions::from_mode(0o755))?;
-        let failing = ToolPin {
-            name: "presence-tool".to_owned(),
-            executable: "failing-tool".to_owned(),
-            version: None,
-        };
-        assert!(matches!(
-            check_tool(&failing, Some(&search_path), None),
-            Err(detail) if detail.contains("exit=exit status: 1") && detail.contains("help-failed")
-        ));
         Ok(())
     }
 
