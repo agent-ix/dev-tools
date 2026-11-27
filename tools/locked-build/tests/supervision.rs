@@ -1212,6 +1212,8 @@ fn cancel_build_lock_scenario(nested_scope: bool) -> TestResult {
             "-p",
             "MemorySwapMax=0",
             "--",
+            "timeout",
+            "60s",
         ]);
     }
     let mut child = run
@@ -1260,6 +1262,11 @@ fn cancel_build_lock_scenario(nested_scope: bool) -> TestResult {
         .to_owned();
     let command_pid: i32 = fs::read_to_string(pid_file(&marker))?.parse()?;
     let compiler_pid: i32 = fs::read_to_string(pid_file(&descendant))?.parse()?;
+    let launch_pid = i32::try_from(
+        request["lease_record"]["command"]["pid"]
+            .as_u64()
+            .ok_or("launch PID missing")?,
+    )?;
     let group = nix::unistd::getpgid(Some(Pid::from_raw(command_pid)))?;
     if !nested_scope {
         assert_eq!(group.as_raw(), command_pid);
@@ -1275,6 +1282,14 @@ fn cancel_build_lock_scenario(nested_scope: bool) -> TestResult {
     let watchdog = harness.persisted()?["requests"][0]["watchdog"]["pid"]
         .as_u64()
         .ok_or("watchdog PID missing")?;
+    if nested_scope {
+        assert_eq!(
+            group.as_raw(),
+            launch_pid,
+            "timeout must create the moved command group observed in luna's command"
+        );
+        assert_ne!(u64::try_from(group.as_raw())?, watchdog);
+    }
     kill(Pid::from_raw(i32::try_from(watchdog)?), Signal::SIGKILL)?;
     assert!(matches!(
         lock.try_lock(),
@@ -1296,7 +1311,7 @@ fn cancel_build_lock_scenario(nested_scope: bool) -> TestResult {
         nix::sys::signal::killpg(group, None),
         Err(nix::errno::Errno::ESRCH)
     );
-    for pid in [command_pid, compiler_pid] {
+    for pid in [launch_pid, command_pid, compiler_pid] {
         assert_eq!(
             kill(Pid::from_raw(pid), None),
             Err(nix::errno::Errno::ESRCH)
