@@ -7,45 +7,78 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub enum Code {
     /// Watchdog memory limit.
-    #[serde(rename = "LB_RSS_CAP")] RssCap,
+    #[serde(rename = "LB_RSS_CAP")]
+    RssCap,
     /// Kernel cgroup OOM kill.
-    #[serde(rename = "LB_OOM_KILLED")] OomKilled,
+    #[serde(rename = "LB_OOM_KILLED")]
+    OomKilled,
     /// Maximum lease duration.
-    #[serde(rename = "LB_HOLD_TIMEOUT")] HoldTimeout,
+    #[serde(rename = "LB_HOLD_TIMEOUT")]
+    HoldTimeout,
     /// Supervision was lost or degraded.
-    #[serde(rename = "LB_SUPERVISION_LOST")] SupervisionLost,
+    #[serde(rename = "LB_SUPERVISION_LOST")]
+    SupervisionLost,
     /// Requested memory exceeds the host budget.
-    #[serde(rename = "LB_REFUSED_MEMORY_BUDGET")] RefusedMemoryBudget,
+    #[serde(rename = "LB_REFUSED_MEMORY_BUDGET")]
+    RefusedMemoryBudget,
     /// Requested memory exceeds the class cap.
-    #[serde(rename = "LB_REFUSED_CLASS_CAP")] RefusedClassCap,
+    #[serde(rename = "LB_REFUSED_CLASS_CAP")]
+    RefusedClassCap,
     /// Queue or unit limit.
-    #[serde(rename = "LB_REFUSED_QUEUE")] RefusedQueue,
+    #[serde(rename = "LB_REFUSED_QUEUE")]
+    RefusedQueue,
     /// Required memory enforcement is unavailable.
-    #[serde(rename = "LB_REFUSED_CAP_UNAVAILABLE")] RefusedCapUnavailable,
+    #[serde(rename = "LB_REFUSED_CAP_UNAVAILABLE")]
+    RefusedCapUnavailable,
     /// Caller cancellation.
-    #[serde(rename = "LB_CANCELLED")] Cancelled,
+    #[serde(rename = "LB_CANCELLED")]
+    Cancelled,
     /// A signal was not initiated by locked-build.
-    #[serde(rename = "LB_EXTERNAL_SIGNAL")] ExternalSignal,
+    #[serde(rename = "LB_EXTERNAL_SIGNAL")]
+    ExternalSignal,
     /// Nonzero command exit.
-    #[serde(rename = "LB_COMMAND_EXIT")] CommandExit,
+    #[serde(rename = "LB_COMMAND_EXIT")]
+    CommandExit,
     /// Invalid request.
-    #[serde(rename = "LB_INVALID_REQUEST")] InvalidRequest,
+    #[serde(rename = "LB_INVALID_REQUEST")]
+    InvalidRequest,
     /// State or configuration is unavailable.
-    #[serde(rename = "LB_STATE_UNAVAILABLE")] StateUnavailable,
+    #[serde(rename = "LB_STATE_UNAVAILABLE")]
+    StateUnavailable,
 }
 
 impl Code {
     /// Every supported code, for bounded metrics and exhaustive validation.
-    pub const ALL: [Self; 13] = [Self::RssCap, Self::OomKilled, Self::HoldTimeout, Self::SupervisionLost, Self::RefusedMemoryBudget, Self::RefusedClassCap, Self::RefusedQueue, Self::RefusedCapUnavailable, Self::Cancelled, Self::ExternalSignal, Self::CommandExit, Self::InvalidRequest, Self::StateUnavailable];
+    pub const ALL: [Self; 13] = [
+        Self::RssCap,
+        Self::OomKilled,
+        Self::HoldTimeout,
+        Self::SupervisionLost,
+        Self::RefusedMemoryBudget,
+        Self::RefusedClassCap,
+        Self::RefusedQueue,
+        Self::RefusedCapUnavailable,
+        Self::Cancelled,
+        Self::ExternalSignal,
+        Self::CommandExit,
+        Self::InvalidRequest,
+        Self::StateUnavailable,
+    ];
     /// Stable wire spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::RssCap => "LB_RSS_CAP", Self::OomKilled => "LB_OOM_KILLED",
-            Self::HoldTimeout => "LB_HOLD_TIMEOUT", Self::SupervisionLost => "LB_SUPERVISION_LOST",
-            Self::RefusedMemoryBudget => "LB_REFUSED_MEMORY_BUDGET", Self::RefusedClassCap => "LB_REFUSED_CLASS_CAP",
-            Self::RefusedQueue => "LB_REFUSED_QUEUE", Self::RefusedCapUnavailable => "LB_REFUSED_CAP_UNAVAILABLE",
-            Self::Cancelled => "LB_CANCELLED", Self::ExternalSignal => "LB_EXTERNAL_SIGNAL",
-            Self::CommandExit => "LB_COMMAND_EXIT", Self::InvalidRequest => "LB_INVALID_REQUEST",
+            Self::RssCap => "LB_RSS_CAP",
+            Self::OomKilled => "LB_OOM_KILLED",
+            Self::HoldTimeout => "LB_HOLD_TIMEOUT",
+            Self::SupervisionLost => "LB_SUPERVISION_LOST",
+            Self::RefusedMemoryBudget => "LB_REFUSED_MEMORY_BUDGET",
+            Self::RefusedClassCap => "LB_REFUSED_CLASS_CAP",
+            Self::RefusedQueue => "LB_REFUSED_QUEUE",
+            Self::RefusedCapUnavailable => "LB_REFUSED_CAP_UNAVAILABLE",
+            Self::Cancelled => "LB_CANCELLED",
+            Self::ExternalSignal => "LB_EXTERNAL_SIGNAL",
+            Self::CommandExit => "LB_COMMAND_EXIT",
+            Self::InvalidRequest => "LB_INVALID_REQUEST",
             Self::StateUnavailable => "LB_STATE_UNAVAILABLE",
         }
     }
@@ -67,14 +100,39 @@ pub enum Value {
 
 impl std::fmt::Display for Value {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { Self::Integer(value) => write!(out, "{value}"), Self::Number(value) => write!(out, "{value}"), Self::Boolean(value) => write!(out, "{value}"), Self::Text(value) => out.write_str(value) }
+        match self {
+            Self::Integer(value) => write!(out, "{value}"),
+            Self::Number(value) => write!(out, "{value}"),
+            Self::Boolean(value) => write!(out, "{value}"),
+            Self::Text(value) => out.write_str(value),
+        }
     }
 }
-impl From<u64> for Value { fn from(value: u64) -> Self { Self::Integer(value) } }
-impl From<u32> for Value { fn from(value: u32) -> Self { Self::Integer(u64::from(value)) } }
-impl From<bool> for Value { fn from(value: bool) -> Self { Self::Boolean(value) } }
-impl From<&str> for Value { fn from(value: &str) -> Self { Self::Text(value.to_owned()) } }
-impl From<String> for Value { fn from(value: String) -> Self { Self::Text(value) } }
+impl From<u64> for Value {
+    fn from(value: u64) -> Self {
+        Self::Integer(value)
+    }
+}
+impl From<u32> for Value {
+    fn from(value: u32) -> Self {
+        Self::Integer(u64::from(value))
+    }
+}
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+}
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
 
 /// Structured fields and the exact caller/ledger message for an abnormal outcome.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -98,11 +156,30 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     /// Construct structured metadata and its one canonical, single-line message.
-    pub fn failure(code: Code, request: &str, key: &str, limit: Value, measured: Value, what: &str, killed: &str) -> Self {
+    pub fn failure(
+        code: Code,
+        request: &str,
+        key: &str,
+        limit: Value,
+        measured: Value,
+        what: &str,
+        killed: &str,
+    ) -> Self {
         let what = what.split_whitespace().collect::<Vec<_>>().join(" ");
         let killed = killed.split_whitespace().collect::<Vec<_>>().join("_");
-        let message = format!("locked-build: {} request={request} limit={key}={limit} measured={measured} ({what}) killed={killed}", code.as_str());
-        Self { code: Some(code), message: Some(message), limit_key: Some(key.to_owned()), limit_value: Some(limit), measured_value: Some(measured), measured_what: Some(what), killed: Some(killed) }
+        let message = format!(
+            "locked-build: {} request={request} limit={key}={limit} measured={measured} ({what}) killed={killed}",
+            code.as_str()
+        );
+        Self {
+            code: Some(code),
+            message: Some(message),
+            limit_key: Some(key.to_owned()),
+            limit_value: Some(limit),
+            measured_value: Some(measured),
+            measured_what: Some(what),
+            killed: Some(killed),
+        }
     }
 }
 
@@ -124,7 +201,8 @@ pub struct BlockObservation {
 #[serde(default)]
 pub struct RequestTrace {
     /// Shared diagnostic fields, serialized flat.
-    #[serde(flatten)] pub diagnostic: Diagnostic,
+    #[serde(flatten)]
+    pub diagnostic: Diagnostic,
     /// Precise queued/admitted/running/terminal lifecycle state.
     pub lifecycle_state: String,
     /// Queue depth including this request on enqueue, zero for a refusal.
@@ -265,7 +343,8 @@ pub struct RequestProjection {
     /// Legacy phase.
     pub state: String,
     /// Canonical trace fields, flattened on the wire.
-    #[serde(flatten)] pub trace: RequestTrace,
+    #[serde(flatten)]
+    pub trace: RequestTrace,
 }
 /// Additive, read-only event projection.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -278,11 +357,11 @@ pub struct EventProjection {
     /// transition, blocked, command_started, or refused.
     pub kind: String,
     /// Request identity/class/trace fields, flattened on the wire.
-    #[serde(flatten)] pub request: RequestProjection,
+    #[serde(flatten)]
+    pub request: RequestProjection,
 }
 /// Additive, read-only status envelope.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
 pub struct StatusProjection {
     /// Existing status schema version.
     pub schema_version: Option<u32>,
@@ -291,13 +370,16 @@ pub struct StatusProjection {
     /// Number of events pruned from this source.
     pub pruned_events: Option<u64>,
     /// Store identity.
+    #[serde(default)]
     pub store_id: String,
     /// Host identity.
+    #[serde(default)]
     pub host: String,
     /// Request records.
     pub requests: Vec<RequestProjection>,
     /// Existing event stream.
     pub events: Vec<EventProjection>,
     /// Shared metrics snapshot.
+    #[serde(default)]
     pub metrics: MetricsSnapshot,
 }
