@@ -238,7 +238,7 @@ fn execute(cli: Cli) -> Result<i32> {
             let worker = runtime::spawn_worker(&store, &id)?;
             let (exit_code, reason) = runtime::wait(&store, &id, vec![worker])?;
             if exit_code == 124
-                && let Some(reason) = reason
+                && let Some(reason) = reason.filter(|reason| reason.starts_with("hold_timeout:"))
             {
                 eprintln!("request={} reason={reason}", id.0);
             }
