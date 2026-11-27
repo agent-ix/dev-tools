@@ -14,7 +14,8 @@ fn invoke(home: &Path, cwd: &Path, arguments: &[&str]) -> std::io::Result<Output
         .env("HOME", home)
         .env("USER", "qa")
         .env_remove("IX_HOME")
-        .env_remove("LOCKED_BUILD_STATE")
+        // Existing override isolates the integration fixture from host admission.
+        .env("LOCKED_BUILD_STATE", home.join(".ix/locked-build/state"))
         .env_remove("LOCKED_BUILD_CONFIG")
         .env_remove("LOCKED_BUILD_OWNER")
         .env_remove("LOCKED_BUILD_TICKET")
@@ -203,7 +204,7 @@ fn unnested_shim_is_admitted_with_readonly_policy() -> Result<(), Box<dyn std::e
         .env("HOME", &home)
         .env_remove("IX_HOME")
         .env_remove("LOCKED_BUILD_CONFIG")
-        .env_remove("LOCKED_BUILD_STATE")
+        .env("LOCKED_BUILD_STATE", config_dir.join("state"))
         .env_remove("LOCKED_BUILD_LEASE")
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_BUILD_JOBS")

@@ -338,11 +338,7 @@ fn resolve_paths(
     let root = writable::ix_home(env("IX_HOME"), home.as_deref()).join("locked-build");
     let state = match state {
         Some(state) => state,
-        None => match writable::probe_directory(&root.join("state")) {
-            Ok(()) => root.join("state"),
-            Err(error) if writable::access_denied(&error) => writable::shared_root()?,
-            Err(error) => return Err(error.into()),
-        },
+        None => writable::shared_state(&root.join("state"), &writable::shared_root()?)?,
     };
     let config = config.unwrap_or_else(|| root.join("policy.json"));
     let config = if config_flag.is_none() && env("LOCKED_BUILD_CONFIG").is_none() {
@@ -360,14 +356,15 @@ fn default_policy_path(path: &std::path::Path, state: &std::path::Path) -> Resul
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let parent = path.parent().ok_or_else(|| {
-        error::Error::new(error::ErrorCode::Configuration, "policy path has no parent")
-    })?;
-    match writable::probe_directory(parent) {
-        Ok(()) => Ok(path.to_owned()),
-        Err(error) if writable::access_denied(&error) => Ok(state.join("policy.json")),
-        Err(error) => Err(error.into()),
+    // A missing automatic policy must have the same identity for writable and
+    // read-only lanes, just like the queue. Existing installed policy stays put.
+    let policy = state.join("policy.json");
+    match writable::install_alias(path, &policy) {
+        Ok(()) => {}
+        Err(error) if writable::access_denied(&error) => {}
+        Err(error) => return Err(error.into()),
     }
+    Ok(policy)
 }
 
 fn ensure_policy(path: &std::path::Path, force: bool) -> Result<()> {
@@ -399,6 +396,7 @@ fn ensure_policy_with_discovery(
         )
         .join("locked-build/targets"),
     );
+    policy.target_root = policy.target_root.map(std::path::absolute).transpose()?;
     policy.real_cargo =
         search_path.and_then(|search_path| discover_real_cargo(search_path, current_exe));
     let parent = path.parent().ok_or_else(|| {
@@ -770,6 +768,57 @@ mod tests {
         }));
     }
 
+    /// Provenance: SWM-374. Trace: FR-011-AC-7
+    #[test]
+    fn writable_and_readonly_lanes_share_queue_and_generated_policy() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let shared = writable::private_directory(&root.path().join("shared"))?;
+        let ix = root.path().join("ix/locked-build");
+        let default_state = ix.join("state");
+        let default_policy = ix.join("policy.json");
+        let writable_state = writable::shared_state(&default_state, &shared)?;
+        let writable_policy = default_policy_path(&default_policy, &writable_state)?;
+        assert_eq!(writable_policy, shared.join("policy.json"));
+        std::fs::write(
+            &writable_policy,
+            br#"{"host":"fixture","capacity_units":1,"maximum_units":1}"#,
+        )?;
+        let first_store = runtime::open(&writable_state, &writable_policy)?;
+        let first = runtime::enqueue(
+            &first_store,
+            "first",
+            "SWM-374",
+            1,
+            0,
+            None,
+            &["true".into()],
+        )?;
+        std::fs::set_permissions(&ix, std::fs::Permissions::from_mode(0o500))?;
+        let readonly_state = writable::shared_state(&default_state, &shared);
+        let readonly_policy = default_policy_path(&default_policy, &shared);
+        let missing_policy = default_policy_path(&ix.join("absent-policy.json"), &shared);
+        std::fs::set_permissions(&ix, std::fs::Permissions::from_mode(0o700))?;
+        let readonly_state = readonly_state?;
+        assert_eq!(readonly_state, writable_state);
+        assert_eq!(missing_policy?, writable_policy);
+        let second_store = runtime::open(&readonly_state, &readonly_policy?)?;
+        let second = runtime::enqueue(
+            &second_store,
+            "second",
+            "SWM-374",
+            1,
+            0,
+            None,
+            &["true".into()],
+        )?;
+        assert!(first.0.ends_with(":r1"));
+        assert!(second.0.ends_with(":r2"));
+        assert_eq!(first_store.config_path, second_store.config_path);
+        let report = runtime::status(&second_store)?;
+        assert_eq!(report.requests.len(), 2);
+        Ok(())
+    }
+
     #[test]
     fn run_accepts_named_class_without_owner_or_ticket_flags() {
         let parsed = Cli::try_parse_from([
@@ -968,21 +1017,21 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.clone())
         })?;
-        assert_eq!(state, root.path().join("ix-home/locked-build/state"));
-        assert_eq!(config, root.path().join("ix-home/locked-build/policy.json"));
+        assert_eq!(state, writable::shared_root()?);
+        assert_eq!(config, state.join("policy.json"));
+        assert_eq!(
+            std::fs::read_link(root.path().join("ix-home/locked-build/state"))?,
+            state
+        );
         let (home_state, home_config) = resolve_paths(None, None, |name| match name {
             "HOME" => Some(home.clone()),
             "XDG_STATE_HOME" => Some("relative/state".into()),
             "XDG_CONFIG_HOME" => Some("relative/config".into()),
             _ => None,
         })?;
-        assert_eq!(home_state, home.join(".ix/locked-build/state"));
-        assert_eq!(home_config, home.join(".ix/locked-build/policy.json"));
+        assert_eq!(home_state, state);
+        assert_eq!(home_config, config);
 
-        let policy = root.path().join("policy.json");
-        std::fs::write(&policy, include_str!("../policy.example.json"))?;
-        let store = runtime::open(&state, &policy)?;
-        assert_eq!(store.path, state.canonicalize()?);
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
             std::fs::metadata(&state)?.permissions().mode() & 0o777,

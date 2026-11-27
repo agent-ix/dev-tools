@@ -22,15 +22,17 @@ files. Re-running the command leaves identical files untouched. Start a new
 shell after the first install.
 
 `IX_HOME`, when nonempty, replaces `~/.ix`, using the same resolution as Quoin.
-State lives in `~/.ix/locked-build/state` and generated targets in
+The default state path is `~/.ix/locked-build/state`, an owned symlink to the
+shared physical queue in `/tmp/locked-build-<uid>`. Generated targets default to
 `~/.ix/locked-build/targets`. Installation moves an existing policy from
 `~/.config/locked-build/policy.json`, preserving host settings. Conflicting
 old and new policies stop installation and leave both files intact.
 
-When the default state directory is unwritable, sandboxed lanes share
-`/tmp/locked-build-<uid>`, owned by that user with mode `0700`.
-Existing policy needs only read access. An absent policy whose directory is
-unwritable is generated in the shared fallback directory. Unwritable generated
+Writable and read-only lanes use that same queue, owned by the user with mode
+`0700`. If IX home is read-only, the runner uses the queue directly without
+creating the symlink. A conflicting existing state path stops the command.
+Existing policy needs only read access. An absent policy is generated in the
+shared directory, with an IX home symlink when writable. Unwritable generated
 target roots fall back to its `targets` directory. Explicit state and policy
 paths remain authoritative. `status` reports `state_path`; `policy show` prints
 the state and policy paths to stderr alongside policy JSON on stdout.

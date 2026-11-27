@@ -95,12 +95,16 @@ Installation moves `~/.config/locked-build/policy.json` into the IX home
 without regenerating its host settings. Differing policies at both paths
 stop installation and preserve both files.
 
-If default state access is denied or read-only, lanes of the same user share
-`/tmp/locked-build-<uid>`. This directory must be owned by the effective user,
+The default state path is an owned symlink to `/tmp/locked-build-<uid>`.
+Writable and read-only lanes of the same user share this physical queue.
+Read-only lanes access it directly when they cannot create the IX home alias.
+An existing state path other than that owned alias stops resolution, preserving
+its contents. The shared directory must be owned by the effective user,
 mode `0700`, and a directory rather than a symlink. Unsafe fallback directories
 cause an error; commands never bypass admission after a path failure.
-An existing policy is read without opening it for write. If absent and its
-parent is unwritable, the generated policy lives in the fallback state directory.
+An existing policy is read without opening it for write. If absent, generated
+policy lives in the shared state directory, with an IX home alias when writable.
+This keeps its canonical identity the same for writable and read-only lanes.
 An unwritable target root uses `<fallback>/targets`; explicit `CARGO_TARGET_DIR`
 remains authoritative. `status` includes `state_path`. `policy show` prints
 effective state and policy paths to stderr, keeping stdout as policy JSON.

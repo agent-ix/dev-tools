@@ -19,6 +19,42 @@ pub(crate) fn shared_root() -> Result<PathBuf> {
     private_directory(&Path::new("/tmp").join(format!("locked-build-{}", nix::unistd::geteuid())))
 }
 
+pub(crate) fn shared_state(default: &Path, shared: &Path) -> Result<PathBuf> {
+    match install_alias(default, shared) {
+        Ok(()) => {}
+        Err(error) if access_denied(&error) => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(shared.to_owned())
+}
+
+pub(crate) fn install_alias(default: &Path, shared: &Path) -> std::io::Result<()> {
+    let parent = default
+        .parent()
+        .ok_or_else(|| std::io::Error::other("alias has no parent"))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    match std::os::unix::fs::symlink(shared, default) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(default)?;
+            if metadata.uid() == nix::unistd::geteuid().as_raw()
+                && metadata.is_symlink()
+                && fs::read_link(default)? == shared
+            {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    "automatic state/policy alias conflicts with existing path; preserving it",
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn private_directory(path: &Path) -> Result<PathBuf> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
