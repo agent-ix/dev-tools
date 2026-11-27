@@ -918,6 +918,11 @@ mod tests {
             ticket: DEFAULT_CARGO_TICKET,
             in_lease: false,
         })?;
+        assert!(
+            command
+                .get_envs()
+                .all(|(key, _)| key != OsStr::new("CARGO_TARGET_DIR"))
+        );
         let actual: Vec<_> = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())

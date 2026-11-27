@@ -37,6 +37,8 @@ Use `locked-build policy show` to inspect the effective policy. `locked-build po
 
 Tool manifest entries without `version` require executable presence; `check-install` runs `--help` and passes only when it exits successfully.
 
+An explicit `CARGO_TARGET_DIR` is preserved by `locked-build run` and the Cargo shim, is excluded from per-lease trimming, and is cleaned by worktree hygiene.
+
 ## Install and verify a host
 
 From the dev-tools repository root, install the binary, measured policy, and
