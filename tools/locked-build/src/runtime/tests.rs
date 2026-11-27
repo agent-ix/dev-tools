@@ -3507,6 +3507,8 @@ fn concurrent_textfile_exports_leave_a_complete_document_without_scheduler_lock(
             .filter(|line| {
                 !line.starts_with("ix_build_export_timestamp_seconds{")
                     && !line.starts_with("ix_build_state_dir_free_bytes{")
+                    // Other lanes can start/end unleased compilers between scrapes.
+                    && !line.starts_with("ix_build_unleased_build_processes{")
             })
             .map(str::to_owned)
             .collect::<Vec<_>>()
