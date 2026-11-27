@@ -633,6 +633,38 @@
           "exp_samples": []
         }
       ]
+    },
+    {
+      "name": "missing_peak_observations_have_zero_coverage_and_alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_builds_total{host=\"draco\",class=\"point\",outcome=\"ok\"}",
+          "values": "0+2x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_build:memory_measurement_ratio",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ix_build:memory_measurement_ratio{host=\"draco\"}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "ALERTS{alertname=\"LockedBuildMemoryMeasurementLow\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"LockedBuildMemoryMeasurementLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
     }
   ]
 }

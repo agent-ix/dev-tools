@@ -97,7 +97,7 @@
         },
         {
           "record": "ix_build:memory_measurement_ratio",
-          "expr": "sum by (host) (rate(ix_build_memory_peak_bytes_count[15m])) / sum by (host) (rate(ix_build_builds_total[15m]))"
+          "expr": "(sum by (host) (rate(ix_build_memory_peak_bytes_count[15m])) or on (host) (0 * sum by (host) (rate(ix_build_builds_total[15m])))) / sum by (host) (rate(ix_build_builds_total[15m]))"
         },
         {
           "alert": "LockedBuildMustFixWaitHigh",
