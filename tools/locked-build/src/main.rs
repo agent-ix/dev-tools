@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod diagnostics;
 mod error;
 mod install;
 mod metrics;
@@ -176,10 +177,16 @@ fn execute(cli: Cli) -> Result<i32> {
     }
     if let Action::ErrorCodes { code } = &cli.command {
         let codes = match code {
-            Some(code) => vec![error::ErrorCode::from_code(code).ok_or_else(|| {
-                error::Error::new(error::ErrorCode::Request, "unknown error code")
-            })?],
-            None => error::ErrorCode::all().to_vec(),
+            Some(code) => vec![
+                locked_build::wire::Code::ALL
+                    .iter()
+                    .copied()
+                    .find(|item| item.as_str() == code)
+                    .ok_or_else(|| {
+                        error::Error::new(error::ErrorCode::Request, "unknown error code")
+                    })?,
+            ],
+            None => locked_build::wire::Code::ALL.to_vec(),
         };
         println!(
             "{}",
@@ -238,29 +245,17 @@ fn execute(cli: Cli) -> Result<i32> {
             )?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let worker = runtime::spawn_worker(&store, &id)?;
-            let (exit_code, reason) = runtime::wait(&store, &id, vec![worker])?;
-            if exit_code == 124
-                && let Some(reason) = reason
-                    .as_deref()
-                    .filter(|reason| reason.starts_with("hold_timeout:"))
-            {
-                eprintln!("request={} reason={reason}", id.0);
-            }
-            if reason.as_deref() == Some("rss_cap") {
-                let (cap, sample) = store.transaction(|state, _| {
-                    let request = state.find(&id)?;
-                    Ok((
-                        request.memory_cap_bytes,
-                        request
-                            .lease_record
-                            .as_ref()
-                            .and_then(|record| record.memory_sample.clone()),
-                    ))
-                })?;
-                eprintln!("{}", runtime::memory_cap_report(&id, cap, sample.as_ref()));
-            }
-            if reason.as_deref() == Some("supervision_lost") {
-                eprintln!("request={} reason=supervision_lost", id.0);
+            let (exit_code, _) = runtime::wait(&store, &id, vec![worker])?;
+            let failure = store.transaction(|state, _| {
+                let request = state.find(&id)?;
+                Ok(diagnostics::Failure {
+                    request_id: id.0.clone(),
+                    class: request.class.clone(),
+                    diagnostic: request.trace.diagnostic.clone(),
+                })
+            })?;
+            if failure.diagnostic.code.is_some() {
+                let _ = failure.emit(&store.path);
             }
             Ok(exit_code)
         }
@@ -341,9 +336,23 @@ fn lock_worktree_slot(state: &std::path::Path, repository: &str, slot: u32) -> R
 fn resolve_paths(
     state_flag: Option<&std::path::Path>,
     config_flag: Option<&std::path::Path>,
-    env: impl FnMut(&str) -> Option<PathBuf>,
+    mut env: impl FnMut(&str) -> Option<PathBuf>,
 ) -> Result<(PathBuf, PathBuf)> {
-    resolve_paths_with_shared(state_flag, config_flag, env, &writable::shared_root()?)
+    let state = state_flag
+        .map(PathBuf::from)
+        .or_else(|| env("LOCKED_BUILD_STATE"));
+    let config = config_flag
+        .map(PathBuf::from)
+        .or_else(|| env("LOCKED_BUILD_CONFIG"));
+    if let (Some(state), Some(config)) = (&state, &config) {
+        return Ok((state.clone(), config.clone()));
+    }
+    resolve_paths_with_shared(
+        state.as_deref(),
+        config.as_deref(),
+        env,
+        &writable::shared_root()?,
+    )
 }
 
 fn resolve_paths_with_shared(
@@ -706,20 +715,57 @@ fn main() {
         let code = match cargo_shim(&arguments) {
             Ok(code) => code,
             Err(error) => {
-                eprintln!("{}: {}", error.code.as_str(), error.message);
+                emit_error(&error, None);
                 2
             }
         };
         std::process::exit(code);
     }
-    let code = match execute(Cli::parse()) {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.use_stderr() => {
+            emit_error(
+                &error::Error::new(
+                    error::ErrorCode::Request,
+                    format!("invalid command line: {:?}", error.kind()),
+                ),
+                None,
+            );
+            std::process::exit(2);
+        }
+        Err(error) => {
+            let _ = error.print();
+            std::process::exit(0);
+        }
+    };
+    let state = cli.state.clone();
+    let code = match execute(cli) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("{}: {}", error.code.as_str(), error.message);
+            emit_error(&error, state.as_deref());
             2
         }
     };
     std::process::exit(code);
+}
+
+fn emit_error(error: &error::Error, explicit_state: Option<&std::path::Path>) {
+    let id = format!(
+        "unadmitted-{}-{}",
+        std::process::id(),
+        runtime::now_ms().unwrap_or(0)
+    );
+    let failure = diagnostics::unscoped(error, id);
+    let path = explicit_state.map(PathBuf::from).or_else(|| {
+        resolve_paths(None, None, |name| std::env::var_os(name).map(PathBuf::from))
+            .ok()
+            .map(|paths| paths.0)
+    });
+    if let Some(path) = path {
+        let _ = failure.emit(&path);
+    } else if let Some(message) = failure.diagnostic.message {
+        eprintln!("{message}");
+    }
 }
 
 #[cfg(test)]

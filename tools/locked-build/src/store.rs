@@ -107,7 +107,7 @@ impl Store {
                 config_path: self.config_path.clone(),
                 host: config.host.clone(),
                 boot_time: sysinfo::System::boot_time(),
-                boot_id: crate::process::boot_id()?,
+                boot_id: crate::process::boot_id(),
                 next_sequence: 1,
                 next_event: 1,
                 pruned_events: 0,
@@ -132,7 +132,7 @@ impl Store {
         let metrics_before = serde_json::to_vec(&state.metrics)?;
         let metrics_identity_changed = state.metrics.bind_store(&state.store_id);
         if state.rebooted(
-            crate::process::boot_id()?.as_deref(),
+            crate::process::boot_id().as_deref(),
             sysinfo::System::boot_time(),
         ) {
             let last_host_poll_at_ms = state
@@ -148,6 +148,36 @@ impl Store {
             )?;
         }
         let (now, clock) = read_clock()?;
+        // Existing terminal records also expose the new diagnostic contract.
+        // Unknown historical measurements stay explicitly unavailable.
+        let mut terminal_diagnostics = std::collections::BTreeMap::new();
+        for request in state
+            .requests
+            .iter_mut()
+            .filter(|request| request.phase.terminal())
+        {
+            if request.trace.diagnostic.code.is_none()
+                && request.phase != crate::model::Phase::Succeeded
+            {
+                request.trace.diagnostic = crate::diagnostics::for_request(
+                    request,
+                    &config,
+                    request.ended_clock_ms.unwrap_or(clock),
+                );
+            }
+            terminal_diagnostics.insert(request.id.0.clone(), request.trace.diagnostic.clone());
+        }
+        for event in state
+            .events
+            .iter_mut()
+            .filter(|event| event.state.terminal())
+        {
+            if event.trace.diagnostic.code.is_none()
+                && let Some(diagnostic) = terminal_diagnostics.get(&event.request_id.0)
+            {
+                event.trace.diagnostic = diagnostic.clone();
+            }
+        }
         let mut processes = None;
         state.metrics.expire_stale_block(
             &state.requests,

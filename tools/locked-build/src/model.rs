@@ -81,6 +81,9 @@ pub(crate) struct CommandOutcome {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseRecord {
+    /// Observed kernel OOM-kill counter for this command's memory scope.
+    #[serde(default)]
+    pub oom_kill_count: u64,
     /// Identity of the launched command; memory accounting starts here.
     #[serde(default)]
     pub command: Option<ProcessIdentity>,
@@ -168,8 +171,19 @@ pub enum MemoryEnforcement {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct Request {
+    #[serde(default)]
+    pub supervision_detail: Option<String>,
+    #[serde(default, flatten)]
+    pub trace: locked_build::wire::RequestTrace,
+    #[serde(default)]
+    pub command_started_clock_ms: Option<u64>,
+    #[serde(default)]
+    pub blocked_at_clock_ms: Option<u64>,
+    #[serde(default)]
+    pub active_blocked_reasons: Vec<String>,
+    #[serde(default)]
+    pub measured_memory_bytes: Option<u64>,
     /// Linux PID namespace in which worker/watchdog IDs are meaningful.
     #[serde(default)]
     pub pid_namespace: Option<String>,
@@ -185,6 +199,12 @@ pub(crate) struct Request {
     /// Memory limit reserved for this lease when policy configures one.
     #[serde(default)]
     pub memory_cap_bytes: Option<u64>,
+    /// Admission reservation, independent of the enforced hard cap.
+    #[serde(default)]
+    pub memory_reservation_bytes: Option<u64>,
+    /// Policy source selected with the recorded hard cap, before policy edits.
+    #[serde(default)]
+    pub memory_limit_key: Option<String>,
     /// Cargo job count paired with the reserved memory lease.
     #[serde(default)]
     pub memory_cargo_jobs: Option<u32>,
@@ -258,8 +278,16 @@ where
 
 /// Stable transition evidence; command arguments and environment are excluded.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct Event {
+    /// Repairs a previously published outcome without counting a new attempt.
+    #[serde(default)]
+    pub correction: bool,
+    /// Queue/diagnostic fields shared with status consumers.
+    #[serde(default, flatten)]
+    pub trace: locked_build::wire::RequestTrace,
+    /// transition, blocked, command_started, or refused.
+    #[serde(default = "transition_kind")]
+    pub kind: String,
     /// Version of this event schema.
     pub schema_version: u32,
     /// Unique transition ID in this store.
@@ -295,14 +323,113 @@ pub struct Event {
     pub reason: Option<String>,
 }
 
+fn transition_kind() -> String {
+    "transition".to_owned()
+}
+
+impl Request {
+    pub(crate) fn reservation_bytes(&self) -> u64 {
+        self.memory_reservation_bytes
+            .or(self.memory_cap_bytes)
+            .unwrap_or(0)
+    }
+    pub(crate) fn trace_snapshot(&self, clock: u64) -> locked_build::wire::RequestTrace {
+        let mut trace = self.trace.clone();
+        let end = self.ended_clock_ms.unwrap_or(clock);
+        trace.queued_at_ms = Some(self.enqueued_at_ms);
+        trace.admitted_at_ms = self.started_at_ms;
+        trace.finished_at_ms = self.ended_at_ms;
+        trace.queued_seconds = self
+            .started_clock_ms
+            .unwrap_or(end)
+            .saturating_sub(self.enqueued_clock_ms) as f64
+            / 1000.0;
+        trace.admitted_seconds = self.started_clock_ms.map_or(0.0, |start| {
+            self.command_started_clock_ms
+                .unwrap_or(end)
+                .saturating_sub(start) as f64
+                / 1000.0
+        });
+        trace.running_seconds = self
+            .command_started_clock_ms
+            .map_or(0.0, |start| end.saturating_sub(start) as f64 / 1000.0);
+        trace.lifecycle_state = if self.phase.terminal() && self.trace.lifecycle_state == "refused"
+        {
+            "refused"
+        } else {
+            match self.phase {
+                Phase::Queued => "queued",
+                Phase::Running if self.command_started_clock_ms.is_none() => "admitted",
+                Phase::Running => "running",
+                Phase::Succeeded => "succeeded",
+                Phase::Failed => "failed",
+                Phase::Cancelled => "cancelled",
+                Phase::TimedOut => "timed_out",
+            }
+        }
+        .to_owned();
+        trace.position = if self.phase == Phase::Queued {
+            trace.position
+        } else {
+            None
+        };
+        trace.granted_jobs = self
+            .lease_record
+            .as_ref()
+            .and_then(|lease| lease.cargo_build_jobs);
+        trace.granted_memory_bytes = self.started_at_ms.and(self.memory_cap_bytes);
+        trace.granted_memory_reservation_bytes = self
+            .started_at_ms
+            .and(self.memory_reservation_bytes.or(self.memory_cap_bytes));
+        if let Some(last) = self.blocked_at_clock_ms {
+            for reason in &mut trace.blocked_reasons {
+                if self.active_blocked_reasons.contains(&reason.reason) {
+                    reason.seconds += end.saturating_sub(last) as f64 / 1000.0;
+                }
+            }
+        }
+        trace
+    }
+
+    pub(crate) fn observe_blocks(
+        &mut self,
+        reasons: Vec<locked_build::wire::BlockObservation>,
+        clock: u64,
+    ) -> bool {
+        let changed = self.active_blocked_reasons
+            != reasons.iter().map(|r| r.reason.clone()).collect::<Vec<_>>();
+        self.trace.blocked_reasons = self.trace_snapshot(clock).blocked_reasons;
+        self.active_blocked_reasons.clear();
+        for observation in reasons {
+            self.active_blocked_reasons.push(observation.reason.clone());
+            if let Some(old) = self
+                .trace
+                .blocked_reasons
+                .iter_mut()
+                .find(|r| r.reason == observation.reason)
+            {
+                old.value = observation.value;
+                old.limit = observation.limit;
+            } else {
+                self.trace.blocked_reasons.push(observation);
+            }
+        }
+        self.trace
+            .blocked_reasons
+            .sort_by(|a, b| a.reason.cmp(&b.reason));
+        self.blocked_at_clock_ms = Some(clock);
+        changed
+    }
+}
+
 impl State {
     pub(crate) fn rebooted(&self, boot_id: Option<&str>, boot_time: u64) -> bool {
         match (self.boot_id.as_deref(), boot_id) {
             (Some(previous), Some(current)) => previous != current,
-            // Adopt a stable Linux identity for legacy state without declaring
-            // live processes dead because a sandbox reported a different btime.
             (None, Some(_)) => false,
-            (_, None) => self.boot_time != boot_time,
+            (_, None) => {
+                self.boot_time != 0 && boot_time != 0 && self.boot_time.abs_diff(boot_time) > 120
+            }
         }
     }
     pub(crate) fn validate(&self, _config: &Config) -> Result<()> {
@@ -391,12 +518,12 @@ impl State {
             .fold(0_u32, |sum, request| sum.saturating_add(request.units))
     }
 
-    fn memory_used(&self, _config: &Config) -> u64 {
+    pub(crate) fn memory_used(&self, _config: &Config) -> u64 {
         self.requests
             .iter()
             .filter(|request| request.phase == Phase::Running)
             .fold(0_u64, |sum, request| {
-                sum.saturating_add(request.memory_cap_bytes.unwrap_or(0))
+                sum.saturating_add(request.reservation_bytes())
             })
     }
 
@@ -407,12 +534,25 @@ impl State {
         now: u64,
         clock: u64,
     ) -> Result<()> {
+        let snapshot = self.find(id)?.trace_snapshot(clock);
+        self.find_mut(id)?.trace = snapshot;
+        if self.find(id)?.phase == Phase::Queued {
+            let position = self.queue_position(id, config, clock);
+            self.find_mut(id)?.trace.position = position;
+        }
+        // The stored trace now includes open blocking time through this clock.
+        if self.find(id)?.blocked_at_clock_ms.is_some() {
+            self.find_mut(id)?.blocked_at_clock_ms = Some(clock);
+        }
         let request = self.find(id)?;
         let monotonic_wait = request
             .started_clock_ms
             .unwrap_or(clock)
             .saturating_sub(request.enqueued_clock_ms);
         let event = Event {
+            correction: false,
+            trace: request.trace_snapshot(clock),
+            kind: transition_kind(),
             schema_version: 1,
             event_id: format!("{}:e{}", self.store_id, self.next_event),
             request_id: id.clone(),
@@ -448,6 +588,13 @@ impl State {
                     && request.stop.is_none()
             })
         };
+        // Urgent work always wins over lower classes, even after aging.
+        if let Some(urgent) = feasible()
+            .filter(|r| r.class == "must-fix")
+            .min_by_key(|r| r.sequence)
+        {
+            return Some(urgent);
+        }
         let reservation_ms = (u64::from(config.max_priority()) + 1).saturating_mul(config.aging_ms);
         if let Some(reserved) = feasible()
             .filter(|request| clock.saturating_sub(request.enqueued_clock_ms) >= reservation_ms)
@@ -457,9 +604,11 @@ impl State {
         }
         feasible().max_by(|left, right| {
             let priority = |request: &Request| {
-                u64::from(request.priority).saturating_add(
-                    clock.saturating_sub(request.enqueued_clock_ms) / config.aging_ms,
-                )
+                u64::from(request.priority)
+                    .saturating_add(
+                        clock.saturating_sub(request.enqueued_clock_ms) / config.aging_ms,
+                    )
+                    .min(u64::from(config.max_priority()))
             };
             priority(left)
                 .cmp(&priority(right))
@@ -483,7 +632,21 @@ impl State {
             return Ok(Some("no_eligible_request"));
         };
         if next.id != *id {
-            return Ok(Some("fifo_or_priority_reservation"));
+            // Backfill only memory-blocked heads before their bounded reservation.
+            // Capacity remains charged to every admitted lease; never overcommit.
+            let reservation_ms =
+                (u64::from(config.max_priority()) + 1).saturating_mul(config.aging_ms);
+            let free = config
+                .memory_budget_bytes
+                .unwrap_or(0)
+                .saturating_sub(self.memory_used(config));
+            let backfill = config.memory_admission == MemoryAdmissionMode::LeaseAccounted
+                && next.reservation_bytes() > free
+                && clock.saturating_sub(next.enqueued_clock_ms) < reservation_ms
+                && request.reservation_bytes() <= free;
+            if !backfill {
+                return Ok(Some("fifo_or_priority_reservation"));
+            }
         }
         let used = self.used();
         if u64::from(used) + u64::from(request.units) > u64::from(config.capacity_units) {
@@ -497,12 +660,132 @@ impl State {
         }
         if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
             let budget = config.memory_budget_bytes.unwrap_or(0);
-            let cap = request.memory_cap_bytes.unwrap_or(0);
+            let cap = request.reservation_bytes();
             if self.memory_used(config).saturating_add(cap) > budget {
                 return Ok(Some("memory_budget"));
             }
         }
         Ok(None)
+    }
+
+    pub(crate) fn queue_position(
+        &self,
+        id: &RequestId,
+        config: &Config,
+        clock: u64,
+    ) -> Option<u32> {
+        self.queue_positions(config, clock).get(&id.0).copied()
+    }
+
+    pub(crate) fn queue_positions(
+        &self,
+        config: &Config,
+        clock: u64,
+    ) -> std::collections::BTreeMap<String, u32> {
+        let mut queued: Vec<_> = self
+            .requests
+            .iter()
+            .filter(|r| r.phase == Phase::Queued && r.stop.is_none())
+            .collect();
+        let score = |r: &Request| {
+            u64::from(r.priority)
+                .saturating_add(clock.saturating_sub(r.enqueued_clock_ms) / config.aging_ms)
+                .min(u64::from(config.max_priority()))
+        };
+        queued.sort_by(|a, b| {
+            (b.class == "must-fix")
+                .cmp(&(a.class == "must-fix"))
+                .then_with(|| score(b).cmp(&score(a)))
+                .then_with(|| a.sequence.cmp(&b.sequence))
+        });
+        if let Some(head) = self.next(config, clock)
+            && let Some(index) = queued.iter().position(|r| r.id == head.id)
+        {
+            let first = queued.remove(index);
+            queued.insert(0, first);
+        }
+        queued
+            .iter()
+            .enumerate()
+            .filter_map(|(index, r)| {
+                u32::try_from(index + 1)
+                    .ok()
+                    .map(|position| (r.id.0.clone(), position))
+            })
+            .collect()
+    }
+
+    pub(crate) fn block_observations(
+        &self,
+        id: &RequestId,
+        config: &Config,
+        sample: Option<&HostSample>,
+        now: u64,
+        clock: u64,
+    ) -> Result<Vec<locked_build::wire::BlockObservation>> {
+        let request = self.find(id)?;
+        let mut reasons = Vec::new();
+        let mut add = |reason: &str, value: f64, limit: f64| {
+            reasons.push(locked_build::wire::BlockObservation {
+                reason: reason.to_owned(),
+                value,
+                limit,
+                seconds: 0.0,
+            })
+        };
+        let units = u64::from(self.used()) + u64::from(request.units);
+        if units > u64::from(config.capacity_units) {
+            add("units", units as f64, f64::from(config.capacity_units));
+        }
+        if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
+            let value = self
+                .memory_used(config)
+                .saturating_add(request.reservation_bytes());
+            let limit = config.memory_budget_bytes.unwrap_or(0);
+            if value > limit {
+                add("memory_budget", value as f64, limit as f64);
+            }
+        }
+        if let Some(sample) = sample.filter(|sample| {
+            sample.block_reason(config, now, self.used(), request.units)
+                != Some("host_sample_invalid_or_stale")
+        }) {
+            if sample.load_one >= config.maximum_load {
+                add("load", sample.load_one, config.maximum_load);
+            }
+            if sample.disk_available_bytes < config.disk_reserve_bytes {
+                add(
+                    "disk",
+                    sample.disk_available_bytes as f64,
+                    config.disk_reserve_bytes as f64,
+                );
+            }
+            if config.memory_admission == MemoryAdmissionMode::LiveAvailable {
+                let limit = config
+                    .memory_reserve_bytes
+                    .saturating_add(config.memory_per_unit_bytes.saturating_mul(units));
+                if sample.memory_available_bytes < limit {
+                    add(
+                        "memory_reserve",
+                        sample.memory_available_bytes as f64,
+                        limit as f64,
+                    );
+                }
+            }
+        } else {
+            add("telemetry_unavailable", 0.0, 1.0);
+        }
+        if self.admission_reason(id, config, sample, now, clock)?
+            == Some("fifo_or_priority_reservation")
+        {
+            add(
+                "priority_reservation",
+                f64::from(self.queue_position(id, config, clock).unwrap_or(1)),
+                1.0,
+            );
+        }
+        reasons.sort_by(|a, b| a.reason.cmp(&b.reason));
+        Ok(reasons)
     }
 
     pub(crate) fn finish(
@@ -522,11 +805,21 @@ impl State {
             reason,
         } = completion;
         let request = self.find_mut(id)?;
+        request.observe_blocks(Vec::new(), clock);
         request.phase = match request.stop {
             Some(StopReason::Cancelled) => Phase::Cancelled,
             Some(StopReason::TimedOut) => Phase::TimedOut,
             Some(StopReason::MemoryCap) => Phase::Failed,
-            None if code == Some(0) && signal.is_none() && reason.is_none() => Phase::Succeeded,
+            None if code == Some(0)
+                && signal.is_none()
+                && (reason.is_none()
+                    || matches!(
+                        reason,
+                        Some("supervisor_lost" | "supervision_lost" | "supervision_degraded")
+                    )) =>
+            {
+                Phase::Succeeded
+            }
             None => Phase::Failed,
         };
         request.exit_code = code;
@@ -538,7 +831,13 @@ impl State {
                 StopReason::TimedOut => hold_timeout_reason(config.hold_ms),
                 StopReason::MemoryCap => "rss_cap".to_owned(),
             })
-            .or_else(|| reason.map(str::to_owned))
+            .or_else(|| {
+                if request.phase == Phase::Succeeded && reason.is_some() {
+                    Some("supervision_degraded".to_owned())
+                } else {
+                    reason.map(str::to_owned)
+                }
+            })
             .or_else(|| {
                 if signal.is_some() {
                     Some("command_signaled".to_owned())
@@ -550,6 +849,7 @@ impl State {
             });
         request.ended_at_ms = Some(now);
         request.ended_clock_ms = Some(clock);
+        request.trace.diagnostic = crate::diagnostics::for_request(request, config, clock);
         self.event(id, config, now, clock)
     }
 }

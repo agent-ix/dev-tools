@@ -5,6 +5,20 @@ type: readme
 
 locked-build queues shared-host builds and starts each command when its resource lease is admitted.
 
+Refusals and abnormal completions report stable `LB_*` codes with the request,
+policy limit, measurement and affected process in one stderr line. The same
+diagnostic appears in status and the event ledger. Queue traces include rank,
+resource blockers, per-state timing and requested/granted jobs and memory;
+Prometheus counters and histograms summarize these by host and class. See the
+[operator skill](../../skills/locked-build/SKILL.md) for the code catalog and
+metric labels.
+
+Memory-blocked heads permit fitting backfill until their bounded aging
+reservation. Must-fix requests precede aged lower classes; admission never
+overcommits the memory budget. Queued status includes required memory and free
+budget. Linux reboot checks use the kernel boot UUID, macOS uses
+`kern.boottime`, and timestamp-only fallback ignores jitter up to 120 seconds.
+
 ## Install all host admission tools
 
 From the repository root, install locked-build, the Cargo shim, and a measured
@@ -101,11 +115,20 @@ locked-build cancel REQUEST-ID
 not started. `running` means the request holds a lease and its command has
 started. Status includes the request id needed by `cancel`.
 
-In the default `lease_accounted` mode, Cargo leases charge the resolved `-j`
-count times 6 GB per job in generated policies. Existing policy estimates remain
-configured. Non-Cargo commands charge their requested units times the estimate.
-The scheduler admits a command only while the sum of running leases stays
-within the measured memory budget.
+In the default `lease_accounted` mode, Cargo leases reserve the resolved
+parallelism times `memory_reserve_per_job_bytes` (default 3 GB) against the
+host budget. Their enforced hard cap uses `memory_limit_per_job_bytes`
+(default 8 GB) independently. Non-Cargo commands use requested units.
+Reservations can be overridden per class with `memory_reserve_per_job_by_class`;
+`memory_per_job_by_class` overrides hard limits. A `-j2` command reserves 6 GB
+and can peak at 8.3 GB under its 16 GB cap. Admission never exceeds the sum of
+reserved memory allowed by the measured budget.
+
+Drain queued and running leases before this upgrade. Old binaries reject the
+new strict fields; `install-tools` refuses an active queue and preserves a
+backup of the old combined policy when migrating to separate reservation and
+hard-limit settings. See the [operator skill](../../skills/locked-build/SKILL.md)
+for migration and PID-namespace recovery details.
 
 If memory enforcement kills a command for exceeding its cap, status reports
 `rss_cap`, including a scope whose `memory.events` reports `oom_kill`.

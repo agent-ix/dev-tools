@@ -7,6 +7,66 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, ErrorCode, Result};
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostNamespace {
+    pub boot_id: String,
+    pub pid_namespace: String,
+}
+
+pub(crate) fn install_host_namespace(shared: &Path) -> Result<()> {
+    let (Some(boot_id), Some(pid_namespace)) =
+        (crate::process::boot_id(), crate::process::pid_namespace()?)
+    else {
+        return Ok(());
+    };
+    let path = shared.join("host-namespace.json");
+    let marker = HostNamespace {
+        boot_id,
+        pid_namespace,
+    };
+    publish_host_namespace(&path, &marker)
+}
+
+fn publish_host_namespace(path: &Path, marker: &HostNamespace) -> Result<()> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(path.with_extension("lock"))?;
+    lock.lock()?;
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let existing: HostNamespace = serde_json::from_slice(&bytes)?;
+            if existing.boot_id == marker.boot_id {
+                return Ok(());
+            }
+            publish_file(path, &serde_json::to_vec(marker)?, true)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            publish_file(path, &serde_json::to_vec(marker)?, false)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+pub(crate) fn is_installed_host_namespace(
+    shared: &Path,
+    boot_id: Option<&str>,
+    namespace: Option<&str>,
+) -> bool {
+    fs::read(shared.join("host-namespace.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<HostNamespace>(&bytes).ok())
+        .is_some_and(|marker| {
+            Some(marker.boot_id.as_str()) == boot_id
+                && Some(marker.pid_namespace.as_str()) == namespace
+        })
+}
+
 pub(crate) fn host_root(home: Option<&Path>) -> PathBuf {
     home.map_or_else(|| PathBuf::from(".ix"), |home| home.join(".ix"))
         .join("locked-build")
@@ -133,6 +193,50 @@ pub(crate) fn access_denied(error: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trace: FR-005-AC-4, FR-011-AC-7
+    #[test]
+    fn host_namespace_marker_is_stable_within_a_boot() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("host-namespace.json");
+        publish_host_namespace(
+            &path,
+            &HostNamespace {
+                boot_id: "boot-a".into(),
+                pid_namespace: "pid:[host]".into(),
+            },
+        )?;
+        publish_host_namespace(
+            &path,
+            &HostNamespace {
+                boot_id: "boot-a".into(),
+                pid_namespace: "pid:[sandbox]".into(),
+            },
+        )?;
+        assert!(is_installed_host_namespace(
+            root.path(),
+            Some("boot-a"),
+            Some("pid:[host]")
+        ));
+        assert!(!is_installed_host_namespace(
+            root.path(),
+            Some("boot-a"),
+            Some("pid:[sandbox]")
+        ));
+        publish_host_namespace(
+            &path,
+            &HostNamespace {
+                boot_id: "boot-b".into(),
+                pid_namespace: "pid:[new-host]".into(),
+            },
+        )?;
+        assert!(is_installed_host_namespace(
+            root.path(),
+            Some("boot-b"),
+            Some("pid:[new-host]")
+        ));
+        Ok(())
+    }
 
     /// Provenance: SWM-380. Trace: FR-011-AC-7
     #[test]

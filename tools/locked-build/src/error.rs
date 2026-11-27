@@ -16,35 +16,12 @@ pub enum ErrorCode {
     Request,
 }
 
-impl ErrorCode {
-    /// Stable code spelling.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Io => "io",
-            Self::Configuration => "configuration",
-            Self::State => "state",
-            Self::Request => "request",
-        }
-    }
-
-    /// Complete code catalog.
-    pub const fn all() -> &'static [Self] {
-        &[Self::Io, Self::Configuration, Self::State, Self::Request]
-    }
-
-    /// Decode a stable spelling.
-    pub fn from_code(value: &str) -> Option<Self> {
-        Self::all()
-            .iter()
-            .copied()
-            .find(|code| code.as_str() == value)
-    }
-}
-
 /// Typed failure with deterministic optional context.
 #[derive(Debug, thiserror::Error)]
 #[error("{code:?}: {message}")]
 pub struct Error {
+    /// Structured refusal, when a request identity was allocated.
+    pub(crate) failure: Option<Box<crate::diagnostics::Failure>>,
     /// Machine-readable classification.
     pub code: ErrorCode,
     /// Human-readable diagnostic without command arguments or environment.
@@ -56,10 +33,16 @@ pub struct Error {
 impl Error {
     pub(crate) fn new(code: ErrorCode, message: impl Into<Box<str>>) -> Self {
         Self {
+            failure: None,
             code,
             message: message.into(),
             context: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn with_failure(mut self, failure: crate::diagnostics::Failure) -> Self {
+        self.failure = Some(Box::new(failure));
+        self
     }
 }
 

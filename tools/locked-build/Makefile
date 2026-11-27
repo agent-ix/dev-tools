@@ -24,7 +24,8 @@ install:
 	$(CARGO) install --locked --path . --root $(PREFIX)
 
 install-tools:
-	$(CARGO) run --locked --release -j 4 -- install-tools
+	$(CARGO) install --locked --path . --root $(PREFIX) -j 4
+	$(PREFIX)/bin/locked-build install-tools
 
 clean:
 	$(CARGO) clean

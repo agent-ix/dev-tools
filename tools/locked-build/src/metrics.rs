@@ -160,6 +160,12 @@ impl BlockReason {
 /// Persisted scheduler counters. Maps make additions backward compatible.
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub(crate) struct MetricsState {
+    #[serde(default)]
+    requests: BTreeMap<String, BTreeMap<String, u64>>,
+    #[serde(default)]
+    terminations: BTreeMap<String, BTreeMap<String, u64>>,
+    #[serde(default)]
+    request_blocked_seconds: BTreeMap<String, BTreeMap<String, f64>>,
     /// Store identity to prevent counters from a replaced state directory from being reused.
     #[serde(default)]
     store_id: String,
@@ -204,6 +210,104 @@ struct Histogram {
 }
 
 impl MetricsState {
+    pub(crate) fn snapshot(
+        &self,
+        state: &State,
+        clock: u64,
+    ) -> locked_build::wire::MetricsSnapshot {
+        use locked_build::wire::{
+            BlockedCounter, BucketBound, Code, CodeCounter, HistogramBucket, MetricsSnapshot,
+            OutcomeCounter, QueueHistogram,
+        };
+        let mut snapshot = MetricsSnapshot::default();
+        let mut blocked = self.request_blocked_seconds.clone();
+        for request in state.requests.iter().filter(|r| !r.phase.terminal()) {
+            let class = PriorityClass::from_class(&request.class).label();
+            for reason in request.trace_snapshot(clock).blocked_reasons {
+                *blocked
+                    .entry(class.to_owned())
+                    .or_default()
+                    .entry(reason.reason)
+                    .or_default() += reason.seconds;
+            }
+        }
+        const REASONS: [&str; 7] = [
+            "memory_budget",
+            "units",
+            "load",
+            "disk",
+            "priority_reservation",
+            "memory_reserve",
+            "telemetry_unavailable",
+        ];
+        for class in PriorityClass::ALL {
+            let label = class.label();
+            for outcome in ["ok", "failed", "cancelled", "timed_out", "refused"] {
+                let value = self
+                    .requests
+                    .get(label)
+                    .and_then(|r| r.get(outcome))
+                    .copied()
+                    .unwrap_or(0);
+                snapshot.ix_build_requests_total.push(OutcomeCounter {
+                    host: state.host.clone(),
+                    class: label.to_owned(),
+                    outcome: outcome.to_owned(),
+                    value,
+                });
+            }
+            for code in Code::ALL {
+                let value = self
+                    .terminations
+                    .get(label)
+                    .and_then(|r| r.get(code.as_str()))
+                    .copied()
+                    .unwrap_or(0);
+                snapshot.ix_build_terminations_total.push(CodeCounter {
+                    host: state.host.clone(),
+                    class: label.to_owned(),
+                    code,
+                    value,
+                });
+            }
+            for reason in REASONS {
+                let value = blocked
+                    .get(label)
+                    .and_then(|r| r.get(reason))
+                    .copied()
+                    .unwrap_or(0.0);
+                snapshot
+                    .ix_build_blocked_seconds_total
+                    .push(BlockedCounter {
+                        host: state.host.clone(),
+                        class: label.to_owned(),
+                        reason: reason.to_owned(),
+                        value,
+                    });
+            }
+            let histogram = self.queue_wait.get(label).cloned().unwrap_or_default();
+            let mut buckets: Vec<_> = BUCKETS_SECONDS
+                .iter()
+                .map(|bound| HistogramBucket {
+                    le: BucketBound::Seconds(*bound),
+                    value: histogram.buckets.get(bound).copied().unwrap_or(0),
+                })
+                .collect();
+            buckets.push(HistogramBucket {
+                le: BucketBound::Infinity("+Inf".to_owned()),
+                value: histogram.count,
+            });
+            snapshot.ix_build_queue_wait_seconds.push(QueueHistogram {
+                host: state.host.clone(),
+                class: label.to_owned(),
+                buckets,
+                sum: histogram.sum_ms as f64 / 1000.0,
+                count: histogram.count,
+            });
+        }
+        snapshot
+    }
+
     pub(crate) fn bind_store(&mut self, store_id: &str) -> bool {
         if self.store_id.is_empty() {
             self.store_id = store_id.to_owned();
@@ -235,6 +339,10 @@ impl MetricsState {
             .collect();
         ordered.sort_by_key(|(sequence, _)| *sequence);
         for (sequence, event) in ordered {
+            if event.correction || event.kind == "blocked" || event.kind == "command_started" {
+                self.last_event_sequence = sequence;
+                continue;
+            }
             if event.state == crate::model::Phase::Running {
                 let pre_reboot = self
                     .pre_reboot_wait_ms
@@ -244,6 +352,39 @@ impl MetricsState {
             } else if let Some(outcome) = Outcome::from_event(event) {
                 self.pre_reboot_wait_ms.remove(&event.request_id.0);
                 self.record_terminal(&event.class, outcome)?;
+                let label = if event.kind == "refused" {
+                    "refused"
+                } else {
+                    match event.state {
+                        crate::model::Phase::Succeeded => "ok",
+                        crate::model::Phase::Cancelled => "cancelled",
+                        crate::model::Phase::TimedOut => "timed_out",
+                        _ => "failed",
+                    }
+                };
+                let class = PriorityClass::from_class(&event.class).label();
+                *self
+                    .requests
+                    .entry(class.to_owned())
+                    .or_default()
+                    .entry(label.to_owned())
+                    .or_default() += 1;
+                if let Some(code) = event.trace.diagnostic.code {
+                    *self
+                        .terminations
+                        .entry(class.to_owned())
+                        .or_default()
+                        .entry(code.as_str().to_owned())
+                        .or_default() += 1;
+                }
+                for block in &event.trace.blocked_reasons {
+                    *self
+                        .request_blocked_seconds
+                        .entry(class.to_owned())
+                        .or_default()
+                        .entry(block.reason.clone())
+                        .or_default() += block.seconds;
+                }
             }
             self.last_event_sequence = sequence;
         }
@@ -416,6 +557,45 @@ impl MetricsState {
     ) -> Result<String> {
         let mut output = String::new();
         let host = escape_label(&state.host);
+        let snapshot = self.snapshot(state, clock_ms);
+        metric_header(
+            &mut output,
+            "ix_build_requests_total",
+            "counter",
+            "Completed and refused requests by outcome.",
+        );
+        for row in snapshot.ix_build_requests_total {
+            output.push_str(&format!(
+                "ix_build_requests_total{{host=\"{host}\",class=\"{}\",outcome=\"{}\"}} {}\n",
+                row.class, row.outcome, row.value
+            ));
+        }
+        metric_header(
+            &mut output,
+            "ix_build_terminations_total",
+            "counter",
+            "Abnormal requests by stable error code.",
+        );
+        for row in snapshot.ix_build_terminations_total {
+            output.push_str(&format!(
+                "ix_build_terminations_total{{host=\"{host}\",class=\"{}\",code=\"{}\"}} {}\n",
+                row.class,
+                row.code.as_str(),
+                row.value
+            ));
+        }
+        metric_header(
+            &mut output,
+            "ix_build_blocked_seconds_total",
+            "counter",
+            "Per-request blocked seconds by class and reason; overlapping reasons count independently.",
+        );
+        for row in snapshot.ix_build_blocked_seconds_total {
+            output.push_str(&format!(
+                "ix_build_blocked_seconds_total{{host=\"{host}\",class=\"{}\",reason=\"{}\"}} {}\n",
+                row.class, row.reason, row.value
+            ));
+        }
         metric_header(
             &mut output,
             "ix_build_queue_depth",
@@ -677,6 +857,12 @@ mod tests {
 
     fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
         Request {
+            supervision_detail: None,
+            trace: Default::default(),
+            command_started_clock_ms: None,
+            blocked_at_clock_ms: None,
+            active_blocked_reasons: Vec::new(),
+            measured_memory_bytes: None,
             pid_namespace: None,
             id: crate::model::RequestId(format!("store:r{sequence}")),
             sequence,
@@ -686,6 +872,8 @@ mod tests {
             priority: 0,
             class: "periodic".to_owned(),
             memory_cap_bytes: None,
+            memory_reservation_bytes: None,
+            memory_limit_key: None,
             memory_cargo_jobs: None,
             memory_rust_test_threads: None,
             memory_parallelism: None,
@@ -749,6 +937,9 @@ mod tests {
         assert_eq!(
             names,
             [
+                "ix_build_requests_total",
+                "ix_build_terminations_total",
+                "ix_build_blocked_seconds_total",
                 "ix_build_queue_depth",
                 "ix_build_lane_running",
                 "ix_build_queue_wait_seconds",
@@ -1125,6 +1316,12 @@ mod tests {
     #[test]
     fn exposition_excludes_ticket_request_command_and_environment_values() -> Result<()> {
         let mut request = crate::model::Request {
+            supervision_detail: None,
+            trace: Default::default(),
+            command_started_clock_ms: None,
+            blocked_at_clock_ms: None,
+            active_blocked_reasons: Vec::new(),
+            measured_memory_bytes: None,
             pid_namespace: None,
             id: crate::model::RequestId("request-secret-id".to_owned()),
             sequence: 1,
@@ -1134,6 +1331,8 @@ mod tests {
             priority: 0,
             class: "periodic".to_owned(),
             memory_cap_bytes: None,
+            memory_reservation_bytes: None,
+            memory_limit_key: None,
             memory_cargo_jobs: None,
             memory_rust_test_threads: None,
             memory_parallelism: None,
@@ -1216,6 +1415,9 @@ mod tests {
 
     fn event(sequence: u64, phase: &str, priority: u32, wait_ms: u64) -> Event {
         Event {
+            correction: false,
+            trace: Default::default(),
+            kind: "transition".to_owned(),
             schema_version: 1,
             event_id: format!("store:e{sequence}"),
             request_id: crate::model::RequestId(format!("store:r{sequence}")),
@@ -1257,5 +1459,76 @@ mod tests {
         assert_eq!(Outcome::from_event(&event), Some(Outcome::RssCap));
         event.reason = None;
         assert_eq!(Outcome::from_event(&event), Some(Outcome::Failed));
+    }
+
+    /// Trace: FR-015-AC-1, FR-015-AC-3, FR-015-AC-10
+    #[test]
+    fn request_code_blocked_and_histogram_metrics_are_exactly_once_and_durable() -> Result<()> {
+        use locked_build::wire::{BlockObservation, Code};
+        let mut admitted = event(1, "running", 0, 2_500);
+        admitted.trace.lifecycle_state = "admitted".into();
+        let mut started = event(2, "running", 0, 2_500);
+        started.kind = "command_started".into();
+        let mut timeout = event(3, "timed_out", 0, 2_500);
+        timeout.trace.diagnostic.code = Some(Code::HoldTimeout);
+        timeout.trace.blocked_reasons = vec![BlockObservation {
+            reason: "memory_budget".into(),
+            value: 54.0,
+            limit: 49.4,
+            seconds: 3.25,
+        }];
+        let mut refused = event(4, "failed", 0, 0);
+        refused.kind = "refused".into();
+        refused.trace.diagnostic.code = Some(Code::RefusedMemoryBudget);
+        let mut correction = event(5, "succeeded", 0, 2_500);
+        correction.correction = true;
+        correction.trace.diagnostic.code = Some(Code::SupervisionLost);
+        let events = [admitted, started, timeout, refused, correction];
+        let mut metrics = MetricsState::default();
+        metrics.reconcile_events(&events, 6)?;
+        metrics.reconcile_events(&events, 6)?;
+        let saved = serde_json::to_vec(&metrics)?;
+        let restored: MetricsState = serde_json::from_slice(&saved)?;
+        let state = state(Vec::new());
+        let text = restored.exposition(&state, &policy()?, 0, 0)?;
+        for expected in [
+            "ix_build_requests_total{host=\"draco\",class=\"periodic\",outcome=\"timed_out\"} 1",
+            "ix_build_requests_total{host=\"draco\",class=\"periodic\",outcome=\"refused\"} 1",
+            "ix_build_requests_total{host=\"draco\",class=\"periodic\",outcome=\"ok\"} 0",
+            "ix_build_terminations_total{host=\"draco\",class=\"periodic\",code=\"LB_HOLD_TIMEOUT\"} 1",
+            "ix_build_terminations_total{host=\"draco\",class=\"periodic\",code=\"LB_REFUSED_MEMORY_BUDGET\"} 1",
+            "ix_build_blocked_seconds_total{host=\"draco\",class=\"periodic\",reason=\"memory_budget\"} 3.25",
+            "ix_build_queue_wait_seconds_sum{host=\"draco\",class=\"periodic\"} 2.500",
+            "ix_build_queue_wait_seconds_count{host=\"draco\",class=\"periodic\"} 1",
+        ] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "missing {expected}"
+            );
+        }
+        let snapshot = restored.snapshot(&state, 0);
+        assert!(
+            snapshot
+                .ix_build_requests_total
+                .iter()
+                .any(|row| row.class == "periodic" && row.outcome == "refused" && row.value == 1)
+        );
+        assert!(
+            snapshot
+                .ix_build_blocked_seconds_total
+                .iter()
+                .any(|row| row.class == "periodic"
+                    && row.reason == "memory_budget"
+                    && row.value == 3.25)
+        );
+        let histogram = snapshot
+            .ix_build_queue_wait_seconds
+            .iter()
+            .find(|row| row.class == "periodic")
+            .ok_or_else(|| Error::new(ErrorCode::State, "fixture histogram absent"))?;
+        assert_eq!((histogram.sum, histogram.count), (2.5, 1));
+        assert_eq!(histogram.buckets[0].value, 0);
+        assert_eq!(histogram.buckets[1].value, 1);
+        Ok(())
     }
 }
