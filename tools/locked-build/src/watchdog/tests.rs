@@ -4,6 +4,33 @@
 use super::*;
 use crate::model::ProcessIdentity;
 
+/// Provenance: SWM-380. Trace: FR-005-AC-2
+#[test]
+fn watchdog_startup_pins_the_admitted_store_and_policy_paths() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let policy = root.path().join("policy.json");
+    std::fs::write(&policy, include_bytes!("../../policy.example.json"))?;
+    let store = Store::open(&root.path().join("state"), &policy)?;
+    let command = startup_command(&store, &RequestId("store-a:r7".into()), 3)?;
+    let actual: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            "--state".to_owned(),
+            store.path.display().to_string(),
+            "--config".to_owned(),
+            policy.canonicalize()?.display().to_string(),
+            "watchdog".to_owned(),
+            "store-a:r7".to_owned(),
+            "3".to_owned()
+        ]
+    );
+    Ok(())
+}
+
 #[test]
 fn only_rss_watchdog_enforcement_uses_the_process_rss_cap() {
     assert_eq!(

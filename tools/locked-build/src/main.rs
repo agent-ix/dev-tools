@@ -336,7 +336,16 @@ fn lock_worktree_slot(state: &std::path::Path, repository: &str, slot: u32) -> R
 fn resolve_paths(
     state_flag: Option<&std::path::Path>,
     config_flag: Option<&std::path::Path>,
+    env: impl FnMut(&str) -> Option<PathBuf>,
+) -> Result<(PathBuf, PathBuf)> {
+    resolve_paths_with_shared(state_flag, config_flag, env, &writable::shared_root()?)
+}
+
+fn resolve_paths_with_shared(
+    state_flag: Option<&std::path::Path>,
+    config_flag: Option<&std::path::Path>,
     mut env: impl FnMut(&str) -> Option<PathBuf>,
+    shared: &std::path::Path,
 ) -> Result<(PathBuf, PathBuf)> {
     let state = state_flag
         .map(PathBuf::from)
@@ -348,10 +357,10 @@ fn resolve_paths(
         return Ok((state.clone(), config.clone()));
     }
     let home = env("HOME");
-    let root = writable::ix_home(env("IX_HOME"), home.as_deref()).join("locked-build");
+    let root = writable::host_root(home.as_deref());
     let state = match state {
         Some(state) => state,
-        None => writable::shared_state(&root.join("state"), &writable::shared_root()?)?,
+        None => writable::shared_state(&root.join("state"), shared)?,
     };
     let config = config.unwrap_or_else(|| root.join("policy.json"));
     let config = if config_flag.is_none() && env("LOCKED_BUILD_CONFIG").is_none() {
@@ -363,15 +372,25 @@ fn resolve_paths(
 }
 
 fn default_policy_path(path: &std::path::Path, state: &std::path::Path) -> Result<PathBuf> {
-    // Existing policy is read-only input. Never test it by opening for write.
-    match std::fs::File::open(path) {
-        Ok(_) => return Ok(path.to_owned()),
+    let policy = state.join("policy.json");
+    if policy.try_exists()? {
+        return Ok(policy);
+    }
+    // Adopt an installed host policy once, through read-only access. Lane
+    // IX_HOME never selects or generates another policy in this shared store.
+    match std::fs::read(path) {
+        Ok(_) => {
+            let installed = config::Config::read(path)?;
+            writable::publish_file(&policy, &serde_json::to_vec_pretty(&installed)?, false)?;
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
     // A missing automatic policy must have the same identity for writable and
     // read-only lanes, just like the queue. Existing installed policy stays put.
-    let policy = state.join("policy.json");
+    if path.try_exists()? {
+        return Ok(policy);
+    }
     match writable::install_alias(path, &policy) {
         Ok(()) => {}
         Err(error) if writable::access_denied(&error) => {}
@@ -402,13 +421,7 @@ fn ensure_policy_with_discovery(
     }
     let mut policy = crate::config::Config::measured_default()?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    policy.target_root = Some(
-        writable::ix_home(
-            std::env::var_os("IX_HOME").map(PathBuf::from),
-            home.as_deref(),
-        )
-        .join("locked-build/targets"),
-    );
+    policy.target_root = Some(writable::host_root(home.as_deref()).join("targets"));
     policy.target_root = policy.target_root.map(std::path::absolute).transpose()?;
     policy.real_cargo =
         search_path.and_then(|search_path| discover_real_cargo(search_path, current_exe));
@@ -433,27 +446,11 @@ fn ensure_policy_with_discovery(
         Err(error) => return Err(error.into()),
     }
     let bytes = serde_json::to_vec_pretty(&policy)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true);
-    if force {
-        options.create(true).truncate(true);
+    if writable::publish_file(path, &bytes, force)? {
+        eprintln!("Wrote default policy to {}", path.display());
     } else {
-        options.create_new(true);
+        config::Config::read(path)?;
     }
-    let mut file = options.mode(0o600).open(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists && !force {
-            crate::error::Error::new(
-                crate::error::ErrorCode::Configuration,
-                "policy was created concurrently; existing file was preserved",
-            )
-        } else {
-            error.into()
-        }
-    })?;
-    use std::io::Write;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    eprintln!("Wrote default policy to {}", path.display());
     Ok(())
 }
 
@@ -674,16 +671,9 @@ fn inside_admitted_run(mut env: impl FnMut(&str) -> Option<String>) -> bool {
 
 fn nested_real_cargo() -> Result<PathBuf> {
     let explicit = std::env::var_os("LOCKED_BUILD_CONFIG").map(PathBuf::from);
-    let policy = explicit.clone().or_else(|| {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        Some(
-            writable::ix_home(
-                std::env::var_os("IX_HOME").map(PathBuf::from),
-                home.as_deref(),
-            )
-            .join("locked-build/policy.json"),
-        )
-    });
+    let policy = explicit
+        .clone()
+        .or_else(|| Some(writable::shared_path().join("policy.json")));
     if let Some(path) = policy {
         match std::fs::File::open(&path) {
             Ok(_) => {
@@ -768,26 +758,83 @@ fn emit_error(error: &error::Error, explicit_state: Option<&std::path::Path>) {
 mod tests {
     use super::*;
 
+    /// Provenance: SWM-380. Trace: FR-011-AC-7
+    #[test]
+    fn lane_ix_homes_share_one_host_policy_and_store_identity() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let shared = writable::private_directory(&root.path().join("shared"))?;
+        let home = root.path().join("host-home");
+        let policy = shared.join("policy.json");
+        let bytes = br#"{"host":"host-a","capacity_units":1,"maximum_units":1,"disk_path":"/tmp","target_root":"/host/targets","rust_test_threads":4}"#;
+        std::fs::write(&policy, bytes)?;
+        let mut identity = None;
+        for lane in ["lane-a", "lane-b"] {
+            let lane_home = root.path().join(lane);
+            std::fs::create_dir_all(lane_home.join("locked-build"))?;
+            std::fs::write(
+                lane_home.join("locked-build/policy.json"),
+                br#"{"host":"wrong-lane-host","capacity_units":1,"maximum_units":1}"#,
+            )?;
+            let (state, config) = resolve_paths_with_shared(
+                None,
+                None,
+                |key| match key {
+                    "HOME" => Some(home.clone()),
+                    "IX_HOME" => Some(lane_home.clone()),
+                    _ => None,
+                },
+                &shared,
+            )?;
+            assert_eq!(state, shared);
+            assert_eq!(config, policy);
+            let store = runtime::open(&state, &config)?;
+            let observed = store.transaction(|state, policy| {
+                assert_eq!(policy.rust_test_threads, Some(4));
+                assert_eq!(
+                    policy.target_root.as_deref(),
+                    Some(std::path::Path::new("/host/targets"))
+                );
+                Ok(state.store_id.clone())
+            })?;
+            if let Some(expected) = &identity {
+                assert_eq!(&observed, expected);
+            } else {
+                identity = Some(observed);
+            }
+        }
+        assert_eq!(std::fs::read(policy)?, bytes);
+        Ok(())
+    }
+
     /// Provenance: SWM-374. Trace: FR-011-AC-7
     #[test]
     fn readonly_ix_home_uses_one_private_fallback_and_reads_existing_policy() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let ix = root.path().join("ix");
+        let home = root.path().join("home");
+        let ix = home.join(".ix");
+        let shared = writable::private_directory(&root.path().join("shared"))?;
         let dir = ix.join("locked-build");
         std::fs::create_dir_all(&dir)?;
         let policy = dir.join("policy.json");
         let bytes = br#"{"host":"manual","capacity_units":1,"maximum_units":1,"cargo_build_jobs":4,"rust_test_threads":4,"disk_reserve_bytes":100000000000,"hold_ms":5400000}"#;
         std::fs::write(&policy, bytes)?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))?;
-        let resolve = || resolve_paths(None, None, |key| (key == "IX_HOME").then(|| ix.clone()));
+        let resolve = || {
+            resolve_paths_with_shared(
+                None,
+                None,
+                |key| (key == "HOME").then(|| home.clone()),
+                &shared,
+            )
+        };
         let first = resolve();
         let second = resolve();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         let (state, config) = first?;
         assert_eq!(second?, (state.clone(), config.clone()));
-        assert_eq!(state, writable::shared_root()?);
-        assert_eq!(config, policy);
-        assert_eq!(std::fs::read(&config)?, bytes);
+        assert_eq!(state, shared);
+        assert_eq!(config, state.join("policy.json"));
+        assert_eq!(std::fs::read(&policy)?, bytes);
         assert_eq!(config::Config::read(&config)?.cargo_build_jobs, Some(4));
         std::fs::remove_file(&policy)?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))?;
@@ -1056,29 +1103,40 @@ mod tests {
     #[test]
     fn run_and_shim_paths_default_from_ix_home_and_honor_precedence() -> Result<()> {
         let root = tempfile::tempdir()?;
+        let shared = writable::private_directory(&root.path().join("shared"))?;
         let home = root.path().join("home");
         std::fs::create_dir_all(&home)?;
         let vars = [
             ("HOME", home.clone()),
             ("IX_HOME", root.path().join("ix-home")),
         ];
-        let (state, config) = resolve_paths(None, None, |name| {
-            vars.iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| value.clone())
-        })?;
-        assert_eq!(state, writable::shared_root()?);
+        let (state, config) = resolve_paths_with_shared(
+            None,
+            None,
+            |name| {
+                vars.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.clone())
+            },
+            &shared,
+        )?;
+        assert_eq!(state, shared);
         assert_eq!(config, state.join("policy.json"));
         assert_eq!(
-            std::fs::read_link(root.path().join("ix-home/locked-build/state"))?,
+            std::fs::read_link(home.join(".ix/locked-build/state"))?,
             state
         );
-        let (home_state, home_config) = resolve_paths(None, None, |name| match name {
-            "HOME" => Some(home.clone()),
-            "XDG_STATE_HOME" => Some("relative/state".into()),
-            "XDG_CONFIG_HOME" => Some("relative/config".into()),
-            _ => None,
-        })?;
+        let (home_state, home_config) = resolve_paths_with_shared(
+            None,
+            None,
+            |name| match name {
+                "HOME" => Some(home.clone()),
+                "XDG_STATE_HOME" => Some("relative/state".into()),
+                "XDG_CONFIG_HOME" => Some("relative/config".into()),
+                _ => None,
+            },
+            &shared,
+        )?;
         assert_eq!(home_state, state);
         assert_eq!(home_config, config);
 

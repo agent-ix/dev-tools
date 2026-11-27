@@ -52,13 +52,20 @@ pub(crate) fn install_tools(
     search_path: Option<&OsStr>,
 ) -> Result<()> {
     install_npm_packages(&read_manifest(TOOL_MANIFEST)?)?;
-    install_tools_with_measurement(home, current_exe, search_path, Config::measured_default)
+    install_tools_with_measurement(
+        home,
+        current_exe,
+        search_path,
+        &crate::writable::shared_root()?,
+        Config::measured_default,
+    )
 }
 
 fn install_tools_with_measurement(
     home: &Path,
     current_exe: &Path,
     search_path: Option<&OsStr>,
+    shared: &Path,
     measure_policy: impl FnOnce() -> Result<Config>,
 ) -> Result<()> {
     let manifest = read_manifest(TOOL_MANIFEST)?;
@@ -71,18 +78,30 @@ fn install_tools_with_measurement(
     })?;
     std::fs::create_dir_all(installed_bin_dir)?;
     copy_file_if_changed(current_exe, &installed_path)?;
-    let config_dir =
-        crate::writable::ix_home(std::env::var_os("IX_HOME").map(PathBuf::from), Some(home))
-            .join("locked-build");
+    let config_dir = crate::writable::host_root(Some(home));
+    let shared = crate::writable::private_directory(shared)?;
     let data_dir = home.join(".local/share/dev-tools");
     let shim_dir = home.join(".local/lib/locked-build/shims");
     create_private_dir(&config_dir)?;
     create_private_dir(&data_dir)?;
     create_private_dir(&shim_dir)?;
 
-    let policy_path = config_dir.join("policy.json");
-    migrate_policy(&home.join(".config/locked-build/policy.json"), &policy_path)?;
-    let mut policy = if policy_path.exists() {
+    let host_policy = config_dir.join("policy.json");
+    migrate_policy(&home.join(".config/locked-build/policy.json"), &host_policy)?;
+    let policy_path = shared.join("policy.json");
+    let previous_config = std::fs::read(shared.join("state.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<crate::model::State>(&bytes).ok())
+        .map(|state| state.config_path);
+    let host_identity = host_policy.canonicalize().ok();
+    let legacy_parent = home.join(".config/locked-build").canonicalize().ok();
+    let legacy_identity = legacy_parent.map(|parent| parent.join("policy.json"));
+    let adopt_host = !policy_path.exists()
+        || (previous_config.is_some()
+            && (previous_config == host_identity || previous_config == legacy_identity));
+    let mut policy = if adopt_host && host_policy.exists() {
+        Config::read(&host_policy)?
+    } else if policy_path.exists() {
         Config::read(&policy_path)?
     } else {
         let mut policy = measure_policy()?;
@@ -99,7 +118,21 @@ fn install_tools_with_measurement(
         .priority_classes
         .entry("arch-test".to_owned())
         .or_insert(2);
-    write_if_changed(&policy_path, &serde_json::to_vec_pretty(&policy)?, 0o600)?;
+    let bytes = serde_json::to_vec_pretty(&policy)?;
+    if adopt_host && policy_path.exists() && std::fs::read(&policy_path)? != bytes {
+        crate::writable::publish_file(
+            &shared.join("policy.before-host-migration.json"),
+            &std::fs::read(&policy_path)?,
+            false,
+        )?;
+    }
+    write_if_changed(&policy_path, &bytes, 0o600)?;
+    if std::fs::read_link(&host_policy).ok().as_deref() != Some(policy_path.as_path()) {
+        let next = config_dir.join(format!(".policy-alias-{}.next", crate::store::random_id()?));
+        symlink(&policy_path, &next)?;
+        std::fs::rename(next, &host_policy)?;
+    }
+    crate::writable::shared_state(&config_dir.join("state"), &shared)?;
 
     let shim_path = shim_dir.join("cargo");
     install_symlink(&installed_path, &shim_path)?;
@@ -203,7 +236,7 @@ fn npm_install_arguments(tools: &[ToolPin]) -> Result<Vec<String>> {
     Ok(arguments)
 }
 
-/// Compares installed command versions against the checked-in pinned manifest.
+/// Checks executable presence and minimum versions from the manifest.
 pub(crate) fn check_install(manifest_path: Option<&Path>) -> Result<i32> {
     let manifest = match manifest_path {
         Some(path) => read_manifest(&std::fs::read_to_string(path)?)?,
@@ -233,10 +266,10 @@ fn read_manifest(contents: &str) -> Result<ToolManifest> {
         || manifest.tools.iter().any(|tool| {
             tool.name.is_empty()
                 || tool.executable.is_empty()
-                || tool.version.as_ref().is_some_and(|version| {
-                    version.is_empty()
-                        || !version.chars().any(|character| character.is_ascii_digit())
-                })
+                || tool
+                    .version
+                    .as_ref()
+                    .is_some_and(|version| semver::Version::parse(version).is_err())
         })
     {
         return Err(Error::new(
@@ -254,13 +287,11 @@ fn check_tool(
 ) -> std::result::Result<String, String> {
     let executable = resolve_tool_executable(&pin.executable, search_path, home)
         .ok_or_else(|| "unavailable=not-found".to_owned())?;
-    let argument = if pin.version.is_some() {
-        "--version"
-    } else {
-        "--help"
+    let Some(version) = pin.version.as_deref() else {
+        return Ok("present".to_owned());
     };
     let output = Command::new(executable)
-        .arg(argument)
+        .arg("--version")
         .output()
         .map_err(|error| format!("unavailable={error}"))?;
     if !output.status.success() {
@@ -272,9 +303,6 @@ fn check_tool(
             .to_owned();
         return Err(format!("exit={} detail={detail}", output.status));
     }
-    let Some(version) = pin.version.as_deref() else {
-        return Ok("present".to_owned());
-    };
     let observed = String::from_utf8_lossy(&output.stdout)
         .lines()
         .next()
@@ -282,21 +310,34 @@ fn check_tool(
         .trim()
         .to_owned();
     if version_matches(&pin.name, version, &observed) {
-        Ok(version.to_owned())
+        reported_version(&pin.name, &observed)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("observed={observed}"))
     } else {
         Err(format!("observed={observed}"))
     }
 }
 
 fn version_matches(name: &str, expected: &str, observed: &str) -> bool {
-    if observed == expected {
-        return true;
+    let Some(candidate) = reported_version(name, observed) else {
+        return false;
+    };
+    match (
+        semver::Version::parse(expected),
+        semver::Version::parse(candidate),
+    ) {
+        (Ok(minimum), Ok(installed)) => !installed.cmp_precedence(&minimum).is_lt(),
+        _ => false,
     }
+}
+
+fn reported_version<'a>(name: &str, observed: &'a str) -> Option<&'a str> {
     observed
         .strip_prefix(name)
         .map(str::trim_start)
-        .and_then(|version_and_details| version_and_details.split_whitespace().next())
-        == Some(expected)
+        .unwrap_or(observed)
+        .split_whitespace()
+        .next()
 }
 
 fn discover_executable(
@@ -335,7 +376,9 @@ fn resolve_tool_executable(
         candidates.push(home.join(".cargo/bin").join(name));
     }
     candidates.into_iter().find_map(|candidate| {
-        if !candidate.is_file() {
+        if !candidate.is_file()
+            || std::fs::metadata(&candidate).ok()?.permissions().mode() & 0o111 == 0
+        {
             return None;
         }
         let resolved = candidate.canonicalize().ok()?;
@@ -526,12 +569,16 @@ mod tests {
     }
 
     #[test]
-    fn presence_only_manifest_pin_passes_when_help_succeeds() -> Result<()> {
+    fn presence_only_manifest_pin_passes_even_when_help_fails() -> Result<()> {
         use std::os::unix::fs::symlink;
 
         let root = tempfile::tempdir()?;
         let executable = root.path().join("presence-tool");
-        symlink(std::env::current_exe()?, &executable)?;
+        symlink("/usr/bin/false", &executable)?;
+        assert_eq!(
+            Command::new(&executable).arg("--help").status()?.code(),
+            Some(1)
+        );
         let manifest = read_manifest(
             r#"{"schema_version":1,"tools":[{"name":"presence-tool","executable":"presence-tool"}]}"#,
         )?;
@@ -579,13 +626,24 @@ mod tests {
         ));
         assert!(version_matches("quoin", "0.37.0", "0.37.0"));
         assert!(!version_matches("quoin", "0.37.0", "quoin 0.37.0-rc.1"));
-        assert!(!version_matches("quoin", "0.37.0", "quoin 0.37.0+local"));
+        assert!(version_matches("quoin", "0.37.0", "quoin 0.37.0+local"));
         assert!(version_matches(
             "quoin",
             "0.37.0+local",
             "quoin 0.37.0+local"
         ));
         assert!(!version_matches("quoin", "0.37.0", "0.36.9"));
+        assert!(version_matches("ix-board", "0.12.2", "ix-board 0.12.3"));
+        assert!(!version_matches("ix-board", "0.12.2", "ix-board 0.12.1"));
+        assert!(version_matches("ix-board", "0.12.2", "ix-board 0.13.0"));
+        assert!(version_matches("ix-board", "0.12.2", "ix-board 1.0.0"));
+        assert!(version_matches("ix-board", "0.12.2", "ix-board 0.12.10"));
+        assert!(!version_matches("ix-board", "0.12.2", "ix-board unknown"));
+        assert!(!version_matches(
+            "ix-board",
+            "0.12.2",
+            "ix-board 0.12.2-rc.1"
+        ));
     }
 
     #[test]
@@ -602,6 +660,8 @@ mod tests {
         let real_cargo = cargo_dir.join("cargo");
         std::fs::write(&shim_target, b"shim")?;
         std::fs::write(&rustup, b"rustup")?;
+        std::fs::set_permissions(&shim_target, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o755))?;
         symlink(&shim_target, shim_dir.join("cargo"))?;
         symlink(&rustup, &real_cargo)?;
         let search_path = std::env::join_paths([&shim_dir, &cargo_dir])
@@ -676,7 +736,12 @@ mod tests {
         std::fs::write(&legacy, br#"{"host":"test-host","capacity_units":4,"maximum_units":4,"cargo_build_jobs":4,"rust_test_threads":4,"disk_reserve_bytes":100000000000,"hold_ms":5400000}"#)?;
         let current_exe = std::env::current_exe()?;
 
-        install_tools_with_measurement(&home, &current_exe, None, || {
+        let shared = root.path().join("shared");
+        let prior = crate::store::Store::open(&shared, &legacy)?;
+        prior.transaction(|_, _| Ok(()))?;
+        let competing = br#"{"host":"test-host","capacity_units":1,"maximum_units":1,"cargo_build_jobs":8,"rust_test_threads":8}"#;
+        std::fs::write(shared.join("policy.json"), competing)?;
+        install_tools_with_measurement(&home, &current_exe, None, &shared, || {
             let mut config: Config =
                 serde_json::from_str(include_str!("../policy.example.json"))
                     .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
@@ -698,6 +763,10 @@ mod tests {
         );
         assert_eq!(std::fs::read_link(&shim)?, binary.canonicalize()?);
         let policy = Config::read(&policy_path)?;
+        assert_eq!(
+            std::fs::read(shared.join("policy.before-host-migration.json"))?,
+            competing
+        );
         assert!(!legacy.exists());
         assert_eq!(policy.cargo_build_jobs, Some(4));
         assert_eq!(policy.rust_test_threads, Some(4));
@@ -716,7 +785,7 @@ mod tests {
             std::fs::metadata(&record)?.modified()?,
             std::fs::metadata(home.join(".zshrc"))?.modified()?,
         ];
-        install_tools_with_measurement(&home, &current_exe, None, || {
+        install_tools_with_measurement(&home, &current_exe, None, &shared, || {
             Err(Error::new(
                 ErrorCode::State,
                 "existing policy should prevent another measurement",

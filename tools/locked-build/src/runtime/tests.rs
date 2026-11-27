@@ -1766,27 +1766,29 @@ fn systemd_scope_probe_requires_delegated_memory_controller() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn supervise_loop_uses_persisted_scope_and_injected_scope_kill() -> Result<()> {
+fn supervise_scope_exit(
+    events_at_completion: &str,
+    expected_reason: &str,
+    expected_stop: Option<StopReason>,
+) -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
     let id = queued(&store)?;
     let stale_request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
-    let mut command = Command::new("/bin/sh")
-        .arg("-c")
-        .arg("kill -KILL $$")
+    let mut command = Command::new("/bin/sleep")
+        .arg("10")
         .process_group(0)
         .spawn()?;
     let command_pid = command.id();
-    let mut outcome = None;
-    for _ in 0..50 {
-        outcome = command.try_wait()?;
-        if outcome.is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(outcome.is_some(), "injected command must exit by signal");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(
+            i32::try_from(command_pid)
+                .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?,
+        ),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .map_err(|error| Error::new(ErrorCode::Io, error.to_string()))?;
+    assert_eq!(command.wait()?.signal(), Some(15));
     let watchdog = ProcessIdentity {
         pid: command_pid,
         started_seconds: 1,
@@ -1812,8 +1814,9 @@ fn supervise_loop_uses_persisted_scope_and_injected_scope_kill() -> Result<()> {
     })?;
     assert!(stale_request.lease_record.is_none());
     let events = root.path().join("memory.events");
-    std::fs::write(&events, "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n")?;
+    std::fs::write(&events, "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n")?;
     let mut watchdog_child = Command::new("/usr/bin/true").spawn()?;
+    let mut observations = 0;
     supervise_started_command(
         &store,
         &stale_request,
@@ -1823,14 +1826,406 @@ fn supervise_loop_uses_persisted_scope_and_injected_scope_kill() -> Result<()> {
         &AtomicBool::new(false),
         command,
         |evidence, _processes, _group| {
-            evidence.observe_file(&events);
-            let _ = std::fs::remove_file(&events);
+            observations += 1;
+            if observations == 1 {
+                evidence.observe_file(&events);
+            } else {
+                // The scope counter changes only at completion; production's
+                // final read must find it even without another process sample.
+                assert!(std::fs::write(&events, events_at_completion).is_ok());
+            }
         },
     )?;
     let finished = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
-    assert_eq!(finished.reason.as_deref(), Some("rss_cap"));
-    assert_eq!(finished.signal, Some(9));
+    assert_eq!(finished.reason.as_deref(), Some(expected_reason));
+    assert_eq!(finished.signal, Some(15));
+    assert_eq!(finished.stop, expected_stop);
+    let report = status(&store)?;
+    assert_eq!(report.requests[0].request_id, id);
+    assert_eq!(report.requests[0].memory_cap_bytes, Some(1_000_000));
+    assert_eq!(report.requests[0].reason.as_deref(), Some(expected_reason));
+    assert_eq!(
+        memory_cap_report(
+            &id,
+            report.requests[0].memory_cap_bytes,
+            report.requests[0]
+                .lease_record
+                .as_ref()
+                .and_then(|record| record.memory_sample.as_ref())
+        ),
+        format!(
+            "request={} reason=rss_cap measured_bytes=unavailable memory_cap_bytes=1000000 metric=unavailable",
+            id.0
+        )
+    );
     Ok(())
+}
+
+/// Provenance: SWM-379. Trace: FR-005-AC-4
+#[test]
+fn supervise_loop_uses_persisted_scope_and_injected_scope_kill() -> Result<()> {
+    supervise_scope_exit(
+        "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n",
+        "rss_cap",
+        Some(StopReason::MemoryCap),
+    )
+}
+
+/// Provenance: SWM-379. Trace: FR-005-AC-4
+#[test]
+fn scope_without_oom_kill_retains_command_signal() -> Result<()> {
+    supervise_scope_exit(
+        "low 0\nhigh 0\nmax 1\noom 1\noom_kill 0\n",
+        "command_signaled",
+        None,
+    )
+}
+
+/// Provenance: SWM-379. Trace: FR-005-AC-4
+#[test]
+fn scope_oom_evidence_survives_scope_cleanup() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let events = root.path().join("memory.events");
+    std::fs::write(&events, "oom 1\noom_kill 1\n")?;
+    let mut evidence = CgroupOomEvidence::default();
+    evidence.observe_file(&events);
+    std::fs::remove_file(events)?;
+    evidence.read_known_files();
+    assert!(evidence.detected());
+    Ok(())
+}
+
+/// Provenance: SWM-379. Trace: FR-005-AC-4
+#[test]
+fn default_memory_estimate_charges_six_gb_per_job_but_preserves_explicit_values() -> Result<()> {
+    let mut policy: Config = serde_json::from_str(
+        r#"{"host":"fixture","capacity_units":4,"maximum_units":4,"memory_budget_bytes":50000000000}"#,
+    )?;
+    assert_eq!(estimate_memory_lease(&policy, "point", 4)?, 24_000_000_000);
+    policy.memory_per_job_bytes = 2_500_000_000;
+    assert_eq!(estimate_memory_lease(&policy, "point", 4)?, 10_000_000_000);
+    Ok(())
+}
+
+/// Provenance: SWM-379. Trace: FR-005-AC-4
+#[test]
+fn scope_oom_evidence_survives_watchdog_finalizing_first() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let worker = ProcessIdentity {
+        pid: u32::MAX - 1,
+        started_seconds: 1,
+    };
+    assert!(claim_worker(&store, &id, &worker)?.is_some());
+    let events = root.path().join("memory.events");
+    std::fs::write(&events, "low 0\nhigh 0\nmax 9\noom 2\noom_kill 1\n")?;
+    let mut evidence = CgroupOomEvidence::default();
+    evidence.observe_file(&events);
+    store.transaction(|state, _| {
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now_ms()?);
+        request.started_clock_ms = Some(clock_ms()?);
+        request.watchdog = Some(ProcessIdentity {
+            pid: u32::MAX - 2,
+            started_seconds: 1,
+        });
+        record_scope_oom(
+            request,
+            Some(MemoryEnforcement::SystemdScope),
+            evidence.detected(),
+        );
+        request.command_finished = Some(CommandOutcome {
+            code: None,
+            signal: Some(15),
+        });
+        Ok(())
+    })?;
+    // The watchdog has no worker-local evidence or Completion.reason.
+    store.transaction(|state, config| {
+        state.finish(
+            &id,
+            Completion {
+                signal: Some(15),
+                ..Completion::default()
+            },
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    assert_eq!(request.reason.as_deref(), Some("rss_cap"));
+    assert_eq!(request.phase, Phase::Failed);
+    assert_eq!(request.signal, Some(15));
+    Ok(())
+}
+
+fn supervision_loss_scenario(lease_ends: bool) -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy = Config::read(&store.config_path)?;
+    policy.termination_grace_ms = 20;
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let id = queued(&store)?;
+    let worker = ProcessIdentity {
+        pid: u32::MAX - 1,
+        started_seconds: 1,
+    };
+    let fence = claim_worker(&store, &id, &worker)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "missing claim"))?;
+    let mut anchor = Command::new("/bin/sleep")
+        .arg("10")
+        .process_group(0)
+        .spawn()?;
+    let group = anchor.id();
+    let native_group =
+        i32::try_from(group).map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let command = Command::new("/bin/sleep")
+        .arg("10")
+        .process_group(native_group)
+        .spawn()?;
+    let mut descendant = Command::new("/bin/sleep")
+        .arg("10")
+        .process_group(native_group)
+        .spawn()?;
+    let descendant_wait = std::thread::spawn(move || descendant.wait());
+    let watchdog = ProcessIdentity {
+        pid: group,
+        started_seconds: 1,
+    };
+    store.transaction(|state, _| {
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now_ms()?);
+        request.started_clock_ms = Some(clock_ms()?);
+        request.watchdog = Some(watchdog.clone());
+        request.lease_record = Some(LeaseRecord {
+            memory_enforcement: MemoryEnforcement::SystemdScope,
+            ..LeaseRecord::default()
+        });
+        Ok(())
+    })?;
+    let request = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    let events = root.path().join("memory.events");
+    std::fs::write(&events, "oom 0\noom_kill 0\n")?;
+    if lease_ends {
+        store.transaction(|state, config| {
+            state.finish(
+                &id,
+                Completion {
+                    code: Some(0),
+                    ..Completion::default()
+                },
+                config,
+                now_ms()?,
+                clock_ms()?,
+            )
+        })?;
+    }
+    let result = supervise_started_command(
+        &store,
+        &request,
+        &fence,
+        &watchdog,
+        &mut anchor,
+        &AtomicBool::new(false),
+        command,
+        |evidence, _, _| {
+            evidence.observe_file(&events);
+            if !lease_ends {
+                assert!(std::fs::remove_file(&events).is_ok());
+            }
+        },
+    );
+    assert!(result.is_err());
+    assert!(group_absent(group));
+    let descendant_status = descendant_wait
+        .join()
+        .map_err(|_| Error::new(ErrorCode::State, "descendant wait panicked"))??;
+    assert_eq!(descendant_status.signal(), Some(15));
+    let finished = store.transaction(|state, _| Ok(state.find(&id)?.clone()))?;
+    assert_eq!(finished.reason.as_deref(), Some("supervision_lost"));
+    assert_eq!(finished.phase, Phase::Failed);
+    Ok(())
+}
+
+/// Provenance: SWM-380. Trace: FR-005-AC-2, FR-005-AC-4
+#[test]
+fn vanishing_scope_terminates_the_whole_group_before_reporting_loss() -> Result<()> {
+    supervision_loss_scenario(false)
+}
+
+/// Provenance: SWM-380. Trace: FR-005-AC-2, FR-005-AC-4
+#[test]
+fn expired_lease_terminates_live_children_and_corrects_the_success_record() -> Result<()> {
+    supervision_loss_scenario(true)
+}
+
+/// Provenance: SWM-380. Trace: FR-005-AC-2, FR-005-AC-4
+#[test]
+fn boot_timestamp_drift_between_admission_and_watchdog_startup_keeps_the_lease() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = queued(&store)?;
+    let worker = ProcessIdentity {
+        pid: 10000,
+        started_seconds: 1,
+    };
+    let fence = claim_worker(&store, &id, &worker)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+    store.transaction(|state, _| {
+        state.boot_id = Some("kernel-boot-a".to_owned());
+        state.boot_time = 100;
+        let request = state.find_mut(&id)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now_ms()?);
+        request.started_clock_ms = Some(clock_ms()?);
+        Ok(())
+    })?;
+    let recovered = recover_with_boot(
+        &store,
+        || {
+            Processes::test_snapshot([(
+                worker.clone(),
+                worker.pid,
+                vec![id.0.clone(), "worker".to_owned()],
+            )])
+        },
+        Some("kernel-boot-a".to_owned()),
+        112,
+    )?;
+    assert!(recovered.is_empty());
+    store.transaction(|state, _| {
+        let request = state.find(&id)?;
+        assert_eq!(request.phase, Phase::Running);
+        assert_eq!(request.worker.as_ref(), Some(&worker));
+        assert_eq!(request.worker_generation, fence.generation);
+        assert!(request.watchdog.is_none());
+        Ok(())
+    })
+}
+
+/// Provenance: SWM-380. Trace: FR-005-AC-2, FR-005-AC-4
+#[test]
+fn recovery_never_reaps_or_respawns_a_foreign_pid_namespace_lease() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let running = queued(&store)?;
+    let queued = queued(&store)?;
+    let worker = ProcessIdentity {
+        pid: 99_999_998,
+        started_seconds: 1,
+    };
+    assert!(claim_worker(&store, &running, &worker)?.is_some());
+    store.transaction(|state, _| {
+        for id in [&running, &queued] {
+            state.find_mut(id)?.pid_namespace = Some("pid:[foreign-sandbox]".into());
+        }
+        let request = state.find_mut(&running)?;
+        request.phase = Phase::Running;
+        request.started_at_ms = Some(now_ms()?);
+        request.started_clock_ms = Some(clock_ms()?);
+        request.watchdog = Some(ProcessIdentity {
+            pid: 99_999_999,
+            started_seconds: 1,
+        });
+        Ok(())
+    })?;
+    assert!(recover_with_processes(&store, || Processes::test_snapshot([]))?.is_empty());
+    store.transaction(|state, _| {
+        assert_eq!(state.find(&running)?.phase, Phase::Running);
+        assert_eq!(state.find(&running)?.worker.as_ref(), Some(&worker));
+        assert!(state.find(&running)?.reason.is_none());
+        assert_eq!(state.used(), 1);
+        assert_eq!(state.find(&queued)?.phase, Phase::Queued);
+        Ok(())
+    })
+}
+
+/// Provenance: SWM-380. Trace: FR-005-AC-4
+#[test]
+fn memory_cap_diagnostic_reports_measured_value_cap_and_metric() {
+    let id = RequestId("store-a:r25".into());
+    let sample = crate::model::MemorySample {
+        contributors: Vec::new(),
+        bytes: 25_000_000_000,
+        metric: crate::model::MemoryMetric::PssAnon,
+    };
+    assert_eq!(
+        memory_cap_report(&id, Some(24_000_000_000), Some(&sample)),
+        "request=store-a:r25 reason=rss_cap measured_bytes=25000000000 memory_cap_bytes=24000000000 metric=pss_anon"
+    );
+}
+
+/// Provenance: SWM-380. Trace: FR-005-AC-2, FR-005-AC-4
+#[test]
+fn supervision_loss_escalates_to_sigkill_and_spares_unrelated_groups() -> Result<()> {
+    fn fixture(group: u32) -> Result<Child> {
+        use std::io::BufRead;
+        let native_group = i32::try_from(group)
+            .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+        let mut child = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "runtime::tests::supervision_cleanup_fixture",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=4",
+            ])
+            .stdout(Stdio::piped())
+            .process_group(native_group)
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::new(ErrorCode::State, "fixture stdout missing"))?;
+        let mut ready = false;
+        for line in std::io::BufReader::new(stdout).lines() {
+            if line?.contains("cleanup-fixture-ready") {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "TERM handler must be ready before cleanup");
+        Ok(child)
+    }
+    let mut anchor = fixture(0)?;
+    let group = anchor.id();
+    // A systemd launcher may have moved the actual command to its own group.
+    let mut child = fixture(0)?;
+    let child_group = child.id();
+    let mut unrelated = Command::new("/bin/sleep")
+        .arg("10")
+        .process_group(0)
+        .spawn()?;
+    terminate_supervision_group(&mut anchor, Some(&mut child), group, 20)?;
+    let still_running = unrelated.try_wait()?.is_none();
+    unrelated.kill()?;
+    unrelated.wait()?;
+    assert!(still_running);
+    assert_eq!(anchor.wait()?.signal(), Some(9));
+    assert_eq!(child.wait()?.signal(), Some(9));
+    assert!(group_absent(group));
+    assert!(group_absent(child_group));
+    Ok(())
+}
+
+/// Provenance: SWM-380. Trace: FR-005-AC-4
+#[test]
+#[ignore = "TERM-resistant subprocess workload invoked by cleanup tests"]
+fn supervision_cleanup_fixture() -> Result<()> {
+    use std::io::Write;
+    signal_hook::flag::register(
+        signal_hook::consts::SIGTERM,
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    println!("cleanup-fixture-ready");
+    std::io::stdout().flush()?;
+    loop {
+        std::thread::park_timeout(Duration::from_secs(60));
+    }
 }
 
 #[test]

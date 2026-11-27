@@ -139,7 +139,7 @@ impl Default for Config {
             real_cargo: None,
             memory_admission: MemoryAdmissionMode::LeaseAccounted,
             memory_budget_bytes,
-            memory_per_job_bytes: 2_500_000_000,
+            memory_per_job_bytes: 6_000_000_000,
             memory_per_job_by_class: BTreeMap::new(),
             memory_cap_by_class: BTreeMap::new(),
             on_missing_cgroup: OnMissingCgroup::RssWatchdog,
@@ -177,7 +177,7 @@ impl Config {
         let safe_jobs = (memory_budget / config.memory_per_job_bytes).max(1);
         config.cargo_build_jobs = Some(cores.min(u32::try_from(safe_jobs).unwrap_or(u32::MAX)));
 
-        let disk_path = std::env::current_dir()?.canonicalize()?;
+        let disk_path = crate::writable::shared_root()?;
         let disks = Disks::new_with_refreshed_list();
         let disk = disks
             .list()
@@ -483,6 +483,19 @@ impl HostSample {
 mod tests {
     use super::*;
 
+    /// Provenance: SWM-379. Trace: FR-005-AC-4
+    #[test]
+    fn generated_policy_uses_six_gb_per_job_and_sizes_jobs_within_budget() -> Result<()> {
+        let policy = Config::measured_default()?;
+        assert_eq!(policy.memory_per_job_bytes, 6_000_000_000);
+        let budget = policy
+            .memory_budget_bytes
+            .ok_or_else(|| Error::new(ErrorCode::Configuration, "missing measured budget"))?;
+        let expected = u64::from(policy.capacity_units).min((budget / 6_000_000_000).max(1));
+        assert_eq!(policy.cargo_build_jobs.map(u64::from), Some(expected));
+        Ok(())
+    }
+
     #[test]
     fn default_policy_hold_limit_is_ninety_minutes() {
         assert_eq!(Config::default().hold_ms, 5_400_000);
@@ -534,7 +547,7 @@ mod tests {
 
         assert_eq!(config.memory_admission, MemoryAdmissionMode::LeaseAccounted);
         assert_eq!(config.memory_budget_bytes, Some(17_179_869_184));
-        assert_eq!(config.memory_per_job_bytes, 2_500_000_000);
+        assert_eq!(config.memory_per_job_bytes, 6_000_000_000);
         config.validate()
     }
 

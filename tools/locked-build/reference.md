@@ -32,10 +32,11 @@ shim, and writes `~/.local/share/dev-tools/installed.json`. It places the shim
 directory before `~/.local/bin` in `.profile`, `.bashrc`, and `.zshrc`.
 `locked-build check-install` compares the checked-in
 [`tool-versions.json`](tool-versions.json) pins with each executable. Entries
-with `version` run `--version` and compare the reported version; entries
-without `version` resolve the executable and run `--help`, passing only when it
-exits successfully. It prints one `ok` or `mismatch` line per tool and exits 1
-when any tool is missing, fails `--help`, or has a different pinned version.
+with `version` run `--version` and require the reported SemVer to meet the
+minimum pin. Newer versions pass; prereleases follow SemVer ordering and build
+metadata is ignored. Entries without `version` require executable presence and
+are never invoked. It prints one `ok` or `mismatch` line per tool and exits 1
+when a tool is missing, version output is unavailable, or its version is older.
 
 | Field | Meaning |
 |---|---|
@@ -46,7 +47,7 @@ when any tool is missing, fails `--help`, or has a different pinned version.
 | `memory_reserve_bytes` | RAM retained outside build leases in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_admission` | `lease_accounted` (default) sums fixed leases against `memory_budget_bytes` without reading live available memory; `live_available` compares `MemAvailable` with lease-unit charges. |
 | `memory_budget_bytes` | Total memory available to concurrent leases in `lease_accounted` mode. |
-| `memory_per_job_bytes` | Default memory estimate per effective Cargo job or non-Cargo unit; generated policies use 2.5 GB. |
+| `memory_per_job_bytes` | Memory estimate per Cargo job or non-Cargo unit; generated policies use 6 GB. |
 | `memory_per_job_by_class` | Optional per-class per-job estimates, bounded by the class cap when one is configured. |
 | `memory_cap_by_class` | Optional maximum total lease size for each named class. |
 | `on_missing_cgroup` | `rss_watchdog` (default) enforces a configured cap with process-group RSS when a systemd scope is unavailable; `refuse` fails the lease without running the command. |
@@ -93,15 +94,15 @@ Different slot numbers run concurrently. The Kani replacement is
 `run --class kani -- ...`.
 
 Scheduler commands and the PATH shim read policy from `--config`, then
-`LOCKED_BUILD_CONFIG`, then `<ix-home>/locked-build/policy.json`.
+`LOCKED_BUILD_CONFIG`, then `/tmp/locked-build-<uid>/policy.json`.
 State resolves from `--state`, then `LOCKED_BUILD_STATE`, then
-`<ix-home>/locked-build/state`; the state directory is created mode `0700`.
-The IX home resolution matches Quoin: nonempty `IX_HOME`, then `$HOME/.ix`,
-then relative `.ix` when HOME is absent. Relative `IX_HOME` is accepted.
-Generated target roots default to `<ix-home>/locked-build/targets`.
-Installation moves `~/.config/locked-build/policy.json` into the IX home
-without regenerating its host settings. Differing policies at both paths
-stop installation and preserve both files.
+`/tmp/locked-build-<uid>`; the state directory is created mode `0700`.
+Lane `IX_HOME` does not select host state or policy. Host aliases live under
+`~/.ix/locked-build`; generated targets default to its `targets` directory.
+Installation preserves the policy selected by existing host state, adopts the
+old `~/.config/locked-build/policy.json` when applicable, and archives competing
+fallback policy before migration. Policy paths and disk/target directories
+are configuration metadata rather than the random store identity.
 
 The default state path is an owned symlink to `/tmp/locked-build-<uid>`.
 Writable and read-only lanes of the same user share this physical queue.
@@ -110,8 +111,8 @@ An existing state path other than that owned alias stops resolution, preserving
 its contents. The shared directory must be owned by the effective user,
 mode `0700`, and a directory rather than a symlink. Unsafe fallback directories
 cause an error; commands never bypass admission after a path failure.
-An existing policy is read without opening it for write. If absent, generated
-policy lives in the shared state directory, with an IX home alias when writable.
+An existing canonical policy is read without opening it for write. If absent,
+generated policy is published atomically once in the shared state directory.
 This keeps its canonical identity the same for writable and read-only lanes.
 An unwritable target root uses `<fallback>/targets`; explicit `CARGO_TARGET_DIR`
 remains authoritative. `status` includes `state_path`. `policy show` prints

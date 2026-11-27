@@ -81,6 +81,12 @@ pub(crate) struct CommandOutcome {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseRecord {
+    /// Identity of the launched command; memory accounting starts here.
+    #[serde(default)]
+    pub command: Option<ProcessIdentity>,
+    /// Measured memory that triggered enforcement, including its metric.
+    #[serde(default)]
+    pub memory_sample: Option<MemorySample>,
     /// Effective Cargo jobs, when numeric and known.
     pub cargo_build_jobs: Option<u32>,
     /// True when an explicit Cargo jobs value was clamped to policy maximum.
@@ -101,6 +107,51 @@ pub struct LeaseRecord {
     pub memory_enforcement: MemoryEnforcement,
 }
 
+/// Memory measurements name their accounting basis as well as bytes.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemorySample {
+    /// Per-process contributions for a watchdog sample.
+    #[serde(default)]
+    pub contributors: Vec<ProcessMemory>,
+    /// Measured bytes, before the command was terminated.
+    pub bytes: u64,
+    /// Accounting metric used by enforcement.
+    pub metric: MemoryMetric,
+}
+
+/// One process's contribution to a measured command tree.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessMemory {
+    /// PID in the lease's namespace.
+    pub pid: u32,
+    /// Bytes attributed by the named sample metric.
+    pub bytes: u64,
+}
+
+/// Metrics used by the memory enforcement backends.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMetric {
+    /// Linux proportional anonymous memory, excluding file/shmem mappings.
+    PssAnon,
+    /// macOS resident set size.
+    Rss,
+    /// Kernel cgroup peak memory (includes charged file cache).
+    CgroupMemoryPeak,
+}
+
+impl MemoryMetric {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::PssAnon => "pss_anon",
+            Self::Rss => "rss",
+            Self::CgroupMemoryPeak => "cgroup_memory_peak",
+        }
+    }
+}
+
 /// Memory enforcement mechanism selected when the command starts.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,7 +161,7 @@ pub enum MemoryEnforcement {
     NotConfigured,
     /// A transient Linux systemd scope enforces the cap.
     SystemdScope,
-    /// The watchdog samples process-group RSS and enforces the cap.
+    /// The watchdog samples the command tree (Linux Pss_Anon, macOS RSS).
     RssWatchdog,
     /// The command was refused because no scope was available and policy requires one.
     Refused,
@@ -128,6 +179,9 @@ pub(crate) struct Request {
     pub active_blocked_reasons: Vec<String>,
     #[serde(default)]
     pub measured_memory_bytes: Option<u64>,
+    /// Linux PID namespace in which worker/watchdog IDs are meaningful.
+    #[serde(default)]
+    pub pid_namespace: Option<String>,
     pub id: RequestId,
     pub sequence: u64,
     pub owner: String,

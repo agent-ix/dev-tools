@@ -181,6 +181,7 @@ pub(crate) fn enqueue(
                 )
             });
             state.requests.push(Request {
+                pid_namespace: crate::process::pid_namespace()?,
                 trace: locked_build::wire::RequestTrace {
                     lifecycle_state: "queued".to_owned(),
                     queue_depth_at_enqueue: u32::try_from(
@@ -597,8 +598,12 @@ pub struct RequestReport {
     pub memory_needed_bytes: Option<u64>,
     /// Currently unreserved host memory budget.
     pub memory_free_budget_bytes: Option<u64>,
+    /// Namespace in which stored process IDs must be interpreted.
+    pub pid_namespace: Option<String>,
     /// Stable request identity.
     pub request_id: RequestId,
+    /// Admitted cap in bytes, preserved even if policy changes after admission.
+    pub memory_cap_bytes: Option<u64>,
     /// Owner/lane, never inferred from a pane.
     pub owner: String,
     /// Owning ticket.
@@ -659,6 +664,7 @@ fn recover_with_boot(
         let now = now_ms()?;
         let clock = clock_ms()?;
         let processes = read_processes();
+        let pid_namespace = crate::process::pid_namespace()?;
         // sysinfo's macOS backend reads kern.boottime. Other timestamp-only
         // backends get the same 120-second tolerance; Linux uses the UUID.
         let rebooted = state.rebooted(boot_id.as_deref(), boot_time);
@@ -679,6 +685,11 @@ fn recover_with_boot(
         let mut finish = Vec::new();
         for request in &mut state.requests {
             if request.phase.terminal() {
+                continue;
+            }
+            if !rebooted && request.pid_namespace != pid_namespace {
+                // Namespace-local PIDs can refer to unrelated host processes.
+                // Only the owning namespace may infer liveness or respawn.
                 continue;
             }
             if rebooted {
@@ -796,7 +807,9 @@ fn status_with_clock(
                     },
                     memory_needed_bytes: request.memory_cap_bytes,
                     memory_free_budget_bytes: free_budget,
+                    pid_namespace: request.pid_namespace.clone(),
                     request_id: request.id.clone(),
+                    memory_cap_bytes: request.memory_cap_bytes,
                     owner: request.owner.clone(),
                     ticket: request.ticket.clone(),
                     state: phase_name(request.phase).to_owned(),
@@ -1130,7 +1143,27 @@ pub(crate) fn worker(store: &Store, id: &RequestId) -> Result<()> {
         }
     };
     let (watchdog, mut watchdog_child) =
-        crate::watchdog::launch(store, id, &identity, fence.generation)?;
+        match crate::watchdog::launch(store, id, &identity, fence.generation) {
+            Ok(watchdog) => watchdog,
+            Err(error) => {
+                store.transaction(|state, config| {
+                    if fence.owns(state.find(id)?) {
+                        state.finish(
+                            id,
+                            Completion {
+                                reason: Some("supervision_lost"),
+                                ..Completion::default()
+                            },
+                            config,
+                            now_ms()?,
+                            clock_ms()?,
+                        )?;
+                    }
+                    Ok(())
+                })?;
+                return Err(error);
+            }
+        };
     supervise(
         store,
         &request,
@@ -1150,13 +1183,39 @@ fn supervise(
     watchdog_child: &mut Child,
     interrupted: &AtomicBool,
 ) -> Result<()> {
-    let child = match start_command(store, request, fence, watchdog)? {
-        CommandStart::Started(child) => child,
-        CommandStart::Refused => {
+    let child = match start_command(store, request, fence, watchdog) {
+        Ok(CommandStart::Started(child)) => child,
+        Ok(CommandStart::Refused) => {
             store.transaction(|state, config| {
                 finish_refused_command(state, config, &request.id, fence)
             })?;
             return Ok(());
+        }
+        Err(error) => {
+            let grace_ms = Config::read(&store.config_path)
+                .map(|policy| policy.termination_grace_ms)
+                .unwrap_or(10_000);
+            terminate_supervision_group(watchdog_child, None, watchdog.pid, grace_ms)?;
+            eprintln!(
+                "request={} reason=supervision_lost detail={error}",
+                request.id.0
+            );
+            store.transaction(|state, config| {
+                if fence.owns(state.find(&request.id)?) {
+                    state.finish(
+                        &request.id,
+                        Completion {
+                            reason: Some("supervision_lost"),
+                            ..Completion::default()
+                        },
+                        config,
+                        now_ms()?,
+                        clock_ms()?,
+                    )?;
+                }
+                Ok(())
+            })?;
+            return Err(error);
         }
     };
     supervise_started_command(
@@ -1205,6 +1264,163 @@ fn supervise_started_command(
     watchdog_child: &mut Child,
     interrupted: &AtomicBool,
     mut child: Child,
+    observe_oom: impl FnMut(&mut CgroupOomEvidence, &Processes, u32),
+) -> Result<()> {
+    let grace_ms = Config::read(&store.config_path)
+        .map(|policy| policy.termination_grace_ms)
+        .unwrap_or(10_000);
+    let result = supervise_command_loop(
+        store,
+        request,
+        fence,
+        watchdog,
+        watchdog_child,
+        interrupted,
+        &mut child,
+        observe_oom,
+    )
+    .and_then(|()| {
+        if child.try_wait()?.is_none() {
+            Err(Error::new(
+                ErrorCode::State,
+                "lease ended while command remained alive",
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = result {
+        terminate_supervision_group(watchdog_child, Some(&mut child), watchdog.pid, grace_ms)?;
+        let outcome = child.wait()?;
+        eprintln!(
+            "request={} reason=supervision_lost detail={error}",
+            request.id.0
+        );
+        store.transaction(|state, config| {
+            if fence.owns(state.find(&request.id)?) && !state.find(&request.id)?.phase.terminal() {
+                state.finish(
+                    &request.id,
+                    Completion {
+                        code: outcome.code(),
+                        signal: outcome.signal(),
+                        reason: Some("supervision_lost"),
+                    },
+                    config,
+                    now_ms()?,
+                    clock_ms()?,
+                )?;
+            } else if state.find(&request.id)?.phase.terminal()
+                && (fence.owns(state.find(&request.id)?)
+                    || state.find(&request.id)?.worker.is_none())
+                && state.find(&request.id)?.reason.as_deref() != Some("rss_cap")
+            {
+                // An erroneously expired lease can still own live children.
+                // Correct its earlier success/reboot record after cleanup.
+                let current = state.find_mut(&request.id)?;
+                current.phase = Phase::Failed;
+                current.reason = Some("supervision_lost".to_owned());
+                current.exit_code = outcome.code();
+                current.signal = outcome.signal();
+                state.event(&request.id, config, now_ms()?, clock_ms()?)?;
+            }
+            Ok(())
+        })?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(crate) fn terminate_supervision_group(
+    anchor: &mut Child,
+    mut command: Option<&mut Child>,
+    group: u32,
+    grace_ms: u64,
+) -> Result<()> {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+    if anchor.id() != group {
+        return Err(Error::new(
+            ErrorCode::State,
+            "cleanup group is not the owned watchdog child",
+        ));
+    }
+    if !crate::process::child_is_owned(anchor)? {
+        // Only reap after all live members exit; never signal a reused PGID.
+        return Ok(());
+    }
+    let group =
+        i32::try_from(group).map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+    let group = Pid::from_raw(group);
+    let command_group = if let Some(child) = command.as_deref() {
+        if crate::process::child_is_owned(child)? && !crate::process::owned_child_exited(child)? {
+            let child_pid = i32::try_from(child.id())
+                .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?;
+            nix::unistd::getpgid(Some(Pid::from_raw(child_pid)))
+                .ok()
+                .filter(|actual| actual.as_raw() == child_pid && *actual != group)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let started = std::time::Instant::now();
+    let mut killed = false;
+    loop {
+        let signal = if started.elapsed() >= Duration::from_millis(grace_ms) {
+            Signal::SIGKILL
+        } else {
+            Signal::SIGTERM
+        };
+        if !killed {
+            for target in std::iter::once(group).chain(command_group) {
+                match killpg(target, signal) {
+                    Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                    Err(error) => {
+                        // Keep ownership and occupancy rather than abandon
+                        // live children if signaling is denied.
+                        eprintln!("supervision_lost: group cleanup signal failed: {error}");
+                    }
+                }
+            }
+        }
+        if signal == Signal::SIGKILL && !killed {
+            // Reap the pinned group leader only after killing the whole group.
+            let _ = anchor.kill();
+            anchor.wait()?;
+            if let Some(child) = command.as_deref_mut() {
+                let _ = child.kill();
+                child.wait()?;
+            }
+            killed = true;
+        }
+        if group_absent(
+            u32::try_from(group.as_raw())
+                .map_err(|error| Error::new(ErrorCode::State, error.to_string()))?,
+        ) && command_group
+            .is_none_or(|target| u32::try_from(target.as_raw()).is_ok_and(group_absent))
+        {
+            let _ = anchor.kill();
+            anchor.wait()?;
+            if let Some(child) = command.as_deref_mut() {
+                let _ = child.kill();
+                child.wait()?;
+            }
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn supervise_command_loop(
+    store: &Store,
+    request: &Request,
+    fence: &WorkerFence,
+    watchdog: &crate::model::ProcessIdentity,
+    watchdog_child: &mut Child,
+    interrupted: &AtomicBool,
+    child: &mut Child,
     mut observe_oom: impl FnMut(&mut CgroupOomEvidence, &Processes, u32),
 ) -> Result<()> {
     let enforcement = persisted_memory_enforcement(store, &request.id)?;
@@ -1214,8 +1430,7 @@ fn supervise_started_command(
     let mut stop_degraded_group = false;
     let grace = Config::read(&store.config_path)?.termination_grace_ms;
     loop {
-        // A dead watchdog remains a group member until its parent reaps it.
-        watchdog_child.try_wait()?;
+        let watchdog_exited = crate::process::owned_child_exited(watchdog_child)?;
         if enforcement == Some(MemoryEnforcement::SystemdScope) {
             observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
         }
@@ -1226,12 +1441,40 @@ fn supervise_started_command(
             observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
             cgroup_oom_evidence.read_known_files();
         }
+        if status.is_none()
+            && cgroup_oom_evidence.scope_vanished()
+            && !cgroup_oom_evidence.detected()
+        {
+            return Err(Error::new(
+                ErrorCode::State,
+                "memory scope vanished while command is running",
+            ));
+        }
+        if watchdog_exited
+            && Processes::read().group_has_live_members(watchdog.pid, Some(watchdog.pid))
+        {
+            if cgroup_oom_evidence.detected() {
+                store.transaction(|state, _| {
+                    record_scope_oom(state.find_mut(&request.id)?, enforcement, true);
+                    record_scope_peak(state.find_mut(&request.id)?, &cgroup_oom_evidence);
+                    Ok(())
+                })?;
+            }
+            return Err(Error::new(
+                ErrorCode::State,
+                "watchdog exited with live command group members",
+            ));
+        }
         let policy = store.transaction(|state, config| {
             if state.find(&request.id)?.phase.terminal() {
                 return Ok(None);
             }
             fence.require_running(state.find(&request.id)?)?;
             let current = state.find_mut(&request.id)?;
+            // Persist OOM evidence before publishing command_finished. The
+            // watchdog may win finalization as soon as that outcome is visible.
+            record_scope_oom(current, enforcement, cgroup_oom_evidence.detected());
+            record_scope_peak(current, &cgroup_oom_evidence);
             if let Some(outcome) = status {
                 current.command_finished = Some(CommandOutcome {
                     code: outcome.code(),
@@ -1261,20 +1504,43 @@ fn supervise_started_command(
             if degraded
                 && current.stop.is_none()
                 && let Some(cap) = current.memory_cap_bytes
-                && let Some(used) =
-                    Processes::read().group_memory_bytes(watchdog.pid, &[watchdog.pid])
+                && let Some(sample) = current
+                    .lease_record
+                    .as_ref()
+                    .and_then(|record| record.command.as_ref())
+                    .and_then(|root| Processes::read().command_memory_sample(root))
             {
-                current.measured_memory_bytes = Some(used);
-                if used > cap {
+                current.measured_memory_bytes = Some(sample.bytes);
+                if let Some(record) = &mut current.lease_record {
+                    record.memory_sample = Some(sample.clone());
+                }
+                if sample.bytes > cap {
                     current.stop = Some(StopReason::MemoryCap);
                     stop_degraded_group = true;
                 }
             }
-            if let Some(outcome) = status
-                && group_absent(watchdog.pid)
-            {
+            if let Some(outcome) = status {
+                // A dead leader must be reaped before ESRCH can establish that
+                // the group is gone. Do so only after all live members exited.
+                if watchdog_exited
+                    && !Processes::read().group_has_live_members(watchdog.pid, Some(watchdog.pid))
+                {
+                    watchdog_child.try_wait()?;
+                    while !group_absent(watchdog.pid) {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                if !group_absent(watchdog.pid) {
+                    return Ok(Some(crate::config::POLL_INTERVAL_MS));
+                }
                 if enforcement == Some(MemoryEnforcement::SystemdScope) {
                     cgroup_oom_evidence.read_known_files();
+                    record_scope_oom(
+                        state.find_mut(&request.id)?,
+                        enforcement,
+                        cgroup_oom_evidence.detected(),
+                    );
+                    record_scope_peak(state.find_mut(&request.id)?, &cgroup_oom_evidence);
                 }
                 finish_supervised_command(
                     state,
@@ -1448,8 +1714,9 @@ fn start_command(
         lease_record.cargo_incremental_overwrote_caller = incremental_overwrote_caller;
         lease_record.cargo_target_dir = target_dir;
         lease_record.cargo_target_dir_overwrote_caller = target_overwrote_caller;
-        state.find_mut(&request.id)?.lease_record = Some(lease_record);
         let child = command.spawn()?;
+        lease_record.command = Processes::read().member_identity(child.id());
+        state.find_mut(&request.id)?.lease_record = Some(lease_record);
         let running = state.find_mut(&request.id)?;
         running.command_started_clock_ms = Some(clock_ms()?);
         running.trace.running_at_ms = Some(now_ms()?);
@@ -1474,12 +1741,9 @@ enum LauncherPlatform {
 
 impl LauncherPlatform {
     fn current() -> Self {
-        #[cfg(target_os = "linux")]
-        {
+        if cfg!(target_os = "linux") {
             Self::Linux
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
+        } else {
             Self::Other
         }
     }
@@ -1652,13 +1916,52 @@ fn cgroup_cap_kill_reason(
     (enforcement == Some(MemoryEnforcement::SystemdScope) && oom_kill_observed).then_some("rss_cap")
 }
 
+fn record_scope_oom(request: &mut Request, enforcement: Option<MemoryEnforcement>, detected: bool) {
+    if request.stop.is_none() && cgroup_cap_kill_reason(enforcement, detected).is_some() {
+        request.stop = Some(StopReason::MemoryCap);
+    }
+}
+
+fn record_scope_peak(request: &mut Request, evidence: &CgroupOomEvidence) {
+    if evidence.detected()
+        && let (Some(record), Some(bytes)) = (&mut request.lease_record, evidence.peak_bytes)
+    {
+        record.memory_sample = Some(crate::model::MemorySample {
+            contributors: Vec::new(),
+            bytes,
+            metric: crate::model::MemoryMetric::CgroupMemoryPeak,
+        });
+    }
+}
+
+pub(crate) fn memory_cap_report(
+    id: &RequestId,
+    cap: Option<u64>,
+    sample: Option<&crate::model::MemorySample>,
+) -> String {
+    let cap = cap.map_or_else(|| "unknown".to_owned(), |cap| cap.to_string());
+    let measured = sample.map_or_else(
+        || "unavailable".to_owned(),
+        |sample| sample.bytes.to_string(),
+    );
+    let metric = sample.map_or("unavailable", |sample| sample.metric.as_str());
+    format!(
+        "request={} reason=rss_cap measured_bytes={measured} memory_cap_bytes={cap} metric={metric}",
+        id.0
+    )
+}
+
 #[derive(Default)]
 struct CgroupOomEvidence {
     event_files: std::collections::BTreeSet<std::path::PathBuf>,
     detected: bool,
+    peak_bytes: Option<u64>,
 }
 
 impl CgroupOomEvidence {
+    fn scope_vanished(&self) -> bool {
+        !self.event_files.is_empty() && self.event_files.iter().all(|path| !path.is_file())
+    }
     fn observe_group(&mut self, processes: &Processes, group: u32) {
         self.event_files
             .extend(processes.group_memory_events_files(group));
@@ -1672,6 +1975,15 @@ impl CgroupOomEvidence {
     }
 
     fn read_known_files(&mut self) {
+        for path in &self.event_files {
+            if let Some(peak) = path
+                .parent()
+                .and_then(|parent| std::fs::read_to_string(parent.join("memory.peak")).ok())
+                .and_then(|text| text.trim().parse::<u64>().ok())
+            {
+                self.peak_bytes = Some(self.peak_bytes.map_or(peak, |previous| previous.max(peak)));
+            }
+        }
         self.detected |= self.event_files.iter().any(|path| {
             crate::process::oom_kill_count_from_file(path).is_some_and(|count| count > 0)
         });
@@ -1737,6 +2049,7 @@ fn prepare_build_environment(
         cargo_build_jobs_env,
         rust_test_threads_env,
         record: LeaseRecord {
+            memory_sample: None,
             cargo_build_jobs,
             cargo_build_jobs_clamped,
             rust_test_threads,

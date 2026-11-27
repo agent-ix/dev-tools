@@ -150,15 +150,21 @@ fn nested_shim_passes_through_without_state_or_policy_writes()
     std::fs::create_dir(&home)?;
     std::fs::create_dir(&shim)?;
     std::fs::create_dir(&real)?;
+    let policy = root.path().join("readonly-policy.json");
+    std::fs::write(
+        &policy,
+        br#"{"host":"fixture","capacity_units":1,"maximum_units":1,"real_cargo":"/bin/echo"}"#,
+    )?;
+    std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o400))?;
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_locked-build"), shim.join("cargo"))?;
     std::os::unix::fs::symlink("/bin/echo", real.join("cargo"))?;
     std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500))?;
     for legacy in [false, true] {
         let mut cmd = Command::new(shim.join("cargo"));
-        cmd.arg("fixture-version")
+        cmd.arg("passthrough-argument")
             .env("HOME", &home)
             .env_remove("IX_HOME")
-            .env_remove("LOCKED_BUILD_CONFIG")
+            .env("LOCKED_BUILD_CONFIG", &policy)
             .env("LOCKED_BUILD_STATE", home.join("must-not-exist"))
             .env("PATH", std::env::join_paths([&shim, &real])?)
             .env_remove("LOCKED_BUILD_LEASE")
@@ -178,7 +184,7 @@ fn nested_shim_passes_through_without_state_or_policy_writes()
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(output.stdout, b"fixture-version\n");
+        assert_eq!(output.stdout, b"passthrough-argument\n");
         assert!(output.stderr.is_empty());
         assert_eq!(std::fs::read_dir(&home)?.count(), 0);
     }

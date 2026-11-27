@@ -3,6 +3,19 @@
 
 use super::*;
 
+/// Provenance: SWM-380. Trace: FR-005-AC-4
+#[test]
+fn stable_boot_identity_prevents_timestamp_drift_from_expiring_live_leases() {
+    let mut state = state(Vec::new());
+    state.boot_id = Some("kernel-boot-a".into());
+    state.boot_time = 100;
+    assert!(!state.rebooted(Some("kernel-boot-a"), 112));
+    assert!(state.rebooted(Some("kernel-boot-b"), 100));
+    state.boot_id = None;
+    assert!(!state.rebooted(Some("kernel-boot-a"), 112));
+    assert!(state.rebooted(None, 112));
+}
+
 pub(crate) fn policy() -> Config {
     let mut config = Config::default();
     config.host = "test-host".into();
@@ -38,6 +51,7 @@ fn request(sequence: u64, priority: u32, units: u32, time: u64) -> Request {
         blocked_at_clock_ms: None,
         active_blocked_reasons: Vec::new(),
         measured_memory_bytes: None,
+        pid_namespace: None,
         id: RequestId(format!("r{sequence}")),
         sequence,
         owner: "owner".into(),
