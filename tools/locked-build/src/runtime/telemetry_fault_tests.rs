@@ -380,9 +380,9 @@ fn telemetry_fault_blocked_store_keeps_previous_and_fifo_output_cannot_hang() ->
     cancel(&store, &id)?;
     let output = root.path().join("metrics.prom");
     let previous = cli_export(&binary, &store, &output)?;
-    std::fs::remove_file(store.path.join("snapshot.json"))?;
+    std::fs::remove_file(&store.config_path)?;
     let mode = nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR;
-    nix::unistd::mkfifo(&store.path.join("snapshot.json"), mode)
+    nix::unistd::mkfifo(&store.config_path, mode)
         .map_err(|e| Error::new(ErrorCode::Io, e.to_string()))?;
     let started = std::time::Instant::now();
     let fallback = cli_export(&binary, &store, &output)?;
