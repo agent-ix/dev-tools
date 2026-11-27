@@ -19,40 +19,117 @@ use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[cfg(target_os = "linux")]
+struct NamespaceChild(Child);
+
+#[cfg(target_os = "linux")]
+impl Drop for NamespaceChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "explicit native Linux unshare --pid/no-user-bus regression"]
 fn unshare_pid_namespace_keeps_supervision_through_child_exit() -> TestResult {
-    let output = Command::new("unshare")
-        .args([
-            "--user",
-            "--map-root-user",
-            "--pid",
-            "--fork",
-            "--mount-proc",
-        ])
-        .arg(std::env::current_exe()?)
-        .args([
-            "--exact",
-            "namespace_local_watchdog_survives_mutation_style_child_churn",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=4",
-        ])
-        .env("IX_BUILD_PID_NAMESPACE_FIXTURE", "1")
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            "unix:path=/nonexistent-locked-build-test-bus",
-        )
-        .env("XDG_RUNTIME_DIR", "/nonexistent-locked-build-test-runtime")
-        .output()?;
-    assert!(
-        output.status.success(),
-        "unshare PID fixture failed (not skipped):\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let root = tempfile::tempdir()?;
+    let stdout = root.path().join("namespace.stdout");
+    let stderr = root.path().join("namespace.stderr");
+    let mut namespace = NamespaceChild(
+        Command::new("unshare")
+            .args([
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+                "--kill-child=KILL",
+            ])
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "namespace_local_watchdog_survives_mutation_style_child_churn",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=4",
+            ])
+            .env("IX_BUILD_PID_NAMESPACE_FIXTURE", "1")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/nonexistent-locked-build-test-bus",
+            )
+            .env("XDG_RUNTIME_DIR", "/nonexistent-locked-build-test-runtime")
+            .env("TMPDIR", root.path())
+            .stdout(Stdio::from(fs::File::create(&stdout)?))
+            .stderr(Stdio::from(fs::File::create(&stderr)?))
+            .spawn()?,
     );
+    let child = &mut namespace.0;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        let mut failed = false;
+        for entry in fs::read_dir(root.path())? {
+            let state = entry?.path().join("state/state.json");
+            if state.is_file() {
+                let bytes = match fs::read(state) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let state: Value = serde_json::from_slice(&bytes)?;
+                for request in state["requests"].as_array().into_iter().flatten() {
+                    if request["supervision_detail"].is_string() {
+                        eprintln!(
+                            "namespace supervision failure: worker={} watchdog={} command={} phase={} detail={}",
+                            request["worker"],
+                            request["watchdog"],
+                            request["lease_record"]["command"],
+                            request["phase"],
+                            request["supervision_detail"]
+                        );
+                        failed = true;
+                    }
+                }
+            }
+        }
+        if failed || Instant::now() >= deadline {
+            // unshare owns the namespace init; killing its owned Child handle
+            // with --kill-child also reaps all namespace-local process groups.
+            child.kill()?;
+            let status = child.wait()?;
+            for entry in fs::read_dir(root.path())? {
+                let state = entry?.path().join("state/state.json");
+                if state.is_file() {
+                    let state: Value = serde_json::from_slice(&fs::read(state)?)?;
+                    for request in state["requests"].as_array().into_iter().flatten() {
+                        eprintln!(
+                            "namespace timeout: request={} worker={} watchdog={} phase={} detail={}",
+                            request["id"],
+                            request["worker"],
+                            request["watchdog"],
+                            request["phase"],
+                            request["supervision_detail"]
+                        );
+                    }
+                }
+            }
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        status.success(),
+        "unshare PID fixture failed (not skipped):\n{}\n{}",
+        fs::read_to_string(stdout)?,
+        fs::read_to_string(stderr)?
+    );
+    eprintln!("{}", fs::read_to_string(stderr)?);
     Ok(())
 }
 
