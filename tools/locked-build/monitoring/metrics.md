@@ -4,122 +4,114 @@ type: reference
 # Build metric semantics
 
 Build telemetry is a Prometheus view of the durable transition ledger and current scheduler state.
-Status JSON exposes identical additional samples under `metrics.telemetry`, using the same shared records as the text exporter.
+Use its counters to compare completed work and its gauges to inspect current queue health.
 
-Every family has a `host` label. Histogram families have cumulative `_bucket`, `_sum`, and `_count` samples.
-New histogram groups appear after their first observation. Unavailable measurements remain absent.
+## Fields
 
-## Duration histograms
+Every family has a `host` label. Priority classes are `must-fix`, `point`, `block`, `periodic`, `kani`, and `arch-test`.
+Unavailable measurements remain absent. Histogram groups appear after their first observation.
+All histogram buckets are cumulative and include `+Inf`, `_sum`, and `_count`.
 
-These families add `class` and `outcome` labels:
+### Durations
 
-- `ix_build_wait_seconds`: queue duration for terminal attempts, including queued cancellations and refusals.
-- `ix_build_run_seconds`: execution duration for commands that started.
-- `ix_build_hold_seconds`: admitted lease duration, including command startup.
-- `ix_build_hold_limit_ratio`: lease duration divided by its policy `hold_ms` cap.
+These histograms have `class` labels:
 
-Durations use monotonic clocks and retain saved queue age through reboot and admission.
-Run and hold observations are unavailable for commands interrupted by reboot, because monotonic timestamps cross different boots.
+- `ix_build_wait_seconds`: queue duration of terminal attempts, including cancellations and refusals.
+- `ix_build_run_seconds`: execution duration of commands that started.
+- `ix_build_hold_seconds`: admitted lease duration, including startup.
 
-## Memory histograms
+Finite boundaries are 1, 10, 60, 300, 900, 3600, and 7200 seconds.
+Queue age includes time saved at reboot recovery. Cross-boot run and hold durations remain absent.
 
-Admission reservations charge the memory budget; hard caps control enforcement.
-These completed-lease families add `class` and `outcome` labels:
+### Memory
 
-- `ix_build_memory_reserved_bytes`: admission reservation.
-- `ix_build_memory_peak_bytes`: observed peak, also labeled by `measurement`.
-- `ix_build_memory_headroom_ratio`: `1 - peak / hard_cap`, also labeled by `measurement`.
+These histograms have `class` labels:
 
-These kill families add `class` and `code` labels:
+- `ix_build_memory_reserved_bytes`: completed lease reservations.
+- `ix_build_memory_peak_bytes`: observed command peaks.
 
-- `ix_build_memory_kill_limit_bytes`: hard cap on OOM or RSS termination.
-- `ix_build_memory_kill_measured_bytes`: measured peak, also labeled by `measurement`.
+Finite boundaries are 100 million, 1 billion, 8 billion, and 32 billion bytes.
+Cgroup peaks and sampled watchdog peaks share the peak histogram. Watchdog measurements are lower bounds between polls.
+`ix_build_running_memory_headroom_ratio` is the minimum measured running headroom, computed as `1 - peak / cap`.
+The headroom gauge is absent when no running lease has both measurements.
 
-`memory.peak` supplies cgroup peaks. The watchdog retains the maximum observed RSS or Pss_Anon.
-Watchdog peaks are lower bounds between polls. The `measurement` label distinguishes the accounting methods.
-Negative headroom records overshoot; avoid `rate` on headroom histogram sums, which can decrease.
+### Outcomes and attribution
 
-## Capacity gauges
+- `ix_build_builds_total{class,outcome}` counts terminal attempts. Outcomes are `ok`, `failed`, `cancelled`, `timed_out`, and `refused`.
+- `ix_build_failures_total{class,code}` counts abnormal attempts by stable `LB_*` diagnostic code. Memory kills count as failed builds.
+- `ix_build_identity_total{repo,subcommand,outcome}` counts terminal attempts. Attribution outcomes are `ok`, `failed`, and `other`.
+- `ix_build_repo_run_seconds_total{repo,subcommand}` accumulates observed execution seconds.
+- `ix_build_repo_run_count_total{repo,subcommand}` counts corresponding measured runs.
+- `ix_build_wasted_run_seconds_total{class,cause}` accumulates measured execution seconds lost to cancellation or limit kills. Causes are `cancelled` and `late_kill`.
+- `ix_build_lane_unit_seconds_total{lane}` accumulates completed hold seconds multiplied by admitted units.
 
-These families add the specified labels:
+Repositories resolve through Git metadata, including linked worktrees. The repository registry retains 30 names plus `other` for its lifetime.
+Subcommands are `build`, `test`, `check`, `clippy`, `xtask`, and `other`.
+The lane registry retains 64 three-part addresses plus `other` for its lifetime.
+The identity counter aggregates independently of lane and ticket. Repository attribution uses counters throughout.
 
-- `ix_build_queue_depth_by_reason`: queued depth by `class` and `reason`; simultaneous blockers overlap.
-- `ix_build_owner_queued`: queued depth by bounded `lane`.
+### Capacity and queue health
 
 These gauges have only the `host` label:
 
-- `ix_build_running`: admitted leases, including command startup.
+- `ix_build_running`: admitted leases, including startup.
 - `ix_build_units_used`: occupied admission units.
 - `ix_build_units_capacity`: configured admission capacity.
-- `ix_build_memory_budget_used_bytes`: current admission reservations.
-- `ix_build_memory_budget_total_bytes`: configured fixed memory budget, zero in live-available mode.
-- `ix_build_running_memory_headroom_ratio`: minimum measured running lease headroom, absent when unavailable.
-- `ix_build_memory_measurements_available`: running leases with a measured peak and hard cap.
-- `ix_build_oldest_queued_seconds`: oldest current queued age.
-- `ix_build_export_timestamp_seconds`: UTC time of the latest refresh.
+- `ix_build_memory_budget_used_bytes`: current reservations.
+- `ix_build_memory_budget_total_bytes`: configured memory budget; zero means live-available mode.
+- `ix_build_oldest_running_seconds`: oldest admitted lease age.
+- `ix_build_leases_missing_process`: running leases with neither a live worker nor command identity.
+- `ix_build_unleased_build_processes`: live Cargo, rustc, or rustc-wrapper processes outside verified lease ancestry.
 
-Queue reasons use the same last observed blockers as status. Their sum can exceed total queue depth.
-`priority_reservation` is exported as `fifo_or_priority_reservation`.
-An empty blocker list is `ready`, including requests awaiting their first scheduler probe.
+Process sampling verifies PID and start time before accepting a lease root. Zombies are excluded.
+Process observations are read-only. Their gauges remain absent when the process table or a lease's PID namespace cannot be verified.
 
-## Failure and identity counters
+`ix_build_oldest_queued_seconds{class}` measures the oldest current queue age, including saved reboot age.
+`ix_build_queue_depth_by_reason{class,reason}` counts queued requests by their last observed blockers.
+Simultaneous blockers overlap; Their sum indicates queue presence.
+An empty blocker list is `ready`. Priority reservation becomes `fifo_or_priority_reservation`.
 
-`ix_build_failures_total` adds `class`, `code`, `exit_class`, `signal`, and `cause` labels.
-Codes use the stable `LB_*` catalog, including all `LB_REFUSED_*` refusals.
-`exit_class` is `101`, `other`, `zero`, or `none`. Signals are `1` through `64`, `other`, or `none`.
-`cause=command` covers command exits and external signals.
-Scheduler limits, refusals, cancellation, and supervision loss use `cause=tool`.
+`ix_build_admission_blocked_seconds_total{reason}` measures host blocked time once per resource interval.
+Reasons are `memory`, `target_disk`, `host_load`, and `probe`. Scheduler writes checkpoint and close these intervals.
+Scrapes project an open interval without changing persisted state.
 
-`ix_build_identity_total` adds `class`, `outcome`, `lane`, `ticket`, `repo`, and `subcommand` labels.
-It retains 128 distinct lane/ticket/repo/subcommand tuples for the ledger's lifetime, plus one `other` tuple.
-Classes and outcomes have closed vocabularies. The lane registry retains 64 addresses plus `other`; overflow stays aggregated after pruning.
-Repositories resolve from working-directory Git metadata, including linked worktrees.
-Cargo subcommands are `build`, `test`, `check`, `clippy`, `xtask`, or `other`.
-Request IDs, command arguments, environment values, and absolute paths are excluded from labels.
+### Host and exporter
 
-## Host and policy
-
-These counters have only the `host` label:
-
-- `ix_build_supervisor_restarts_total`: replacement workers that registered after the first generation.
+- `ix_build_supervisor_restarts_total`: replacement workers after their first generation.
 - `ix_build_recover_events_total`: registered replacements and completed orphan finalizations.
-- `ix_build_boot_changes_total`: detected changes between persisted host identities.
-
-Idle recovery polls and live pending first-launch claims add nothing.
-
-`ix_build_info` is a gauge with `version` and `policy_hash` labels.
-The hash fingerprints effective serialized policy with FNV-1a and identifies configuration changes.
-
-These policy gauges have only the `host` label:
-
-- `ix_build_policy_jobs`: configured maximum Cargo jobs; zero means unset.
-- `ix_build_policy_test_threads`: configured test threads; zero means unset.
-- `ix_build_policy_maximum_units`: largest feasible request size.
+- `ix_build_boot_changes_total`: detected host boot changes.
+- `ix_build_telemetry_dropped_total`: durable dropped-event counter, initially zero.
+- `ix_build_info{version,policy_hash}`: exporter version and effective policy fingerprint, with value one.
 - `ix_build_policy_hold_seconds`: maximum lease duration.
 - `ix_build_policy_maximum_load`: maximum admission load average.
-- `ix_build_policy_memory_reserve_bytes`: host memory reserve.
-- `ix_build_policy_disk_reserve_bytes`: host disk reserve.
-- `ix_build_policy_memory_reserve_per_job_bytes`: default per-job admission charge.
-- `ix_build_policy_memory_limit_per_job_bytes`: default per-job hard cap.
+- `ix_build_export_timestamp_seconds`: last successful refresh time in UTC seconds.
+- `ix_build_state_dir_free_bytes`: available bytes on the state directory filesystem.
+- `ix_build_snapshot_size_bytes`: atomic snapshot file size.
+- `ix_build_export_error`: one when collection failed or exceeded its six-second collection deadline; otherwise zero.
 
-These policy gauges also add `class`:
+The policy fingerprint is FNV-1a over effective serialized policy. Compare hashes with each host's intended configuration.
+Different hardware policies can produce intentional cross-host skew.
 
-- `ix_build_policy_class_memory_reserve_per_job_bytes`: effective per-class charge.
-- `ix_build_policy_class_memory_limit_per_job_bytes`: effective per-class hard cap.
-- `ix_build_policy_class_memory_cap_bytes`: maximum class lease size; zero means unset.
+## Collection and retention
 
-## Existing families
+Collection reads atomic snapshots without taking the scheduler write lock. Separate collector and publisher processes bound probes and all fallback/publication I/O.
+On failure, publication retains previous samples and their original refresh timestamp, then sets `ix_build_export_error` to one.
+Atomic publication skips unchanged contents. Successful textfile publication records the exported store identity and ledger sequence.
+The publisher has an eight-second hard deadline; a blocked output leaves the previous atomic file intact.
+Daily pruning removes terminal requests covered by that checkpoint and retains cumulative counters.
 
-The existing families remain available:
+The exporter and its node scrape use the `node` job's static `host` label.
+The textfile path comes from the running node_exporter's `--collector.textfile.directory` flag.
+Installation requires one unambiguous absolute directory.
 
-- `ix_build_requests_total`: completed and refused attempts by class and outcome.
-- `ix_build_terminations_total`: abnormal outcomes by class and code, including initial zero series.
-- `ix_build_blocked_seconds_total`: active and completed per-request blocked time by class and reason.
-- `ix_build_queue_depth`: queued requests by class.
-- `ix_build_lane_running`: running leases by bounded lane.
-- `ix_build_queue_wait_seconds`: queue duration at admission by class.
-- `ix_build_slots_busy`, `ix_build_slots_configured`: occupied and configured units.
-- `ix_build_builds_total`: completed builds by class and outcome.
-- `ix_build_admission_blocked_seconds_total`: host blocked time by resource reason.
+Stored lifetime counters migrate to the current labels. Changed histogram boundaries start a fresh histogram epoch.
+Repository execution and lane unit-second counters begin accumulating from new transitions after upgrade.
+Upgrade all writers together before resuming the queue.
 
-Simultaneous per-request blockers overlap. Initial zero termination series let kill alerts detect the first failure after an initial scrape.
+## Examples
+
+`ix_build:wait_p95_seconds{class="must-fix"}` reads the five-minute queue wait p95.
+`ix_build:repo_run_mean_seconds` reads lifetime mean execution seconds per repository and subcommand.
+`ix_build:lease_overhead_seconds_per_second` subtracts execution time from lease time per class.
+The [dashboard](dashboard.json) groups the named recording queries into fifteen queue-health questions.
+The [alert rules](alerts.yml) share those recordings.

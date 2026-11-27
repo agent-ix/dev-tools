@@ -3,4 +3,8 @@ Description=Export locked-build Prometheus telemetry
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/locked-build --state %h/.local/state/locked-build --config %h/.local/state/locked-build/policy.json metrics --output %h/.local/share/node_exporter/textfile_collector/locked-build.prom
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=10
+TimeoutStartSec=10
+ExecStart=@BINARY@ --state @STATE@ --config @CONFIG@ metrics --output @OUTPUT@

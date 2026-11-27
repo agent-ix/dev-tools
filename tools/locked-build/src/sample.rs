@@ -126,6 +126,105 @@ struct SampleResult {
     failures: BTreeMap<&'static str, String>,
 }
 
+/// Read-only lease/process observations; no signaling or scheduler mutation.
+pub(crate) fn lease_health(state: &crate::model::State) -> Option<(usize, usize)> {
+    let namespace = crate::process::pid_namespace().ok()?;
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+    let system = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_tasks()),
+    );
+    if system.processes().len() > PROCESS_LIMIT
+        || system
+            .process(sysinfo::Pid::from_u32(std::process::id()))
+            .is_none()
+    {
+        return None;
+    }
+    let rows: Vec<_> = system
+        .processes()
+        .iter()
+        .map(|(pid, p)| ProcessRecord {
+            pid: pid.as_u32(),
+            parent_pid: p.parent().map_or(0, |p| p.as_u32()),
+            process_group_id: 0,
+            start_time: p.start_time().to_string(),
+            state: if p.status() == sysinfo::ProcessStatus::Zombie {
+                'Z'
+            } else {
+                'S'
+            },
+            uid: None,
+            arguments: p.cmd().to_vec(),
+        })
+        .collect();
+    lease_health_from_processes(state, &rows, namespace.as_deref())
+}
+fn lease_health_from_processes(
+    state: &crate::model::State,
+    rows: &[ProcessRecord],
+    namespace: Option<&str>,
+) -> Option<(usize, usize)> {
+    if state
+        .requests
+        .iter()
+        .any(|r| r.phase == crate::model::Phase::Running && r.pid_namespace.as_deref() != namespace)
+    {
+        return None;
+    }
+    let by_pid: BTreeMap<_, _> = rows.iter().map(|row| (row.pid, row)).collect();
+    let mut roots = BTreeSet::new();
+    let mut missing = 0;
+    for request in state
+        .requests
+        .iter()
+        .filter(|r| r.phase == crate::model::Phase::Running)
+    {
+        let mut present = false;
+        for identity in request.worker.iter().chain(
+            request
+                .lease_record
+                .iter()
+                .filter_map(|l| l.command.as_ref()),
+        ) {
+            if by_pid.get(&identity.pid).is_some_and(|r| {
+                r.state != 'Z' && r.start_time == identity.started_seconds.to_string()
+            }) {
+                roots.insert(identity.pid);
+                present = true;
+            }
+        }
+        if !present {
+            missing += 1;
+        }
+    }
+    let unleased = rows
+        .iter()
+        .filter(|r| {
+            let build = r
+                .arguments
+                .first()
+                .and_then(|a| Path::new(a).file_name())
+                .is_some_and(|name| name == "rustc" || name == "rustc-wrapper" || name == "cargo");
+            if !build || r.state == 'Z' {
+                return false;
+            }
+            let mut pid = r.pid;
+            let mut visited = BTreeSet::new();
+            while visited.insert(pid) {
+                if roots.contains(&pid) {
+                    return false;
+                }
+                match by_pid.get(&pid) {
+                    Some(row) if row.parent_pid != 0 => pid = row.parent_pid,
+                    _ => break,
+                }
+            }
+            true
+        })
+        .count();
+    Some((missing, unleased))
+}
+
 impl SamplerConfig {
     fn read(path: &Path) -> Result<Self> {
         let bytes = read_bounded(path, CONFIG_LIMIT).map_err(|error| {
@@ -412,7 +511,7 @@ fn sample(config: &SamplerConfig) -> SampleResult {
     match busy_count(&config.busy_source) {
         Ok(busy) => metric(
             &mut output,
-            "ix_build_slots_busy",
+            "ix_build_units_used",
             "gauge",
             "Currently active build processes counted by the configured host source.",
             &config.host,
@@ -428,7 +527,7 @@ fn sample(config: &SamplerConfig) -> SampleResult {
     if let Some(capacity) = config.capacity_units {
         metric(
             &mut output,
-            "ix_build_slots_configured",
+            "ix_build_units_capacity",
             "gauge",
             "Configured ordinary build slots from the sourced host lane count.",
             &config.host,
@@ -1337,8 +1436,8 @@ mod tests {
         };
 
         let result = sample(&config);
-        assert!(!result.exposition.contains("ix_build_slots_configured"));
-        assert!(!result.exposition.contains("ix_build_slots_busy"));
+        assert!(!result.exposition.contains("ix_build_units_capacity"));
+        assert!(!result.exposition.contains("ix_build_units_used"));
         assert!(result.exposition.contains("ix_build_probe_unavailable"));
     }
 
@@ -1405,8 +1504,8 @@ mod tests {
 
         assert_eq!(run(&config_path, &output_path)?, 0);
         let exposition = fs::read_to_string(&output_path)?;
-        assert!(exposition.contains("ix_build_slots_configured{host=\"terra\"} 12"));
-        assert!(!exposition.contains("ix_build_slots_busy"));
+        assert!(exposition.contains("ix_build_units_capacity{host=\"terra\"} 12"));
+        assert!(!exposition.contains("ix_build_units_used"));
         assert!(exposition.contains("ix_build_probe_unavailable"));
         let mut files = fs::read_dir(root.path())?
             .map(|entry| entry.map(|entry| entry.file_name()))
@@ -1781,9 +1880,9 @@ mod tests {
         assert!(
             sampled
                 .exposition
-                .contains("ix_build_slots_busy{host=\"titan\"} 3")
+                .contains("ix_build_units_used{host=\"titan\"} 3")
         );
-        assert!(!sampled.exposition.contains("ix_build_slots_configured"));
+        assert!(!sampled.exposition.contains("ix_build_units_capacity"));
         Ok(())
     }
 
@@ -1942,7 +2041,7 @@ mod tests {
         assert!(
             result
                 .exposition
-                .contains("ix_build_slots_configured{host=\"terra\"} 12")
+                .contains("ix_build_units_capacity{host=\"terra\"} 12")
         );
         assert!(
             result
@@ -1952,8 +2051,84 @@ mod tests {
         assert!(result.exposition.contains(
             "ix_build_probe_unavailable{host=\"terra\",probe=\"wrapper_lane_ownership\"} 1"
         ));
-        assert!(!result.exposition.contains("ix_build_slots_busy"));
+        assert!(!result.exposition.contains("ix_build_units_used"));
         assert_eq!(result.failures.len(), 1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    use crate::metrics::tests::{request, state};
+    use crate::model::{LeaseRecord, Phase, ProcessIdentity};
+    /// Trace: FR-015-AC-15
+    #[test]
+    fn telemetry_unleased_compilers_exclude_verified_lease_descendants_and_reused_pids() {
+        let mut running = request(1, "draco:tooling:one".into(), Phase::Running);
+        running.lease_record = Some(LeaseRecord {
+            command: Some(ProcessIdentity {
+                pid: 10,
+                started_seconds: 7,
+            }),
+            ..Default::default()
+        });
+        let mut missing = request(2, "draco:tooling:two".into(), Phase::Running);
+        missing.worker = Some(ProcessIdentity {
+            pid: 40,
+            started_seconds: 8,
+        });
+        let row = |pid, parent, start: u64, command: &str| ProcessRecord {
+            pid,
+            parent_pid: parent,
+            process_group_id: pid,
+            start_time: start.to_string(),
+            state: 'S',
+            uid: None,
+            arguments: vec![command.into()],
+        };
+        let rows = vec![
+            row(10, 1, 7, "cargo"),
+            row(11, 10, 7, "rustc"),
+            row(20, 1, 7, "rustc"),
+            row(30, 1, 7, "rustc-wrapper"),
+            row(40, 1, 9, "rustc"),
+        ];
+        assert_eq!(
+            lease_health_from_processes(&state(vec![running, missing]), &rows, None),
+            Some((1, 3))
+        );
+    }
+    /// Trace: FR-015-AC-15
+    #[test]
+    fn telemetry_foreign_or_unknown_namespace_is_not_reported_as_local_process_health() {
+        let mut running = request(1, "draco:tooling:one".into(), Phase::Running);
+        running.pid_namespace = Some("pid:[11]".into());
+        running.worker = Some(ProcessIdentity {
+            pid: 10,
+            started_seconds: 7,
+        });
+        let rows = vec![ProcessRecord {
+            pid: 10,
+            parent_pid: 1,
+            process_group_id: 10,
+            start_time: "7".into(),
+            state: 'S',
+            uid: None,
+            arguments: vec!["rustc".into()],
+        }];
+        assert_eq!(
+            lease_health_from_processes(&state(vec![running.clone()]), &rows, Some("pid:[11]")),
+            Some((0, 0))
+        );
+        assert_eq!(
+            lease_health_from_processes(&state(vec![running.clone()]), &rows, Some("pid:[22]")),
+            None
+        );
+        running.pid_namespace = None;
+        assert_eq!(
+            lease_health_from_processes(&state(vec![running]), &rows, Some("pid:[22]")),
+            None
+        );
     }
 }

@@ -2,7 +2,7 @@
 rule_files:
   - alerts.yml
 scrape_configs:
-  - job_name: locked-build
+  - job_name: node
     scrape_interval: 15s
     honor_labels: true
     static_configs:

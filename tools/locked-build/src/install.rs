@@ -51,6 +51,7 @@ pub(crate) fn install_tools(
     current_exe: &Path,
     search_path: Option<&OsStr>,
 ) -> Result<()> {
+    let textfile = detect_textfile_directory()?;
     install_npm_packages(&read_manifest(TOOL_MANIFEST)?)?;
     install_tools_with_measurement(
         home,
@@ -58,7 +59,16 @@ pub(crate) fn install_tools(
         search_path,
         &crate::writable::shared_root()?,
         Config::measured_default,
-    )
+    )?;
+    let shared = crate::writable::shared_root()?;
+    install_monitoring(
+        home,
+        &home.join(".local/bin/locked-build"),
+        &shared,
+        &shared.join("policy.json"),
+        &textfile,
+    )?;
+    activate_monitoring(home)
 }
 
 fn install_tools_with_measurement(
@@ -1076,6 +1086,266 @@ mod tests {
                 ("terra", 14, 101_250_785_280),
             ]
         );
+        Ok(())
+    }
+}
+
+fn textfile_from_arguments(arguments: &[String]) -> Option<PathBuf> {
+    if !arguments
+        .first()
+        .and_then(|s| Path::new(s).file_name())
+        .is_some_and(|s| s == "node_exporter")
+    {
+        return None;
+    }
+    arguments.iter().enumerate().find_map(|(i, arg)| {
+        let value = arg
+            .strip_prefix("--collector.textfile.directory=")
+            .map(str::to_owned)
+            .or_else(|| {
+                (arg == "--collector.textfile.directory")
+                    .then(|| arguments.get(i + 1).cloned())
+                    .flatten()
+            })?;
+        let path = PathBuf::from(value);
+        path.is_absolute().then_some(path)
+    })
+}
+fn detect_textfile_directory() -> Result<PathBuf> {
+    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+    let system = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything().without_tasks()),
+    );
+    let directories: std::collections::BTreeSet<_> = system
+        .processes()
+        .values()
+        .filter_map(|p| {
+            textfile_from_arguments(
+                &p.cmd()
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    if directories.len() != 1 {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "expected exactly one node_exporter --collector.textfile.directory; start node_exporter with an absolute textfile directory",
+        ));
+    }
+    directories.into_iter().next().ok_or_else(|| {
+        Error::new(
+            ErrorCode::Configuration,
+            "node_exporter textfile directory unavailable",
+        )
+    })
+}
+fn install_monitoring(
+    home: &Path,
+    binary: &Path,
+    state: &Path,
+    config: &Path,
+    textfile: &Path,
+) -> Result<()> {
+    let units = [
+        (
+            "locked-build-metrics.service",
+            include_str!("../monitoring/locked-build-metrics.service"),
+        ),
+        (
+            "locked-build-metrics.timer",
+            include_str!("../monitoring/locked-build-metrics.timer"),
+        ),
+        (
+            "locked-build-prune.service",
+            include_str!("../monitoring/locked-build-prune.service"),
+        ),
+        (
+            "locked-build-prune.timer",
+            include_str!("../monitoring/locked-build-prune.timer"),
+        ),
+    ];
+    let plists = [
+        (
+            "com.agent-ix.locked-build-metrics.plist",
+            include_str!("../monitoring/com.agent-ix.locked-build-metrics.plist"),
+        ),
+        (
+            "com.agent-ix.locked-build-prune.plist",
+            include_str!("../monitoring/com.agent-ix.locked-build-prune.plist"),
+        ),
+    ];
+    let (directory, files) = if cfg!(target_os = "macos") {
+        (home.join("Library/LaunchAgents"), plists.as_slice())
+    } else {
+        (home.join(".config/systemd/user"), units.as_slice())
+    };
+    std::fs::create_dir_all(&directory)?;
+    std::fs::create_dir_all(textfile)?;
+    for (name, template) in files {
+        let mut body = template.to_string();
+        for (key, path) in [
+            ("@BINARY@", binary),
+            ("@STATE@", state),
+            ("@CONFIG@", config),
+            ("@OUTPUT@", &textfile.join("locked-build.prom")),
+        ] {
+            let value = path
+                .to_str()
+                .ok_or_else(|| Error::new(ErrorCode::Configuration, "non-UTF8 monitoring path"))?;
+            // Quote systemd arguments; XML paths are escaped independently.
+            let escaped = if cfg!(target_os = "macos") {
+                value
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+            } else {
+                format!(
+                    "\"{}\"",
+                    value
+                        .replace('\\', "\\\\")
+                        .replace('\"', "\\\"")
+                        .replace('%', "%%")
+                )
+            };
+            body = body.replace(key, &escaped);
+        }
+        write_if_changed(&directory.join(name), body.as_bytes(), 0o644)?;
+    }
+    Ok(())
+}
+fn activate_monitoring(home: &Path) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        let domain = format!("gui/{}", nix::unistd::getuid());
+        for label in [
+            "com.agent-ix.locked-build-metrics",
+            "com.agent-ix.locked-build-prune",
+        ] {
+            let target = format!("{domain}/{label}");
+            if Command::new("launchctl")
+                .args(["print", &target])
+                .output()?
+                .status
+                .success()
+                && !Command::new("launchctl")
+                    .args(["bootout", &target])
+                    .status()?
+                    .success()
+            {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "launchctl monitoring bootout failed",
+                ));
+            }
+            let status = Command::new("launchctl")
+                .args(["bootstrap", &domain])
+                .arg(
+                    home.join("Library/LaunchAgents")
+                        .join(format!("{label}.plist")),
+                )
+                .status()?;
+            if !status.success() {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "launchctl monitoring bootstrap failed",
+                ));
+            }
+        }
+    } else {
+        for args in [
+            vec!["--user", "daemon-reload"],
+            vec![
+                "--user",
+                "enable",
+                "--now",
+                "locked-build-metrics.timer",
+                "locked-build-prune.timer",
+            ],
+        ] {
+            if !Command::new("systemctl").args(args).status()?.success() {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "systemd monitoring installation failed",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod monitoring_tests {
+    use super::*;
+    /// Trace: FR-015-AC-5, FR-015-AC-10
+    #[test]
+    fn telemetry_install_uses_detected_exporter_path_and_safe_schedules() -> Result<()> {
+        assert_eq!(
+            textfile_from_arguments(&[
+                "/usr/bin/node_exporter".into(),
+                "--collector.textfile.directory=/home/peter/textfile".into()
+            ]),
+            Some(PathBuf::from("/home/peter/textfile"))
+        );
+        assert_eq!(
+            textfile_from_arguments(&[
+                "node_exporter".into(),
+                "--collector.textfile.directory".into(),
+                "/tmp/textfile".into()
+            ]),
+            Some(PathBuf::from("/tmp/textfile"))
+        );
+        assert!(textfile_from_arguments(&["node_exporter".into()]).is_none());
+        assert!(
+            textfile_from_arguments(&[
+                "other".into(),
+                "--collector.textfile.directory=/tmp".into()
+            ])
+            .is_none()
+        );
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home & space");
+        let textfile = root.path().join("canonical textfile");
+        install_monitoring(
+            &home,
+            &home.join("bin/locked-build"),
+            &home.join("state"),
+            &home.join("policy.json"),
+            &textfile,
+        )?;
+        if cfg!(target_os = "macos") {
+            for file in [
+                "com.agent-ix.locked-build-metrics.plist",
+                "com.agent-ix.locked-build-prune.plist",
+            ] {
+                let path = home.join("Library/LaunchAgents").join(file);
+                let text = std::fs::read_to_string(&path)?;
+                assert!(!text.contains('@'));
+                assert!(text.contains("<key>Nice</key><integer>19</integer>"));
+                assert!(text.contains("LowPriorityIO"));
+                assert!(text.contains("Background"));
+                let checked = Command::new("plutil").arg("-lint").arg(path).output()?;
+                assert!(
+                    checked.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&checked.stdout)
+                );
+            }
+            let metric = std::fs::read_to_string(
+                home.join("Library/LaunchAgents/com.agent-ix.locked-build-metrics.plist"),
+            )?;
+            assert!(metric.contains(&format!("{}/locked-build.prom", textfile.display())));
+            assert!(metric.contains("<integer>15</integer>"));
+        } else {
+            let metric = std::fs::read_to_string(
+                home.join(".config/systemd/user/locked-build-metrics.service"),
+            )?;
+            assert!(metric.contains("Nice=19"));
+            assert!(metric.contains("IOSchedulingClass=idle"));
+            assert!(metric.contains("CPUWeight=10"));
+            assert!(metric.contains("TimeoutStartSec=10"));
+            assert!(metric.contains(&format!("\"{}/locked-build.prom\"", textfile.display())));
+        }
         Ok(())
     }
 }

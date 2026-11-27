@@ -11,19 +11,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const BYTES: &[f64] = &[
-    1_000_000.,
-    10_000_000.,
     100_000_000.,
-    500_000_000.,
     1_000_000_000.,
-    3_000_000_000.,
     8_000_000_000.,
-    16_000_000_000.,
     32_000_000_000.,
-    64_000_000_000.,
 ];
-const RATIOS: &[f64] = &[0., 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 1., 2.];
-const MAX_IDENTITIES: usize = 128;
+const MAX_REPOS: usize = 30;
 const MAX_LANES: usize = 64;
 const REASONS: &[&str] = &[
     "memory_budget",
@@ -102,15 +95,29 @@ impl EventTelemetry {
     }
 }
 
-/// Compact durable event ledger; label registries have lifetime caps.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+/// Compact durable event ledger; repositories and lanes have independent lifetime bounds.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Ledger {
     families: Vec<MetricFamily>,
-    identities: BTreeSet<String>,
+    #[serde(alias = "identities")]
+    repos: BTreeSet<String>,
+    #[serde(default)]
+    format_version: Option<u32>,
     lanes: BTreeSet<String>,
     /// Admission wait stays until terminal reconciliation; bounded by active requests.
     admitted_wait_ms: BTreeMap<String, u64>,
+}
+impl Default for Ledger {
+    fn default() -> Self {
+        Self {
+            families: vec![],
+            repos: BTreeSet::new(),
+            lanes: BTreeSet::new(),
+            admitted_wait_ms: BTreeMap::new(),
+            format_version: Some(2),
+        }
+    }
 }
 fn labels(values: &[(&str, &str)]) -> Labels {
     values
@@ -147,6 +154,81 @@ fn bounded(value: &str) -> &str {
     }
 }
 impl Ledger {
+    // Upgrade stored counters once. Changed histogram boundaries start a new epoch.
+    // This preserves pruned lifetime totals without exporting retired families.
+    fn upgrade(&mut self) -> Result<()> {
+        if self.format_version == Some(2) {
+            return Ok(());
+        }
+        if self.format_version.is_some() {
+            return Err(Error::new(
+                ErrorCode::State,
+                "unsupported telemetry ledger format",
+            ));
+        }
+        let previous = std::mem::take(&mut self.families);
+        self.repos.clear();
+        for family in previous {
+            if matches!(family.kind, MetricKind::Histogram) {
+                continue;
+            }
+            for sample in family.samples {
+                let mut labels = sample.labels;
+                labels.remove("host");
+                if family.name == "ix_build_identity_total" {
+                    if let (Some(class), Some(outcome)) =
+                        (labels.get("class"), labels.get("outcome"))
+                    {
+                        let build_labels =
+                            crate::telemetry::labels(&[("class", class), ("outcome", outcome)]);
+                        add(
+                            self.family(
+                                "ix_build_builds_total",
+                                "Terminal attempts by class and outcome.",
+                                MetricKind::Counter,
+                            ),
+                            "",
+                            build_labels,
+                            sample.value.clone(),
+                        )?;
+                    }
+                    labels.remove("class");
+                    labels.remove("lane");
+                    labels.remove("ticket");
+                    if let Some(outcome) = labels.get_mut("outcome")
+                        && outcome != "ok"
+                        && outcome != "failed"
+                    {
+                        *outcome = "other".into();
+                    }
+                    if let Some(repo) = labels.get_mut("repo") {
+                        if self.repos.contains(repo) || self.repos.len() < MAX_REPOS {
+                            self.repos.insert(repo.clone());
+                        } else {
+                            *repo = "other".into();
+                        }
+                    }
+                } else if family.name == "ix_build_failures_total" {
+                    labels.retain(|key, _| key == "class" || key == "code");
+                }
+                let help = match family.name.as_str() {
+                    "ix_build_identity_total" => {
+                        "Terminal attempts by repository, subcommand and ok/failed/other outcome."
+                    }
+                    "ix_build_failures_total" => "Abnormal outcomes by stable diagnostic code.",
+                    _ => &family.help,
+                };
+                add(
+                    self.family(&family.name, help, family.kind),
+                    &sample.suffix,
+                    labels,
+                    sample.value,
+                )?;
+            }
+        }
+        self.format_version = Some(2);
+        Ok(())
+    }
     fn register_lane(&mut self, value: &str) -> String {
         if valid_lane(value) && (self.lanes.contains(value) || self.lanes.len() < MAX_LANES) {
             self.lanes.insert(value.into());
@@ -155,40 +237,8 @@ impl Ledger {
             "other".into()
         }
     }
-    fn lane(&self, value: &str, current: &BTreeSet<String>) -> String {
-        if self.lanes.contains(value) || current.contains(value) {
-            value.into()
-        } else {
-            "other".into()
-        }
-    }
-    pub(crate) fn owner_counts(&self, state: &State, phase: Phase) -> BTreeMap<String, usize> {
-        let current: BTreeSet<_> = state
-            .requests
-            .iter()
-            .filter(|r| {
-                !r.phase.terminal() && valid_lane(&r.owner) && !self.lanes.contains(&r.owner)
-            })
-            .map(|r| r.owner.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .take(MAX_LANES.saturating_sub(self.lanes.len()))
-            .collect();
-        let mut owners: BTreeMap<String, usize> = self
-            .lanes
-            .iter()
-            .chain(&current)
-            .map(|lane| (lane.clone(), 0))
-            .collect();
-        owners.insert("other".into(), 0);
-        for request in state.requests.iter().filter(|r| r.phase == phase) {
-            *owners
-                .entry(self.lane(&request.owner, &current))
-                .or_default() += 1;
-        }
-        owners
-    }
     pub(crate) fn observe(&mut self, event: &Event, pre_reboot_wait_ms: u64) -> Result<()> {
+        self.upgrade()?;
         self.register_lane(&event.owner);
         let system_name = match event.kind.as_str() {
             "supervisor_restart" => Some("ix_build_supervisor_restarts_total"),
@@ -219,7 +269,12 @@ impl Ledger {
             .admitted_wait_ms
             .remove(&event.request_id.0)
             .unwrap_or_else(|| event.wait_ms.saturating_add(pre_reboot_wait_ms));
-        let base = labels(&[("class", class(&event.class)), ("outcome", outcome(event))]);
+        let base = labels(&[("class", class(&event.class))]);
+        self.counter(
+            "ix_build_builds_total",
+            "Terminal attempts by class and outcome.",
+            labels(&[("class", class(&event.class)), ("outcome", outcome(event))]),
+        )?;
         self.histogram(
             "ix_build_wait_seconds",
             "Queue duration for every terminal request, including cancellations and refusals.",
@@ -238,15 +293,17 @@ impl Ledger {
                 hold as f64 / 1000.,
                 &seconds,
             )?;
-            if let Some(limit) = event.telemetry.hold_limit_ms.filter(|n| *n > 0) {
-                self.histogram(
-                    "ix_build_hold_limit_ratio",
-                    "Lease hold duration divided by its policy hold_ms cap.",
-                    &base,
-                    hold as f64 / limit as f64,
-                    RATIOS,
-                )?;
-            }
+            let lane = self.register_lane(&event.owner);
+            add(
+                self.family(
+                    "ix_build_lane_unit_seconds_total",
+                    "Completed admitted unit-seconds by bounded lane.",
+                    MetricKind::Counter,
+                ),
+                "",
+                labels(&[("lane", &lane)]),
+                MetricValue::Number(hold as f64 / 1000. * f64::from(event.units)),
+            )?;
         }
         if event.trace.running_at_ms.is_some() && event.reason.as_deref() != Some("host_rebooted") {
             self.histogram(
@@ -255,6 +312,31 @@ impl Ledger {
                 &base,
                 event.trace.running_seconds,
                 &seconds,
+            )?;
+        }
+        let wasted_cause = if event.state == Phase::Cancelled {
+            Some("cancelled")
+        } else if matches!(
+            event.trace.diagnostic.code,
+            Some(Code::RssCap | Code::OomKilled | Code::HoldTimeout)
+        ) {
+            Some("late_kill")
+        } else {
+            None
+        };
+        if let Some(cause) = wasted_cause
+            && event.trace.running_at_ms.is_some()
+            && event.reason.as_deref() != Some("host_rebooted")
+        {
+            add(
+                self.family(
+                    "ix_build_wasted_run_seconds_total",
+                    "Measured execution seconds lost to cancellation or limit kills.",
+                    MetricKind::Counter,
+                ),
+                "",
+                labels(&[("class", class(&event.class)), ("cause", cause)]),
+                MetricValue::Number(event.trace.running_seconds),
             )?;
         }
         if let Some(reserved) = event.telemetry.reservation_bytes {
@@ -267,8 +349,8 @@ impl Ledger {
             )?;
         }
         if let Some(sample) = &event.telemetry.memory_sample {
-            let mut measured = base.clone();
-            measured.insert("measurement".into(), sample.metric.as_str().into());
+            let measured = base.clone();
+
             self.histogram(
                 "ix_build_memory_peak_bytes",
                 "Peak observed command memory; watchdog peaks are sampled lower bounds.",
@@ -276,101 +358,66 @@ impl Ledger {
                 sample.bytes as f64,
                 BYTES,
             )?;
-            if let Some(limit) = event.telemetry.limit_bytes.filter(|n| *n > 0) {
-                self.histogram(
-                    "ix_build_memory_headroom_ratio",
-                    "One minus measured peak divided by hard cap; negative after an overshoot.",
-                    &measured,
-                    1. - sample.bytes as f64 / limit as f64,
-                    RATIOS,
-                )?;
-            }
         }
         if let Some(code) = event.trace.diagnostic.code {
-            let exit = match event.telemetry.exit_code {
-                Some(101) => "101",
-                Some(0) => "zero",
-                Some(_) => "other",
-                None => "none",
-            };
-            let signal = match event.telemetry.signal {
-                Some(n @ 1..=64) => n.to_string(),
-                Some(_) => "other".into(),
-                None => "none".into(),
-            };
-            let cause = match code {
-                Code::CommandExit | Code::ExternalSignal => "command",
-                _ => "tool",
-            };
             self.counter(
                 "ix_build_failures_total",
-                "Abnormal outcomes by code, exit class, signal and initiating cause.",
-                labels(&[
-                    ("class", class(&event.class)),
-                    ("code", code.as_str()),
-                    ("exit_class", exit),
-                    ("signal", &signal),
-                    ("cause", cause),
-                ]),
+                "Abnormal outcomes by stable diagnostic code.",
+                labels(&[("class", class(&event.class)), ("code", code.as_str())]),
             )?;
-            if matches!(code, Code::RssCap | Code::OomKilled) {
-                let mut kill = labels(&[("class", class(&event.class)), ("code", code.as_str())]);
-                if let Some(limit) = event.telemetry.limit_bytes {
-                    self.histogram(
-                        "ix_build_memory_kill_limit_bytes",
-                        "Hard memory limit on OOM/RSS kills.",
-                        &kill,
-                        limit as f64,
-                        BYTES,
-                    )?;
-                }
-                if let Some(sample) = &event.telemetry.memory_sample {
-                    kill.insert("measurement".into(), sample.metric.as_str().into());
-                    self.histogram(
-                        "ix_build_memory_kill_measured_bytes",
-                        "Measured peak at OOM/RSS kill, absent when unavailable.",
-                        &kill,
-                        sample.bytes as f64,
-                        BYTES,
-                    )?;
-                }
-            }
         }
-        let lane = self.register_lane(&event.owner);
-        let mut identity = labels(&[
-            ("lane", &lane),
-            ("ticket", bounded(&event.ticket)),
-            ("repo", bounded(&event.telemetry.repo)),
-            (
-                "subcommand",
-                match event.telemetry.subcommand.as_str() {
-                    "build" => "build",
-                    "test" => "test",
-                    "check" => "check",
-                    "clippy" => "clippy",
-                    "xtask" => "xtask",
-                    _ => "other",
-                },
-            ),
-        ]);
-        let key = serde_json::to_string(&identity)?;
-        if self.identities.contains(&key) || self.identities.len() < MAX_IDENTITIES {
-            self.identities.insert(key);
+
+        let repo = bounded(&event.telemetry.repo);
+        let repo = if self.repos.contains(repo) || self.repos.len() < MAX_REPOS {
+            self.repos.insert(repo.into());
+            repo
         } else {
-            identity = labels(&[
-                ("lane", "other"),
-                ("ticket", "other"),
-                ("repo", "other"),
-                ("subcommand", "other"),
-            ]);
-        }
-        identity.extend(base);
+            "other"
+        };
+        let subcommand = match event.telemetry.subcommand.as_str() {
+            "build" => "build",
+            "test" => "test",
+            "check" => "check",
+            "clippy" => "clippy",
+            "xtask" => "xtask",
+            _ => "other",
+        };
+        let identity = labels(&[("repo", repo), ("subcommand", subcommand)]);
+        let mut completed = identity.clone();
+        completed.insert(
+            "outcome".into(),
+            match outcome(event) {
+                "ok" => "ok",
+                "failed" => "failed",
+                _ => "other",
+            }
+            .into(),
+        );
         self.counter(
             "ix_build_identity_total",
-            "Terminal builds by bounded identity; at most 128 identities plus other per ledger.",
-            identity,
-        )
+            "Terminal attempts by repository, subcommand and ok/failed/other outcome.",
+            completed,
+        )?;
+        if event.trace.running_at_ms.is_some() && event.reason.as_deref() != Some("host_rebooted") {
+            add(
+                self.family(
+                    "ix_build_repo_run_seconds_total",
+                    "Command seconds by repository and subcommand; no buckets.",
+                    MetricKind::Counter,
+                ),
+                "",
+                identity.clone(),
+                MetricValue::Number(event.trace.running_seconds),
+            )?;
+            self.counter(
+                "ix_build_repo_run_count_total",
+                "Measured command runs by repository and subcommand; no buckets.",
+                identity,
+            )?;
+        }
+        Ok(())
     }
+
     fn family(&mut self, name: &str, help: &str, kind: MetricKind) -> &mut MetricFamily {
         let index = self
             .families
@@ -433,12 +480,15 @@ impl Ledger {
         now: u64,
         clock: u64,
         pre_reboot_wait_ms: &BTreeMap<String, u64>,
-    ) -> Vec<MetricFamily> {
-        let mut families = self.families.clone();
+    ) -> Result<Vec<MetricFamily>> {
+        let mut normalized = self.clone();
+        normalized.upgrade()?;
+        let mut families = normalized.families;
         for name in [
             "ix_build_supervisor_restarts_total",
             "ix_build_recover_events_total",
             "ix_build_boot_changes_total",
+            "ix_build_telemetry_dropped_total",
         ] {
             if !families.iter().any(|f| f.name == name) {
                 families.push(MetricFamily {
@@ -496,14 +546,10 @@ impl Ledger {
                 config.memory_budget_bytes.unwrap_or(0) as f64,
             ),
             (
-                "ix_build_oldest_queued_seconds",
-                queued
+                "ix_build_oldest_running_seconds",
+                running
                     .iter()
-                    .map(|r| {
-                        clock
-                            .saturating_sub(r.enqueued_clock_ms)
-                            .saturating_add(pre_reboot_wait_ms.get(&r.id.0).copied().unwrap_or(0))
-                    })
+                    .filter_map(|r| r.started_clock_ms.map(|start| clock.saturating_sub(start)))
                     .max()
                     .unwrap_or(0) as f64
                     / 1000.,
@@ -512,35 +558,7 @@ impl Ledger {
                 "ix_build_policy_hold_seconds",
                 config.hold_ms as f64 / 1000.,
             ),
-            (
-                "ix_build_policy_jobs",
-                f64::from(config.cargo_build_jobs.unwrap_or(0)),
-            ),
-            (
-                "ix_build_policy_test_threads",
-                f64::from(config.rust_test_threads.unwrap_or(0)),
-            ),
-            (
-                "ix_build_policy_memory_reserve_bytes",
-                config.memory_reserve_bytes as f64,
-            ),
-            (
-                "ix_build_policy_memory_reserve_per_job_bytes",
-                config.memory_reserve_per_job_bytes as f64,
-            ),
-            (
-                "ix_build_policy_memory_limit_per_job_bytes",
-                config.memory_limit_per_job_bytes as f64,
-            ),
             ("ix_build_policy_maximum_load", config.maximum_load),
-            (
-                "ix_build_policy_disk_reserve_bytes",
-                config.disk_reserve_bytes as f64,
-            ),
-            (
-                "ix_build_policy_maximum_units",
-                f64::from(config.maximum_units),
-            ),
             ("ix_build_export_timestamp_seconds", now as f64 / 1000.),
         ] {
             gauge(
@@ -558,12 +576,6 @@ impl Ledger {
                 Some(1. - peak as f64 / cap as f64)
             })
             .collect();
-        gauge(
-            "ix_build_memory_measurements_available",
-            "Running leases with an observed memory peak and hard cap.",
-            Labels::new(),
-            headrooms.len() as f64,
-        );
         if let Some(minimum) = headrooms.into_iter().reduce(f64::min) {
             gauge(
                 "ix_build_running_memory_headroom_ratio",
@@ -574,39 +586,22 @@ impl Ledger {
         }
         for priority in PriorityClass::ALL {
             let priority = priority.label();
-            for (name, value) in [
-                (
-                    "ix_build_policy_class_memory_reserve_per_job_bytes",
-                    config
-                        .memory_reserve_per_job_by_class
-                        .get(priority)
-                        .copied()
-                        .unwrap_or(config.memory_reserve_per_job_bytes),
-                ),
-                (
-                    "ix_build_policy_class_memory_limit_per_job_bytes",
-                    config
-                        .memory_per_job_by_class
-                        .get(priority)
-                        .copied()
-                        .unwrap_or(config.memory_limit_per_job_bytes),
-                ),
-                (
-                    "ix_build_policy_class_memory_cap_bytes",
-                    config
-                        .memory_cap_by_class
-                        .get(priority)
-                        .copied()
-                        .unwrap_or(0),
-                ),
-            ] {
-                gauge(
-                    name,
-                    "Effective class memory policy; zero cap means unset.",
-                    labels(&[("class", priority)]),
-                    value as f64,
-                );
-            }
+            gauge(
+                "ix_build_oldest_queued_seconds",
+                "Oldest current queue age per class, including saved pre-reboot age.",
+                labels(&[("class", priority)]),
+                queued
+                    .iter()
+                    .filter(|r| class(&r.class) == priority)
+                    .map(|r| {
+                        clock
+                            .saturating_sub(r.enqueued_clock_ms)
+                            .saturating_add(pre_reboot_wait_ms.get(&r.id.0).copied().unwrap_or(0))
+                    })
+                    .max()
+                    .unwrap_or(0) as f64
+                    / 1000.,
+            );
             for reason in REASONS {
                 let count = queued
                     .iter()
@@ -629,14 +624,6 @@ impl Ledger {
                 );
             }
         }
-        for (owner, count) in self.owner_counts(state, Phase::Queued) {
-            gauge(
-                "ix_build_owner_queued",
-                "Queued depth by lifetime-bounded owner lane.",
-                labels(&[("lane", &owner)]),
-                count as f64,
-            );
-        }
         let policy_hash = policy_hash(config);
         gauge(
             "ix_build_info",
@@ -652,7 +639,7 @@ impl Ledger {
                 sample.labels.insert("host".into(), state.host.clone());
             }
         }
-        families
+        Ok(families)
     }
 }
 fn queue_reason(value: &str) -> &str {
@@ -727,4 +714,9 @@ pub(crate) fn render(families: &[MetricFamily], output: &mut String) {
             ));
         }
     }
+}
+
+/// Append a host gauge using the shared exposition spelling.
+pub(crate) fn append_gauge(text: &mut String, name: &str, host: &str, value: f64) {
+    text.push_str(&format!("# HELP {name} Current exporter observation.\n# TYPE {name} gauge\n{name}{{host=\"{host}\"}} {value}\n"));
 }
