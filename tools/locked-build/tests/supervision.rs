@@ -688,6 +688,12 @@ impl Drop for Harness {
             && let Ok(state) = serde_json::from_slice::<Value>(&bytes)
         {
             for request in state["requests"].as_array().into_iter().flatten() {
+                if let Some(pid) = request["lease_record"]["command"]["pid"]
+                    .as_u64()
+                    .and_then(|pid| u32::try_from(pid).ok())
+                {
+                    pids.insert(pid);
+                }
                 for role in ["worker", "watchdog"] {
                     if let Some(pid) = request[role]["pid"]
                         .as_u64()
@@ -720,7 +726,12 @@ impl Drop for Harness {
                     .any(|argument| Path::new(argument).starts_with(self.root.path()))
                 && let Ok(pid) = i32::try_from(pid)
             {
-                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+                let pid = Pid::from_raw(pid);
+                if nix::unistd::getpgid(Some(pid)) == Ok(pid) {
+                    let _ = nix::sys::signal::killpg(pid, Signal::SIGKILL);
+                } else {
+                    let _ = kill(pid, Signal::SIGKILL);
+                }
             }
         }
     }
@@ -1156,6 +1167,142 @@ fn running_cancel_returns_cancelled_after_group_cleanup() -> TestResult {
     Ok(())
 }
 
+/// Provenance: SWM-394.
+/// Trace: FR-005-AC-4, FR-005-AC-7
+#[test]
+fn cancelling_a_compiling_cargo_lease_terms_then_kills_and_reaps_the_group() -> TestResult {
+    let harness = Harness::new(1, 120000)?;
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["termination_grace_ms"] = json!(1500);
+    policy["memory_admission"] = json!("lease_accounted");
+    policy["memory_budget_bytes"] = json!(16_000_000_000_u64);
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let project = harness.root.path().join("compiling");
+    fs::create_dir_all(project.join("src"))?;
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"cancel-compile-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n",
+    )?;
+    fs::write(project.join("src/lib.rs"), "pub fn compiled() {}\n")?;
+    fs::write(
+        project.join("build.rs"),
+        include_str!("fixtures/cancel-build.rs"),
+    )?;
+    let marker = harness.root.path().join("compiler");
+    let descendant = marker.with_extension("descendant");
+    let stderr = harness.root.path().join("caller.stderr");
+    let mut child = harness
+        .cli()
+        .arg("run")
+        .args(["--owner", "cancel-compilation", "--ticket", "SWM-394", "--"])
+        .arg(env!("CARGO"))
+        .args(["test", "--offline", "-j", "1", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .args(["--", "--test-threads=4"])
+        .env("CARGO_TARGET_DIR", project.join("target"))
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env("LOCKED_BUILD_CANCEL_FIXTURE", std::env::current_exe()?)
+        .env("LOCKED_BUILD_FIXTURE_MARKER", &marker)
+        .env(
+            "LOCKED_BUILD_FIXTURE_RELEASE",
+            harness.root.path().join("never-release"),
+        )
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&stderr)?)
+        .spawn()?;
+    observed(|| {
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => panic!(
+                "compiling lease exited before cancellation: {status}: {}",
+                fs::read_to_string(&stderr).unwrap_or_default()
+            ),
+            Err(error) => panic!("fixture runner wait failed: {error}"),
+        }
+        marker.exists() && descendant.exists()
+    });
+    let request = harness.request(0)?;
+    assert_eq!(request["state"], "running");
+    let id = request["request_id"].as_str().ok_or("request ID missing")?;
+    let cargo_pid = i32::try_from(
+        request["lease_record"]["command"]["pid"]
+            .as_u64()
+            .ok_or("Cargo PID missing")?,
+    )?;
+    let compiler_pid: i32 = fs::read_to_string(pid_file(&marker))?.parse()?;
+    let descendant_pid: i32 = fs::read_to_string(pid_file(&descendant))?.parse()?;
+    let group = nix::unistd::getpgid(Some(Pid::from_raw(compiler_pid)))?;
+    let cancelled_at = Instant::now();
+    assert!(
+        harness
+            .cli()
+            .args(["cancel", id])
+            .output()?
+            .status
+            .success()
+    );
+    observed(|| {
+        pid_file(&marker).with_extension("term").exists()
+            && pid_file(&descendant).with_extension("term").exists()
+    });
+    // Both TERM-resistant members must remain alive during the grace period.
+    let grace_observation = Instant::now();
+    while grace_observation.elapsed() < Duration::from_millis(750) {
+        assert_eq!(kill(Pid::from_raw(compiler_pid), None), Ok(()));
+        assert_eq!(kill(Pid::from_raw(descendant_pid), None), Ok(()));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(complete(&mut child)?.code(), Some(130));
+    assert!(
+        cancelled_at.elapsed() >= Duration::from_millis(1500),
+        "KILL cleanup finished before the configured TERM grace"
+    );
+    assert_eq!(
+        nix::sys::signal::killpg(group, None),
+        Err(nix::errno::Errno::ESRCH)
+    );
+    for pid in [cargo_pid, compiler_pid, descendant_pid] {
+        assert_eq!(
+            kill(Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH),
+            "PID {pid} was not reaped"
+        );
+    }
+    let report = harness.report()?;
+    let request = &report["requests"][0];
+    assert_eq!(request["state"], "cancelled");
+    assert_eq!(request["code"], "LB_CANCELLED");
+    assert_eq!(report["used_units"], 0);
+    let caller = fs::read_to_string(stderr)?;
+    assert_eq!(
+        caller
+            .lines()
+            .filter(|line| line.starts_with("locked-build: "))
+            .collect::<Vec<_>>(),
+        vec![request["message"].as_str().ok_or("diagnostic missing")?]
+    );
+    assert!(
+        !caller.contains("watchdog supervision unavailable"),
+        "{caller}"
+    );
+    let worker_output = fs::read_to_string(harness.state.join(format!("{id}.stderr")))?;
+    assert!(
+        !worker_output.contains("watchdog supervision unavailable"),
+        "{worker_output}"
+    );
+    assert!(
+        report["events"]
+            .as_array()
+            .ok_or("events missing")?
+            .iter()
+            .any(|event| event["request_id"] == id
+                && event["code"] == "LB_CANCELLED"
+                && event["message"] == request["message"])
+    );
+    Ok(())
+}
+
 /// Trace: FR-005-AC-4
 #[test]
 fn cancellation_after_supervisor_loss_stops_owned_descendants_and_preserves_unrelated_work()
@@ -1265,13 +1412,17 @@ fn subprocess_fixture() -> TestResult {
         PathBuf::from(std::env::var_os("LOCKED_BUILD_FIXTURE_MARKER").ok_or("marker missing")?);
     let release =
         PathBuf::from(std::env::var_os("LOCKED_BUILD_FIXTURE_RELEASE").ok_or("release missing")?);
-    if mode == "ignore-term" || mode == "leaf-ignore-term" {
-        signal_hook::flag::register(
-            signal_hook::consts::SIGTERM,
-            Arc::new(AtomicBool::new(false)),
-        )?;
+    let terminated = Arc::new(AtomicBool::new(false));
+    if matches!(
+        mode.as_str(),
+        "ignore-term" | "leaf-ignore-term" | "cancel-compiler" | "cancel-child"
+    ) {
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, terminated.clone())?;
     }
-    if mode == "ignore-term" || mode == "exit75-descendant" {
+    if matches!(
+        mode.as_str(),
+        "ignore-term" | "exit75-descendant" | "cancel-compiler"
+    ) {
         let descendant = marker.with_extension("descendant");
         Command::new(std::env::current_exe()?)
             .arg("--exact")
@@ -1280,13 +1431,20 @@ fn subprocess_fixture() -> TestResult {
             .arg("--nocapture")
             .arg("--skip")
             .arg(&descendant)
-            .env("LOCKED_BUILD_FIXTURE_MODE", "leaf-ignore-term")
+            .env(
+                "LOCKED_BUILD_FIXTURE_MODE",
+                if mode == "cancel-compiler" {
+                    "cancel-child"
+                } else {
+                    "leaf-ignore-term"
+                },
+            )
             .env("LOCKED_BUILD_FIXTURE_MARKER", &descendant)
             .spawn()?;
         observed(|| descendant.exists());
     }
     fs::write(pid_file(&marker), std::process::id().to_string())?;
-    let mut file = OpenOptions::new().create(true).append(true).open(marker)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(&marker)?;
     writeln!(file, "invoked")?;
     file.sync_all()?;
     match mode.as_str() {
@@ -1307,8 +1465,11 @@ fn subprocess_fixture() -> TestResult {
         "signal" => {
             kill(Pid::this(), Signal::SIGTERM)?;
         }
-        "block" | "ignore-term" | "leaf-ignore-term" => {
+        "block" | "ignore-term" | "leaf-ignore-term" | "cancel-compiler" | "cancel-child" => {
             while !release.exists() {
+                if terminated.swap(false, Ordering::Relaxed) {
+                    fs::write(pid_file(&marker).with_extension("term"), "TERM observed")?;
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
