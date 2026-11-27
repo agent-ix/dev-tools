@@ -19,6 +19,74 @@ use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Provenance: SWM-394, terra r244. Trace: FR-005-AC-4
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "native Linux PID namespace/no-user-bus churn lane"]
+fn namespace_local_watchdog_survives_mutation_style_child_churn() -> TestResult {
+    let harness = Harness::new(1, 120000)?;
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["memory_admission"] = json!("lease_accounted");
+    policy["memory_budget_bytes"] = json!(16_000_000_000_u64);
+    policy["memory_limit_per_job_bytes"] = json!(8_000_000_000_u64);
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let binary = std::env::var_os("IX_BUILD_TEST_INSTALLED_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_locked-build").into());
+    let marker = harness.root.path().join("churn");
+    let output = Command::new(binary)
+        .arg("--state")
+        .arg(&harness.state)
+        .arg("--config")
+        .arg(&harness.config)
+        .args([
+            "run",
+            "--owner",
+            "namespace-churn",
+            "--ticket",
+            "SWM-394",
+            "--",
+        ])
+        .arg(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "subprocess_fixture",
+            "--ignored",
+            "--nocapture",
+            "--skip",
+        ])
+        .arg(&marker)
+        .env("LOCKED_BUILD_FIXTURE_MODE", "churn")
+        .env("LOCKED_BUILD_FIXTURE_MARKER", &marker)
+        .env(
+            "LOCKED_BUILD_FIXTURE_RELEASE",
+            harness.root.path().join("unused"),
+        )
+        .env_remove("CARGO_BUILD_JOBS")
+        .env_remove("RUST_TEST_THREADS")
+        .stdout(Stdio::null())
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let request = harness.request(0)?;
+    assert_eq!(request["state"], "succeeded");
+    assert_eq!(request["exit_code"], 0);
+    assert!(request["code"].is_null());
+    assert_eq!(
+        request["lease_record"]["memory_enforcement"],
+        "rss_watchdog"
+    );
+    assert_eq!(
+        request["pid_namespace"],
+        fs::read_link("/proc/self/ns/pid")?
+            .to_string_lossy()
+            .as_ref()
+    );
+    Ok(())
+}
+
 /// Provenance: SWM-391. Trace: FR-005-AC-4
 #[test]
 fn scheduler_restarts_while_queued_workers_live_and_status_ignores_a_stuck_writer() -> TestResult {
@@ -870,6 +938,11 @@ fn subprocess_fixture() -> TestResult {
     writeln!(file, "invoked")?;
     file.sync_all()?;
     match mode.as_str() {
+        "churn" => {
+            for _ in 0..12_000 {
+                assert!(Command::new("/usr/bin/true").status()?.success());
+            }
+        }
         "nested-failure" => {
             use std::os::unix::process::ExitStatusExt;
             let output = Command::new("cargo").arg("inner-failure").output()?;
