@@ -6,7 +6,7 @@
   "fuzzy_compare": true,
   "tests": [
     {
-      "name": "every provisioned daily-health panel; hand-written values",
+      "name": "FR-015-AC-3 daily health: every panel with hand-written values",
       "interval": "1m",
       "input_series": [
         {
@@ -52,10 +52,6 @@
         {
           "series": "ix_kache_remote_reachable{host=\"luna\",store=\"shared\",cache=\"remote\",backend=\"filesystem\",cache_role=\"client\"}",
           "values": "0+0x120"
-        },
-        {
-          "series": "ix_build_cache_policy_info{host=\"luna\",cache_role=\"client\",cache_mode=\"local\"}",
-          "values": "1+0x120"
         },
         {
           "series": "ix_build_run_seconds_bucket{host=\"luna\",class=\"point\",le=\"1\"}",
@@ -116,11 +112,15 @@
         {
           "series": "node_disk_io_time_seconds_total{host=\"luna\",device=\"nvme0n1\"}",
           "values": "0+30x120"
+        },
+        {
+          "series": "node_filesystem_size_bytes{host=\"luna\",mountpoint=\"/mnt/build\",device=\"/dev/nvme0n1p1\",fstype=\"xfs\"}",
+          "values": "84000000000+0x120"
         }
       ],
       "promql_expr_test": [
         {
-          "expr": "ix_kache_up{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache_up{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -130,7 +130,7 @@
           ]
         },
         {
-          "expr": "ix_kache:hit_ratio{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache:hit_ratio{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -140,7 +140,7 @@
           ]
         },
         {
-          "expr": "ix_kache:miss_ratio{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache:miss_ratio{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -150,7 +150,7 @@
           ]
         },
         {
-          "expr": "ix_kache:hits_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache:hits_1h{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -160,7 +160,7 @@
           ]
         },
         {
-          "expr": "ix_kache:misses_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache:misses_1h{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -170,7 +170,7 @@
           ]
         },
         {
-          "expr": "ix_kache:time_saved_seconds_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache:time_saved_seconds_1h{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -180,7 +180,7 @@
           ]
         },
         {
-          "expr": "ix_kache_store_bytes{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache_store_bytes{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -190,7 +190,7 @@
           ]
         },
         {
-          "expr": "ix_kache_store_limit_bytes{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache_store_limit_bytes{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -200,7 +200,7 @@
           ]
         },
         {
-          "expr": "ix_kache_entries{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache_entries{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -210,7 +210,7 @@
           ]
         },
         {
-          "expr": "ix_kache:evicted_bytes_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache:evicted_bytes_1h{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -220,7 +220,7 @@
           ]
         },
         {
-          "expr": "ix_kache:local_hits_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache:local_hits_1h{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -230,7 +230,7 @@
           ]
         },
         {
-          "expr": "ix_kache:remote_hits_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache:remote_hits_1h{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -240,7 +240,7 @@
           ]
         },
         {
-          "expr": "ix_kache_remote_reachable{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_kache_remote_reachable{host=\"luna\"} or on(host) (-1 + 0 * max by(host) (ix_kache_up{host=\"luna\"}))",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -250,7 +250,7 @@
           ]
         },
         {
-          "expr": "ix_build:run_p50_seconds{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_build:run_p50_seconds{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -260,7 +260,7 @@
           ]
         },
         {
-          "expr": "ix_build:run_p95_seconds{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_build:run_p95_seconds{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -270,7 +270,7 @@
           ]
         },
         {
-          "expr": "ix_build:repo_run_mean_seconds{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_build:repo_run_mean_seconds{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -280,21 +280,17 @@
           ]
         },
         {
-          "expr": "ix_build:builds_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "sum by(host) (ix_build:builds_1h{host=\"luna\",outcome=\"ok\"})",
           "eval_time": "90m",
           "exp_samples": [
             {
-              "labels": "{__name__=\"ix_build:builds_1h\",host=\"luna\",outcome=\"ok\"}",
+              "labels": "{host=\"luna\"}",
               "value": 180
-            },
-            {
-              "labels": "{__name__=\"ix_build:builds_1h\",host=\"luna\",outcome=\"failed\"}",
-              "value": 60
             }
           ]
         },
         {
-          "expr": "ix_build:wait_p95_seconds{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_build:wait_p95_seconds{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
@@ -304,32 +300,332 @@
           ]
         },
         {
-          "expr": "ix_build:failures_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "sum by(code) (ix_build:failures_1h{host=\"luna\"})",
           "eval_time": "90m",
           "exp_samples": [
             {
-              "labels": "{__name__=\"ix_build:failures_1h\",host=\"luna\",code=\"LB_RSS_CAP\"}",
+              "labels": "{code=\"LB_RSS_CAP\"}",
               "value": 60
             }
           ]
         },
         {
-          "expr": "ix_build:storage_free_bytes{host=\"luna\",mountpoint=\"/mnt/build\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_build:storage_used_ratio{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
-              "labels": "{__name__=\"ix_build:storage_free_bytes\",host=\"luna\",mountpoint=\"/mnt/build\",device=\"/dev/nvme0n1p1\",fstype=\"xfs\"}",
-              "value": 42000000000
+              "labels": "{__name__=\"ix_build:storage_used_ratio\",host=\"luna\",mountpoint=\"/mnt/build\",device=\"/dev/nvme0n1p1\",fstype=\"xfs\"}",
+              "value": 0.5
             }
           ]
         },
         {
-          "expr": "ix_build:storage_io_utilisation_pct{host=\"luna\",device=\"nvme0n1\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "expr": "ix_build:build_device_io_utilisation_pct{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
-              "labels": "{__name__=\"ix_build:storage_io_utilisation_pct\",host=\"luna\",device=\"nvme0n1\"}",
+              "labels": "{__name__=\"ix_build:build_device_io_utilisation_pct\",host=\"luna\",device=\"nvme0n1\"}",
               "value": 50
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:store_fill_ratio{host=\"luna\"} and on(host,store) (ix_kache_store_limit_bytes{host=\"luna\"} > 0)",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:store_fill_ratio\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 0.8
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "FR-015-AC-3 remote health: absent is unknown, failed is down, successful is reachable",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_up{host=\"draco\",store=\"local\"}",
+          "values": "1+0x5"
+        },
+        {
+          "series": "ix_kache_up{host=\"luna\",store=\"local\"}",
+          "values": "1+0x5"
+        },
+        {
+          "series": "ix_kache_remote_reachable{host=\"luna\",store=\"shared\"}",
+          "values": "0 0 1 1 1 1"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_kache_remote_reachable{host=~\".*\"} or on(host) (-1 + 0 * max by(host) (ix_kache_up{host=~\".*\"}))",
+          "eval_time": "1m",
+          "exp_samples": [
+            {
+              "labels": "{host=\"draco\"}",
+              "value": -1
+            },
+            {
+              "labels": "{__name__=\"ix_kache_remote_reachable\",host=\"luna\",store=\"shared\"}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache_remote_reachable{host=~\".*\"} or on(host) (-1 + 0 * max by(host) (ix_kache_up{host=~\".*\"}))",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{host=\"draco\"}",
+              "value": -1
+            },
+            {
+              "labels": "{__name__=\"ix_kache_remote_reachable\",host=\"luna\",store=\"shared\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "FR-015-AC-3 stacked totals and host misses preserve multi-host counts",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\"}",
+          "values": "0+8x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_kache_hits_total{host=\"draco\",store=\"local\"}",
+          "values": "0+4x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"draco\",store=\"local\"}",
+          "values": "0+6x120"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "sum(ix_kache:hits_1h{host=~\"luna|draco\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 720
+            }
+          ]
+        },
+        {
+          "expr": "sum(ix_kache:misses_1h{host=~\"luna|draco\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 480
+            }
+          ]
+        },
+        {
+          "expr": "sum by(host) (ix_kache:misses_1h{host=~\"luna|draco\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{host=\"luna\"}",
+              "value": 120
+            },
+            {
+              "labels": "{host=\"draco\"}",
+              "value": 360
+            }
+          ]
+        },
+        {
+          "expr": "sum(ix_kache:misses_1h{host=\"luna\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 120
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "FR-015-AC-3 store ratio preserves over-cap size and omits unknown or zero cap",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\"}",
+          "values": "111+0x5"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x5"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"terra\",store=\"local\"}",
+          "values": "50+0x5"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"terra\",store=\"local\"}",
+          "values": "0+0x5"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"draco\",store=\"local\"}",
+          "values": "50+0x5"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_kache:store_fill_ratio{host=~\".*\"} and on(host,store) (ix_kache_store_limit_bytes{host=~\".*\"} > 0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:store_fill_ratio\",host=\"luna\",store=\"local\"}",
+              "value": 1.11
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "FR-015-AC-3 build mounts exclude OS and unrelated devices; low space approaches 100%",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "node_filesystem_avail_bytes{host=\"luna\",mountpoint=\"/mnt/build\",device=\"/dev/nvme0n1p1\",fstype=\"xfs\"}",
+          "values": "5+0x120"
+        },
+        {
+          "series": "node_filesystem_size_bytes{host=\"luna\",mountpoint=\"/mnt/build\",device=\"/dev/nvme0n1p1\",fstype=\"xfs\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "node_filesystem_avail_bytes{host=\"luna\",mountpoint=\"/\",device=\"/dev/mapper/os\",fstype=\"ext4\"}",
+          "values": "10+0x120"
+        },
+        {
+          "series": "node_filesystem_size_bytes{host=\"luna\",mountpoint=\"/\",device=\"/dev/mapper/os\",fstype=\"ext4\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "node_filesystem_avail_bytes{host=\"terra\",mountpoint=\"/builds\",device=\"/dev/sdf1\",fstype=\"xfs\"}",
+          "values": "15+0x120"
+        },
+        {
+          "series": "node_filesystem_size_bytes{host=\"terra\",mountpoint=\"/builds\",device=\"/dev/sdf1\",fstype=\"xfs\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "node_disk_io_time_seconds_total{host=\"luna\",device=\"nvme0n1\"}",
+          "values": "0+30x120"
+        },
+        {
+          "series": "node_disk_io_time_seconds_total{host=\"luna\",device=\"dm-0\"}",
+          "values": "0+60x120"
+        },
+        {
+          "series": "node_disk_io_time_seconds_total{host=\"terra\",device=\"sdf\"}",
+          "values": "0+15x120"
+        },
+        {
+          "series": "node_disk_io_time_seconds_total{host=\"terra\",device=\"sda\"}",
+          "values": "0+60x120"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_build:storage_used_ratio",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:storage_used_ratio\",host=\"luna\",mountpoint=\"/mnt/build\",device=\"/dev/nvme0n1p1\",fstype=\"xfs\"}",
+              "value": 0.95
+            },
+            {
+              "labels": "{__name__=\"ix_build:storage_used_ratio\",host=\"terra\",mountpoint=\"/builds\",device=\"/dev/sdf1\",fstype=\"xfs\"}",
+              "value": 0.85
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:build_device_io_utilisation_pct",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:build_device_io_utilisation_pct\",host=\"luna\",device=\"nvme0n1\"}",
+              "value": 50
+            },
+            {
+              "labels": "{__name__=\"ix_build:build_device_io_utilisation_pct\",host=\"terra\",device=\"sdf\"}",
+              "value": 25
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "FR-015-AC-3 success stacks only hosts; failures combine hosts into diagnostic types",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_builds_total{host=\"luna\",outcome=\"ok\"}",
+          "values": "0+3x120"
+        },
+        {
+          "series": "ix_build_builds_total{host=\"luna\",outcome=\"cancelled\"}",
+          "values": "0+10x120"
+        },
+        {
+          "series": "ix_build_builds_total{host=\"draco\",outcome=\"ok\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_build_failures_total{host=\"luna\",code=\"LB_RSS_CAP\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_build_failures_total{host=\"draco\",code=\"LB_RSS_CAP\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_build_failures_total{host=\"luna\",code=\"LB_CANCELLED\"}",
+          "values": "0+3x120"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "sum by(host) (ix_build:builds_1h{host=~\"luna|draco\",outcome=\"ok\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{host=\"luna\"}",
+              "value": 180
+            },
+            {
+              "labels": "{host=\"draco\"}",
+              "value": 120
+            }
+          ]
+        },
+        {
+          "expr": "sum by(code) (ix_build:failures_1h{host=~\"luna|draco\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{code=\"LB_RSS_CAP\"}",
+              "value": 180
+            },
+            {
+              "labels": "{code=\"LB_CANCELLED\"}",
+              "value": 180
             }
           ]
         }
