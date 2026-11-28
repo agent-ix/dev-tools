@@ -30,7 +30,8 @@ Use a persistent shared state directory and an installed locked-build. Read the 
 The checks exit successfully. `ix_build_export_timestamp_seconds` advances and `ix_build_export_error` remains zero.
 The Build storage and cache dashboard has three rows: kache health, builds and queue health, and storage.
 Select the build filesystem mountpoint and device before interpreting the storage panels.
-Use cache_role to inspect cache servers or build clients.
+The host selector applies independently of cache policy metadata.
+Remote health is unknown until a read-only remote probe is available.
 Build-time trends describe daily performance; one-off marketing comparisons are separate data mining.
 
 Collection runs with low CPU and I/O priority. Collection has a six-second deadline and publication has an eight-second deadline. Linux also limits the service to ten seconds.

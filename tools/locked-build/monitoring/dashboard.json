@@ -2,7 +2,7 @@
   "uid": "locked-build",
   "title": "Build storage and cache",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -11,73 +11,70 @@
   "templating": {
     "list": [
       {
-        "name": "datasource",
-        "type": "datasource",
-        "query": "prometheus"
-      },
-      {
         "name": "host",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${datasource}"
+          "uid": "prometheus"
         },
-        "query": "label_values(ix_build_info, host)",
+        "query": {
+          "query": "label_values(ix_build_info, host)",
+          "refId": "host"
+        },
         "includeAll": true,
         "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
         },
-        "allValue": ".*"
-      },
-      {
-        "name": "cache_role",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${datasource}"
-        },
-        "query": "label_values(ix_build_cache_policy_info, cache_role)",
-        "includeAll": true,
-        "multi": true,
         "allValue": ".*",
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        }
+        "definition": "label_values(ix_build_info, host)",
+        "refresh": 2,
+        "sort": 1
       },
       {
         "name": "mountpoint",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${datasource}"
+          "uid": "prometheus"
         },
-        "query": "label_values(node_filesystem_avail_bytes{host=~\"$host\",fstype!~\"tmpfs|devtmpfs|overlay\"}, mountpoint)",
+        "query": {
+          "query": "label_values(node_filesystem_avail_bytes{host=~\"$host\",fstype!~\"tmpfs|devtmpfs|overlay\"}, mountpoint)",
+          "refId": "mountpoint"
+        },
         "includeAll": true,
         "multi": true,
         "allValue": ".*",
         "current": {
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "definition": "label_values(node_filesystem_avail_bytes{host=~\"$host\",fstype!~\"tmpfs|devtmpfs|overlay\"}, mountpoint)",
+        "refresh": 2,
+        "sort": 1
       },
       {
         "name": "device",
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "${datasource}"
+          "uid": "prometheus"
         },
-        "query": "label_values(node_disk_io_time_seconds_total{host=~\"$host\"}, device)",
+        "query": {
+          "query": "label_values(node_disk_io_time_seconds_total{host=~\"$host\"}, device)",
+          "refId": "device"
+        },
         "includeAll": true,
         "multi": true,
         "allValue": ".*",
         "current": {
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "definition": "label_values(node_disk_io_time_seconds_total{host=~\"$host\"}, device)",
+        "refresh": 2,
+        "sort": 1
       }
     ]
   },
@@ -98,29 +95,70 @@
     {
       "id": 2,
       "title": "Kache up",
-      "type": "timeseries",
+      "type": "stat",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 24,
-        "h": 6
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache_up{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} {{store}}"
+          "expr": "ix_kache_up{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{store}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Down",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "Up",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "noValue": "Unknown"
         },
         "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       }
     },
     {
@@ -129,32 +167,58 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 7,
-        "w": 24,
-        "h": 6
+        "x": 8,
+        "y": 1,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache:hit_ratio{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} hit"
+          "expr": "ix_kache:hit_ratio{host=~\"$host\"}",
+          "legendFormat": "{{host}} hit",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         },
         {
           "refId": "B",
-          "expr": "ix_kache:miss_ratio{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} miss"
+          "expr": "ix_kache:miss_ratio{host=~\"$host\"}",
+          "legendFormat": "{{host}} miss",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit"
+          "unit": "percentunit",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "max": 1
         },
         "overrides": []
-      }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "description": "Rolling one-hour compile results. Idle hosts with no results show zero for both ratios."
     },
     {
       "id": 4,
@@ -162,31 +226,54 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 13,
-        "w": 24,
-        "h": 6
+        "x": 16,
+        "y": 1,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache:hits_1h{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} hits"
+          "expr": "ix_kache:hits_1h{host=~\"$host\"}",
+          "legendFormat": "{{host}} hits",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         },
         {
           "refId": "B",
-          "expr": "ix_kache:misses_1h{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} misses"
+          "expr": "ix_kache:misses_1h{host=~\"$host\"}",
+          "legendFormat": "{{host}} misses",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -195,27 +282,47 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
-        "y": 19,
-        "w": 24,
-        "h": 6
+        "y": 8,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache:time_saved_seconds_1h{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}}"
+          "expr": "ix_kache:time_saved_seconds_1h{host=~\"$host\"}",
+          "legendFormat": "{{host}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
-      }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "description": "Compile time saved on cache hits in the rolling hour, as reported by kache. Host-wide activity; not attributed to an individual build."
     },
     {
       "id": 6,
@@ -223,32 +330,56 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 25,
-        "w": 24,
-        "h": 6
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache_store_bytes{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} used"
+          "expr": "ix_kache_store_bytes{host=~\"$host\"}",
+          "legendFormat": "{{host}} used",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         },
         {
           "refId": "B",
-          "expr": "ix_kache_store_limit_bytes{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} cap"
+          "expr": "ix_kache_store_limit_bytes{host=~\"$host\"}",
+          "legendFormat": "{{host}} cap",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
-      }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "description": "Physical local cache bytes and configured cap. Usage may exceed the cap between GC runs."
     },
     {
       "id": 7,
@@ -256,26 +387,45 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 31,
-        "w": 24,
-        "h": 6
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache_entries{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}}"
+          "expr": "ix_kache_entries{host=~\"$host\"}",
+          "legendFormat": "{{host}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -284,26 +434,45 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
-        "y": 37,
-        "w": 24,
-        "h": 6
+        "y": 15,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache:evicted_bytes_1h{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}}"
+          "expr": "ix_kache:evicted_bytes_1h{host=~\"$host\"}",
+          "legendFormat": "{{host}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -312,60 +481,129 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 43,
-        "w": 24,
-        "h": 6
+        "x": 8,
+        "y": 15,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache:local_hits_1h{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} local"
+          "expr": "ix_kache:local_hits_1h{host=~\"$host\"}",
+          "legendFormat": "{{host}} local",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         },
         {
           "refId": "B",
-          "expr": "ix_kache:remote_hits_1h{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} remote"
+          "expr": "ix_kache:remote_hits_1h{host=~\"$host\"}",
+          "legendFormat": "{{host}} remote",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
       "id": 10,
       "title": "Remote reachable (−1 unknown)",
-      "type": "timeseries",
+      "type": "stat",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 49,
-        "w": 24,
-        "h": 6
+        "x": 16,
+        "y": 15,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache_remote_reachable{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} {{backend}}"
+          "expr": "ix_kache_remote_reachable{host=~\"$host\"} or on(host) (-1 + 0 * max by(host) (ix_kache_up{host=~\"$host\"}))",
+          "legendFormat": "{{host}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Unreachable",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "Reachable",
+                  "color": "green"
+                },
+                "-1": {
+                  "text": "Unknown",
+                  "color": "yellow"
+                }
+              }
+            }
+          ],
+          "noValue": "Unknown"
         },
         "overrides": []
-      }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "description": "Latest read-only remote probe: reachable, unreachable, or unknown. Local-only hosts without a remote observation remain unknown; zero remote hits do not prove reachability."
     },
     {
       "id": 11,
@@ -374,7 +612,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 55,
+        "y": 22,
         "w": 24,
         "h": 1
       },
@@ -386,32 +624,56 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
-        "y": 56,
-        "w": 24,
-        "h": 6
+        "y": 23,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:run_p50_seconds{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} p50"
+          "expr": "ix_build:run_p50_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} p50",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         },
         {
           "refId": "B",
-          "expr": "ix_build:run_p95_seconds{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} p95"
+          "expr": "ix_build:run_p95_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} p95",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
-      }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "description": "Percentiles over the last five minutes. No completed observations produces gaps."
     },
     {
       "id": 13,
@@ -419,27 +681,47 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 62,
-        "w": 24,
-        "h": 6
+        "x": 8,
+        "y": 23,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:repo_run_mean_seconds{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} {{repo}} {{subcommand}}"
+          "expr": "ix_build:repo_run_mean_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{repo}} {{subcommand}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
-      }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "description": "Weighted mean from per-repository run seconds / completed count over five minutes."
     },
     {
       "id": 14,
@@ -447,26 +729,45 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 68,
-        "w": 24,
-        "h": 6
+        "x": 16,
+        "y": 23,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:builds_1h{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} {{outcome}}"
+          "expr": "ix_build:builds_1h{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -475,27 +776,47 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
-        "y": 74,
-        "w": 24,
-        "h": 6
+        "y": 30,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:wait_p95_seconds{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} {{class}}"
+          "expr": "ix_build:wait_p95_seconds{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{class}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
-      }
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "description": "Percentiles over the last five minutes. No completed observations produces gaps."
     },
     {
       "id": 16,
@@ -503,26 +824,45 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 80,
-        "w": 24,
-        "h": 6
+        "x": 8,
+        "y": 30,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:failures_1h{host=~\"$host\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} {{code}}"
+          "expr": "ix_build:failures_1h{host=~\"$host\"}",
+          "legendFormat": "{{host}} {{code}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -532,7 +872,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 86,
+        "y": 37,
         "w": 24,
         "h": 1
       },
@@ -544,26 +884,45 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 0,
-        "y": 87,
-        "w": 24,
-        "h": 6
+        "y": 38,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:storage_free_bytes{host=~\"$host\",mountpoint=~\"$mountpoint\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} {{mountpoint}}"
+          "expr": "ix_build:storage_free_bytes{host=~\"$host\",mountpoint=~\"$mountpoint\"}",
+          "legendFormat": "{{host}} {{mountpoint}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes"
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -572,27 +931,51 @@
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 93,
-        "w": 24,
-        "h": 6
+        "x": 8,
+        "y": 38,
+        "w": 8,
+        "h": 7
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:storage_io_utilisation_pct{host=~\"$host\",device=~\"$device\"} and on(host) ix_build_cache_policy_info{cache_role=~\"$cache_role\"}",
-          "legendFormat": "{{host}} {{device}}"
+          "expr": "ix_build:storage_io_utilisation_pct{host=~\"$host\",device=~\"$device\"}",
+          "legendFormat": "{{host}} {{device}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percent"
+          "unit": "percent",
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
         },
         "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     }
+  ],
+  "timezone": "browser",
+  "tags": [
+    "builds",
+    "kache"
   ]
 }
