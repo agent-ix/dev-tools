@@ -1128,11 +1128,10 @@ fn status_with_clock(
                 memory_needed_bytes: if request.phase == Phase::Queued
                     && config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted
                 {
-                    Some(admission_reservation(
-                        request,
-                        &config,
-                        used.saturating_add(request.units),
-                    )?)
+                    admission_reservation(request, &config, used.saturating_add(request.units))
+                        .ok()
+                        .or(request.memory_reservation_bytes)
+                        .or(request.memory_cap_bytes)
                 } else {
                     request
                         .memory_reservation_bytes

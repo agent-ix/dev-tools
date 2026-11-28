@@ -4765,3 +4765,68 @@ fn backfill_candidate_that_outgrows_class_cap_is_refused_without_poisoning_queue
     assert_eq!(config.memory_budget_bytes, Some(15_000_000_000));
     Ok(())
 }
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn status_and_scrape_survive_overflowing_and_over_cap_queued_reservations() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 8, 49_399_452_672, 0)?;
+    let id = enqueue(
+        &store,
+        "head",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j4".into()],
+    )?;
+    let mut policy = store.snapshot()?.1;
+    policy.memory_reserve_per_job_bytes = u64::MAX;
+    policy.memory_limit_per_job_bytes = u64::MAX;
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    for (stored_reservation, stored_cap, expected) in [
+        (
+            Some(10_000_000_000),
+            Some(20_000_000_000),
+            Some(10_000_000_000),
+        ),
+        (None, Some(20_000_000_000), Some(20_000_000_000)),
+        (None, None, None),
+    ] {
+        store.transaction(|state, config| {
+            let request = state.find_mut(&id)?;
+            request.memory_reservation_bytes = stored_reservation;
+            request.memory_cap_bytes = stored_cap;
+            assert!(admission_reservation(request, config, 1).is_err());
+            Ok(())
+        })?;
+        let report = status(&store)?;
+        assert_eq!(report.requests.len(), 1);
+        assert_eq!(report.requests[0].memory_needed_bytes, expected);
+        let text = metrics(&store)?;
+        assert!(text.contains("ix_build_head_queued_seconds{"));
+        assert!(text.contains("ix_build_memory_budget_total_bytes{"));
+        if let Some(bytes) = expected {
+            assert!(text.contains(&format!(
+                "ix_build_head_memory_reservation_bytes{{host=\"your-build-host\"}} {bytes}\n"
+            )));
+        } else {
+            assert!(!text.contains("ix_build_head_memory_reservation_bytes{"));
+        }
+    }
+    policy.memory_reserve_per_job_bytes = 4_000_000_000;
+    policy.memory_limit_per_job_bytes = 8_000_000_000;
+    policy
+        .memory_cap_by_class
+        .insert("periodic".into(), 8_000_000_000);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    assert!(estimate_memory_lease(&policy, "periodic", 4).is_err());
+    assert_eq!(
+        status(&store)?.requests[0].memory_needed_bytes,
+        Some(16_000_000_000)
+    );
+    assert!(metrics(&store)?.contains(
+        "ix_build_head_memory_reservation_bytes{host=\"your-build-host\"} 16000000000\n"
+    ));
+    Ok(())
+}

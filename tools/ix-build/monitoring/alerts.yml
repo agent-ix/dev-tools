@@ -5,13 +5,13 @@
       "rules": [
         {
           "alert": "IxBuildHeadWaitWithAvailableMemory",
-          "expr": "(ix_build_head_queued_seconds > 600) and on(host) (max by(host) (node_memory_MemAvailable_bytes) > on(host) ix_build_head_memory_reservation_bytes)",
+          "expr": "(ix_build_head_queued_seconds > 600) and on(host) (max by(host) (node_memory_MemAvailable_bytes) > on(host) ix_build_head_memory_reservation_bytes) and on(host) ((ix_build_memory_budget_used_bytes + on(host) ix_build_head_memory_reservation_bytes) <= on(host) ix_build_memory_budget_total_bytes)",
           "labels": {
             "severity": "warning"
           },
           "annotations": {
             "summary": "Build queue head stalled with available memory on {{ $labels.host }}",
-            "description": "Head waited over ten minutes while MemAvailable exceeds its effective reservation. Compare status memory_reserved_bytes plus head memory_needed_bytes against memory_budget_bytes."
+            "description": "Head waited over ten minutes despite sufficient free admission budget and MemAvailable above its effective reservation. Inspect status for the blocking reason."
           }
         },
         {
