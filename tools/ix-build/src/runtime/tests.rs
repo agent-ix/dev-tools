@@ -815,7 +815,7 @@ fn jobs_four_records_twelve_gb_reservation_and_thirty_two_gb_limit_and_refusals_
     assert_eq!(
         failure.diagnostic.message,
         Some(format!(
-            "ix-build: IB_REFUSED_MEMORY_BUDGET request={} limit=policy.memory_budget_bytes=11000000000 measured=12000000000 (requested memory reservation bytes) killed=not-started/command",
+            "ix-build: IB_REFUSED_MEMORY_BUDGET request={} limit=policy.memory_budget_bytes=11000000000 measured=12000000000 (memory reservation bytes; per_job_bytes=3000000000; effective_jobs=4) killed=not-started/command",
             failure.request_id
         ))
     );
@@ -2137,8 +2137,9 @@ fn invalid_cargo_job_limits_are_rejected_in_arguments_and_environment() {
     assert!(validate_parallelism_input(&["cargo".into(), "test".into()], Some("8"), None).is_ok());
 }
 
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
 #[test]
-fn memory_charge_uses_test_threads_and_non_cargo_environment_is_capped_by_units() -> Result<()> {
+fn memory_charge_uses_cargo_jobs_and_non_cargo_environment_is_capped_by_units() -> Result<()> {
     let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
     policy.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
     policy.memory_budget_bytes = Some(100_000_000_000);
@@ -2159,10 +2160,10 @@ fn memory_charge_uses_test_threads_and_non_cargo_environment_is_capped_by_units(
         resolve_build_parallelism(&policy, &cargo_command, None, None, 1, 1);
     assert_eq!(jobs, Some(4));
     assert_eq!(threads, Some(8));
-    assert_eq!(parallelism, 8);
+    assert_eq!(parallelism, 4);
     assert_eq!(
         estimate_memory_lease(&policy, "periodic", parallelism)?,
-        20_000_000_000
+        10_000_000_000
     );
 
     let make_command = ["make".into(), "-j8".into()];
@@ -4127,3 +4128,705 @@ fn telemetry_10k_request_ledger_scrape_p95_is_under_half_a_second() -> Result<()
 
 #[path = "telemetry_fault_tests.rs"]
 mod telemetry_fault_tests;
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn granted_memory_admits_titan_head_and_status_explains_budget() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 8, 49_399_452_672, 0)?;
+    let mut policy = store.snapshot()?.1;
+    policy.cargo_build_jobs = Some(4);
+    policy.rust_test_threads = Some(4);
+    policy.memory_reserve_per_job_bytes = 3_000_000_000;
+    policy.memory_limit_per_job_bytes = 8_000_000_000;
+    policy
+        .memory_per_job_by_class
+        .insert("block".into(), 13_000_000_000);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let urgent = enqueue(
+        &store,
+        "urgent",
+        "SWM-437",
+        3,
+        3,
+        Some("must-fix"),
+        &["cargo".into(), "build".into(), "-j4".into()],
+    )?;
+    let mut blocks = Vec::new();
+    for index in 0..4 {
+        blocks.push(enqueue(
+            &store,
+            &format!("block-{index}"),
+            "SWM-437",
+            1,
+            1,
+            Some("block"),
+            &["cargo".into(), "build".into()],
+        )?);
+    }
+    store.transaction(|state, config| {
+        // Every block was queued on an idle host and originally estimated four jobs.
+        assert_eq!(
+            state.find(&blocks[3])?.memory_reservation_bytes,
+            Some(12_000_000_000)
+        );
+        grant_memory_fixture(state, config, &urgent, 100, 100)?;
+        for id in &blocks[..3] {
+            grant_memory_fixture(state, config, id, 100, 100)?;
+            let r = state.find(id)?;
+            assert_eq!(r.memory_cargo_jobs, Some(1));
+            assert_eq!(r.memory_reservation_bytes, Some(3_000_000_000));
+            assert_eq!(r.memory_cap_bytes, Some(13_000_000_000));
+            assert_eq!(
+                r.lease_record.as_ref().and_then(|l| l.cargo_build_jobs),
+                Some(1)
+            );
+        }
+        assert_eq!(state.find(&urgent)?.memory_cargo_jobs, Some(4));
+        assert_eq!(
+            state.find(&urgent)?.memory_reservation_bytes,
+            Some(12_000_000_000)
+        );
+        assert_eq!(state.memory_used(config), 21_000_000_000);
+        let sample = HostSample {
+            host: config.host.clone(),
+            observed_at_ms: 100,
+            memory_available_bytes: 51_800_000_000,
+            disk_available_bytes: 1_000_000,
+            load_one: 0.0,
+        };
+        assert_eq!(
+            state.admission_reason(&blocks[3], config, Some(&sample), 100, 100)?,
+            None
+        );
+        grant_memory_fixture(state, config, &blocks[3], 100, 100)?;
+        assert_eq!(state.memory_used(config), 24_000_000_000);
+        Ok(())
+    })?;
+    let report = status(&store)?;
+    assert_eq!(report.memory_reserved_bytes, 24_000_000_000);
+    assert_eq!(report.memory_budget_bytes, Some(49_399_452_672));
+    let head = report
+        .requests
+        .iter()
+        .find(|r| r.request_id == blocks[3])
+        .ok_or_else(|| Error::new(ErrorCode::State, "missing head"))?;
+    assert_eq!(head.trace.granted_jobs, Some(1));
+    assert_eq!(
+        head.trace.granted_memory_reservation_bytes,
+        Some(3_000_000_000)
+    );
+    assert_eq!(head.memory_cap_bytes, Some(13_000_000_000));
+    Ok(())
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn grant_recomputes_class_reservations_and_explicit_jobs_keep_four() -> Result<()> {
+    for explicit in [false, true] {
+        let root = tempfile::tempdir()?;
+        let store = lease_accounted_store(root.path(), 8, 49_399_452_672, 0)?;
+        let mut policy = store.snapshot()?.1;
+        policy.cargo_build_jobs = Some(4);
+        policy.rust_test_threads = Some(4);
+        policy.memory_reserve_per_job_bytes = 3_000_000_000;
+        policy.memory_limit_per_job_bytes = 8_000_000_000;
+        policy
+            .memory_reserve_per_job_by_class
+            .insert("block".into(), 2_000_000_000);
+        policy
+            .memory_per_job_by_class
+            .insert("block".into(), 13_000_000_000);
+        std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+        let mut command = vec!["cargo".into(), "build".into()];
+        if explicit {
+            command.push("-j4".into());
+        }
+        let id = enqueue(&store, "block", "SWM-437", 1, 1, Some("block"), &command)?;
+        let other = enqueue(&store, "other", "SWM-437", 3, 0, None, &["true".into()])?;
+        store.transaction(|state, config| {
+            grant_memory_fixture(state, config, &id, 100, 100)?;
+            assert_eq!(state.find(&id)?.memory_cargo_jobs, Some(4));
+            assert_eq!(
+                state.find(&id)?.memory_reservation_bytes,
+                Some(8_000_000_000)
+            );
+            assert_eq!(state.find(&id)?.memory_cap_bytes, Some(52_000_000_000));
+            // Recreate the grant with pressure that did not exist at enqueue.
+            state.find_mut(&id)?.phase = Phase::Queued;
+            grant_memory_fixture(state, config, &other, 100, 100)?;
+            grant_memory_fixture(state, config, &id, 100, 100)?;
+            let r = state.find(&id)?;
+            assert_eq!(r.memory_cargo_jobs, Some(if explicit { 4 } else { 1 }));
+            assert_eq!(
+                r.memory_reservation_bytes,
+                Some(if explicit {
+                    8_000_000_000
+                } else {
+                    2_000_000_000
+                })
+            );
+            assert_eq!(
+                r.memory_cap_bytes,
+                Some(if explicit {
+                    52_000_000_000
+                } else {
+                    13_000_000_000
+                })
+            );
+            let mut args = r.command[1..].to_vec();
+            assert_eq!(
+                prepare_request_environment(config, r, &mut args, 8)
+                    .record
+                    .cargo_build_jobs,
+                r.memory_cargo_jobs
+            );
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn oversized_effective_reservation_is_refused_before_enqueue_with_values() -> Result<()> {
+    for (jobs, per_job, reservation) in [
+        (4, 3_000_000_000, 12_000_000_000_u64),
+        (1, 11_000_000_000, 11_000_000_000),
+    ] {
+        let root = tempfile::tempdir()?;
+        let store = lease_accounted_store(root.path(), 8, 10_000_000_000, 0)?;
+        let mut policy = store.snapshot()?.1;
+        policy.cargo_build_jobs = Some(jobs);
+        policy.memory_limit_per_job_bytes = 13_000_000_000;
+        policy
+            .memory_reserve_per_job_by_class
+            .insert("block".into(), per_job);
+        std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+        let error = enqueue(
+            &store,
+            "block",
+            "SWM-437",
+            1,
+            1,
+            Some("block"),
+            &["cargo".into(), "build".into()],
+        )
+        .err()
+        .ok_or_else(|| Error::new(ErrorCode::State, "oversized request queued"))?;
+        let failure = error
+            .failure
+            .ok_or_else(|| Error::new(ErrorCode::State, "missing refusal"))?;
+        assert_eq!(
+            failure.diagnostic.code,
+            Some(ix_build::wire::Code::RefusedMemoryBudget)
+        );
+        assert_eq!(
+            failure.diagnostic.limit_value,
+            Some(10_000_000_000_u64.into())
+        );
+        assert_eq!(failure.diagnostic.measured_value, Some(reservation.into()));
+        assert_eq!(
+            failure.diagnostic.measured_what,
+            Some(format!(
+                "memory reservation bytes; per_job_bytes={per_job}; effective_jobs={jobs}"
+            ))
+        );
+        let (state, _) = store.snapshot()?;
+        assert!(state.requests.is_empty());
+        assert_eq!(state.events.len(), 1);
+        assert_eq!(state.events[0].kind, "refused");
+    }
+    Ok(())
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn blocked_head_status_uses_current_reservation_and_preserves_bounded_backfill() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 8, 10_000_000_000, 0)?;
+    let mut policy = store.snapshot()?.1;
+    policy.cargo_build_jobs = Some(4);
+    policy.memory_reserve_per_job_bytes = 3_000_000_000;
+    policy.memory_limit_per_job_bytes = 8_000_000_000;
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let running = enqueue(
+        &store,
+        "running",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j2".into()],
+    )?;
+    let head = enqueue(
+        &store,
+        "head",
+        "SWM-437",
+        1,
+        1,
+        Some("block"),
+        &["cargo".into(), "build".into(), "-j2".into()],
+    )?;
+    let small = enqueue(
+        &store,
+        "small",
+        "SWM-437",
+        1,
+        1,
+        Some("block"),
+        &["cargo".into(), "build".into(), "-j1".into()],
+    )?;
+    store.transaction(|state, config| {
+        grant_memory_fixture(state, config, &running, 100, 100)?;
+        let sample = HostSample {
+            host: config.host.clone(),
+            observed_at_ms: 100,
+            memory_available_bytes: 51_800_000_000,
+            disk_available_bytes: 1_000_000,
+            load_one: 0.0,
+        };
+        assert_eq!(
+            state.admission_reason(&head, config, Some(&sample), 100, 100)?,
+            Some("memory_budget")
+        );
+        assert_eq!(
+            state.admission_reason(&small, config, Some(&sample), 100, 100)?,
+            None
+        );
+        state.find_mut(&head)?.enqueued_clock_ms = 0;
+        Ok(())
+    })?;
+    let report = status_at(&store, 700_000, 700_000)?;
+    assert_eq!(report.memory_reserved_bytes, 6_000_000_000);
+    assert_eq!(report.memory_budget_bytes, Some(10_000_000_000));
+    let row = report
+        .requests
+        .iter()
+        .find(|r| r.request_id == head)
+        .ok_or_else(|| Error::new(ErrorCode::State, "head missing"))?;
+    assert_eq!(row.memory_needed_bytes, Some(6_000_000_000));
+    assert_eq!(row.memory_free_budget_bytes, Some(4_000_000_000));
+    let (state, config) = store.snapshot()?;
+    let text = state
+        .metrics
+        .exposition(&state, &config, 700_000, 700_000)?;
+    assert!(text.contains("ix_build_head_queued_seconds{host=\"your-build-host\"} 700\n"));
+    assert!(
+        text.contains(
+            "ix_build_head_memory_reservation_bytes{host=\"your-build-host\"} 6000000000\n"
+        )
+    );
+    Ok(())
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn reservation_clamps_to_one_job_and_live_available_grants_stay_unchanged() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let id = enqueue(
+        &store,
+        "live",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into()],
+    )?;
+    store.transaction(|state, config| {
+        let mut accounted = config.clone();
+        accounted.memory_admission = crate::config::MemoryAdmissionMode::LeaseAccounted;
+        accounted.cargo_build_jobs = Some(4);
+        accounted.memory_budget_bytes = Some(20_000_000_000);
+        accounted.memory_reserve_per_job_bytes = 3_000_000_000;
+        assert_eq!(
+            admission_reservation(state.find(&id)?, &accounted, 8)?,
+            3_000_000_000
+        );
+        grant_memory_fixture(state, config, &id, 100, 100)?;
+        let r = state.find(&id)?;
+        assert_eq!(r.memory_cap_bytes, None);
+        assert_eq!(r.memory_reservation_bytes, None);
+        assert!(r.lease_record.is_none());
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn grant_memory_fixture(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    now: u64,
+    clock: u64,
+) -> Result<()> {
+    let request = state.find_mut(id)?;
+    request.worker = Some(Processes::self_identity()?);
+    request.worker_generation = 1;
+    grant_request(state, config, id, now, clock)
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn newly_impossible_head_is_terminally_refused_when_pressure_falls() -> Result<()> {
+    for (budget, class_cap, expected) in [
+        (
+            10_000_000_000,
+            None,
+            ix_build::wire::Code::RefusedMemoryBudget,
+        ),
+        (
+            49_399_452_672,
+            Some(16_000_000_000),
+            ix_build::wire::Code::RefusedClassCap,
+        ),
+    ] {
+        let root = tempfile::tempdir()?;
+        let store = lease_accounted_store(root.path(), 8, budget, 0)?;
+        let mut policy = store.snapshot()?.1;
+        policy.cargo_build_jobs = Some(4);
+        policy.memory_reserve_per_job_bytes = 3_000_000_000;
+        policy.memory_limit_per_job_bytes = 8_000_000_000;
+        if let Some(cap) = class_cap {
+            policy.memory_cap_by_class.insert("block".into(), cap);
+        }
+        std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+        let prior = enqueue(&store, "prior", "SWM-437", 3, 0, None, &["true".into()])?;
+        store.transaction(|state, config| grant_memory_fixture(state, config, &prior, 100, 100))?;
+        let head = enqueue(
+            &store,
+            "head",
+            "SWM-437",
+            1,
+            1,
+            Some("block"),
+            &["cargo".into(), "build".into()],
+        )?;
+        let next = enqueue(
+            &store,
+            "next",
+            "SWM-437",
+            1,
+            1,
+            Some("block"),
+            &["cargo".into(), "build".into(), "-j1".into()],
+        )?;
+        store.transaction(|state, config| {
+            assert_eq!(state.find(&head)?.memory_cargo_jobs, Some(1));
+            state.finish(
+                &prior,
+                Completion {
+                    code: Some(0),
+                    ..Completion::default()
+                },
+                config,
+                200,
+                200,
+            )
+        })?;
+        schedule_queue(&store)?;
+        let report = status(&store)?;
+        let head = report
+            .requests
+            .iter()
+            .find(|r| r.request_id == head)
+            .ok_or_else(|| Error::new(ErrorCode::State, "missing head"))?;
+        assert_eq!(head.state, "failed");
+        assert_eq!(head.trace.lifecycle_state, "refused");
+        assert_eq!(head.trace.diagnostic.code, Some(expected));
+        assert!(head.started_at_ms.is_none());
+        assert!(
+            head.trace
+                .diagnostic
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains(&format!("request={} ", head.request_id.0)))
+        );
+        let event = report
+            .events
+            .iter()
+            .find(|e| e.request_id == head.request_id && e.kind == "refused")
+            .ok_or_else(|| Error::new(ErrorCode::State, "missing refusal event"))?;
+        assert_eq!(event.trace.diagnostic.code, Some(expected));
+        let (state, config) = store.snapshot()?;
+        assert_eq!(state.next(&config, clock_ms()?).map(|r| &r.id), Some(&next));
+    }
+    Ok(())
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-1, FR-005-AC-8, FR-015-AC-8
+#[test]
+fn bounded_memory_backfill_admits_granted_jobs_without_overcommitting() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 8, 15_000_000_000, 0)?;
+    let mut policy = store.snapshot()?.1;
+    policy.cargo_build_jobs = Some(4);
+    policy.memory_reserve_per_job_bytes = 3_000_000_000;
+    policy.memory_limit_per_job_bytes = 8_000_000_000;
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let running = enqueue(
+        &store,
+        "running",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j2".into()],
+    )?;
+    let head = enqueue(
+        &store,
+        "head",
+        "SWM-437",
+        1,
+        1,
+        Some("block"),
+        &["cargo".into(), "build".into(), "-j4".into()],
+    )?;
+    let small = enqueue(
+        &store,
+        "small",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into()],
+    )?;
+    let overflow = enqueue(
+        &store,
+        "overflow",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j2".into()],
+    )?;
+    let fence = claim_worker(&store, &small, &Processes::self_identity()?)?
+        .ok_or_else(|| Error::new(ErrorCode::State, "missing backfill worker"))?;
+    let (clock, sample) = store.transaction(|state, config| {
+        grant_memory_fixture(state, config, &running, 100, 100)?;
+        let clock = state.find(&head)?.enqueued_clock_ms;
+        let sample = HostSample {
+            host: config.host.clone(),
+            observed_at_ms: 100,
+            memory_available_bytes: 51_800_000_000,
+            disk_available_bytes: 1_000_000,
+            load_one: 0.0,
+        };
+        assert_eq!(
+            state.find(&small)?.memory_reservation_bytes,
+            Some(12_000_000_000)
+        );
+        assert_eq!(
+            admission_reservation(state.find(&small)?, config, 2)?,
+            6_000_000_000
+        );
+        assert_eq!(
+            state.admission_reason(&head, config, Some(&sample), 100, clock)?,
+            Some("memory_budget")
+        );
+        assert_eq!(
+            state.admission_reason(&small, config, Some(&sample), 100, clock)?,
+            None
+        );
+        let deadline = clock + (u64::from(config.max_priority()) + 1) * config.aging_ms;
+        assert_eq!(
+            state.admission_reason(&small, config, Some(&sample), 100, deadline - 1)?,
+            None
+        );
+        assert_eq!(
+            state.admission_reason(&small, config, Some(&sample), 100, deadline)?,
+            Some("fifo_or_priority_reservation")
+        );
+        Ok((clock, sample))
+    })?;
+    assert!(matches!(
+        admit_worker_at(
+            &store,
+            &small,
+            &fence,
+            &AtomicBool::new(false),
+            100,
+            clock,
+            |_, _| Some(sample.clone())
+        )?,
+        Admission::Granted
+    ));
+    let (state, config) = store.snapshot()?;
+    assert_eq!(state.find(&head)?.phase, Phase::Queued);
+    assert_eq!(state.find(&small)?.phase, Phase::Running);
+    assert_eq!(state.find(&small)?.memory_cargo_jobs, Some(2));
+    assert_eq!(
+        state.find(&small)?.memory_reservation_bytes,
+        Some(6_000_000_000)
+    );
+    assert_eq!(state.find(&small)?.memory_cap_bytes, Some(16_000_000_000));
+    assert_eq!(state.memory_used(&config), 12_000_000_000);
+    assert_eq!(config.memory_budget_bytes, Some(15_000_000_000));
+    assert_eq!(
+        state.admission_reason(&overflow, &config, Some(&sample), 100, clock)?,
+        Some("fifo_or_priority_reservation")
+    );
+    assert_eq!(state.find(&overflow)?.phase, Phase::Queued);
+    Ok(())
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn backfill_candidate_that_outgrows_class_cap_is_refused_without_poisoning_queue() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 8, 15_000_000_000, 0)?;
+    let mut policy = store.snapshot()?.1;
+    policy.cargo_build_jobs = Some(4);
+    policy.memory_reserve_per_job_bytes = 3_000_000_000;
+    policy.memory_limit_per_job_bytes = 8_000_000_000;
+    policy
+        .memory_cap_by_class
+        .insert("point".into(), 8_000_000_000);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let running = enqueue(
+        &store,
+        "running",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j2".into()],
+    )?;
+    let filler = enqueue(&store, "filler", "SWM-437", 1, 0, None, &["true".into()])?;
+    store.transaction(|state, config| {
+        grant_memory_fixture(state, config, &running, now_ms()?, clock_ms()?)?;
+        grant_memory_fixture(state, config, &filler, now_ms()?, clock_ms()?)
+    })?;
+    let head = enqueue(
+        &store,
+        "head",
+        "SWM-437",
+        1,
+        1,
+        Some("block"),
+        &["cargo".into(), "build".into(), "-j4".into()],
+    )?;
+    let impossible = enqueue(
+        &store,
+        "impossible",
+        "SWM-437",
+        1,
+        0,
+        Some("point"),
+        &["cargo".into(), "build".into()],
+    )?;
+    let small = enqueue(
+        &store,
+        "small",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j1".into()],
+    )?;
+    let identity = Processes::self_identity()?;
+    let mut leases = Vec::new();
+    for id in [&impossible, &small] {
+        let (generation, lease) = spawn_worker_with(&store, id, false, |claim, lease| {
+            Ok((claim.generation, lease))
+        })?
+        .ok_or_else(|| Error::new(ErrorCode::State, "missing backfill claim"))?;
+        claim_spawned_worker(&store, id, &identity, generation)?;
+        leases.push(lease);
+    }
+    store.transaction(|state, config| {
+        assert_eq!(state.find(&impossible)?.memory_cargo_jobs, Some(1));
+        state.finish(
+            &filler,
+            Completion {
+                code: Some(0),
+                ..Completion::default()
+            },
+            config,
+            now_ms()?,
+            clock_ms()?,
+        )
+    })?;
+    schedule_queue(&store)?;
+    let (state, config) = store.snapshot()?;
+    assert_eq!(state.find(&head)?.phase, Phase::Queued);
+    let refused = state.find(&impossible)?;
+    assert_eq!(refused.phase, Phase::Failed);
+    assert_eq!(refused.trace.lifecycle_state, "refused");
+    assert_eq!(
+        refused.trace.diagnostic.code,
+        Some(ix_build::wire::Code::RefusedClassCap)
+    );
+    assert!(refused.started_at_ms.is_none());
+    assert_eq!(state.find(&small)?.phase, Phase::Running);
+    assert_eq!(state.find(&small)?.memory_cargo_jobs, Some(1));
+    assert_eq!(state.memory_used(&config), 9_000_000_000);
+    assert_eq!(config.memory_budget_bytes, Some(15_000_000_000));
+    Ok(())
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+#[test]
+fn status_and_scrape_survive_overflowing_and_over_cap_queued_reservations() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 8, 49_399_452_672, 0)?;
+    let id = enqueue(
+        &store,
+        "head",
+        "SWM-437",
+        1,
+        0,
+        None,
+        &["cargo".into(), "build".into(), "-j4".into()],
+    )?;
+    let mut policy = store.snapshot()?.1;
+    policy.memory_reserve_per_job_bytes = u64::MAX;
+    policy.memory_limit_per_job_bytes = u64::MAX;
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    for (stored_reservation, stored_cap, expected) in [
+        (
+            Some(10_000_000_000),
+            Some(20_000_000_000),
+            Some(10_000_000_000),
+        ),
+        (None, Some(20_000_000_000), Some(20_000_000_000)),
+        (None, None, None),
+    ] {
+        store.transaction(|state, config| {
+            let request = state.find_mut(&id)?;
+            request.memory_reservation_bytes = stored_reservation;
+            request.memory_cap_bytes = stored_cap;
+            assert!(admission_reservation(request, config, 1).is_err());
+            Ok(())
+        })?;
+        let report = status(&store)?;
+        assert_eq!(report.requests.len(), 1);
+        assert_eq!(report.requests[0].memory_needed_bytes, expected);
+        let text = metrics(&store)?;
+        assert!(text.contains("ix_build_head_queued_seconds{"));
+        assert!(text.contains("ix_build_memory_budget_total_bytes{"));
+        if let Some(bytes) = expected {
+            assert!(text.contains(&format!(
+                "ix_build_head_memory_reservation_bytes{{host=\"your-build-host\"}} {bytes}\n"
+            )));
+        } else {
+            assert!(!text.contains("ix_build_head_memory_reservation_bytes{"));
+        }
+    }
+    policy.memory_reserve_per_job_bytes = 4_000_000_000;
+    policy.memory_limit_per_job_bytes = 8_000_000_000;
+    policy
+        .memory_cap_by_class
+        .insert("periodic".into(), 8_000_000_000);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    assert!(estimate_memory_lease(&policy, "periodic", 4).is_err());
+    assert_eq!(
+        status(&store)?.requests[0].memory_needed_bytes,
+        Some(16_000_000_000)
+    );
+    assert!(metrics(&store)?.contains(
+        "ix_build_head_memory_reservation_bytes{host=\"your-build-host\"} 16000000000\n"
+    ));
+    Ok(())
+}

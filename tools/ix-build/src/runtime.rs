@@ -58,6 +58,7 @@ pub(crate) fn enqueue(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
 pub(crate) fn enqueue_with_memory(
     store: &Store,
     owner: &str,
@@ -218,6 +219,9 @@ pub(crate) fn enqueue_with_memory(
             let memory_reservation_bytes = if memory.is_some() { memory } else { memory_cap_bytes
                 .map(|_| estimate_memory_reservation(config, class_name, memory_parallelism))
                 .transpose()? };
+            if memory.is_none() && let Some(reservation) = memory_reservation_bytes {
+                validate_memory_reservation(config, class_name, memory_parallelism, reservation)?;
+            }
             state.requests.push(Request {
                 telemetry: telemetry.clone(),
                 client: Some(Processes::self_identity()?),
@@ -430,6 +434,7 @@ fn estimate_memory_lease(
     Ok(lease_bytes)
 }
 
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
 fn estimate_memory_reservation(config: &Config, class: &str, parallelism: u32) -> Result<u64> {
     let per_job = config
         .memory_reserve_per_job_by_class
@@ -439,11 +444,26 @@ fn estimate_memory_reservation(config: &Config, class: &str, parallelism: u32) -
     let lease_bytes = u64::from(parallelism)
         .checked_mul(per_job)
         .ok_or_else(|| Error::new(ErrorCode::Request, "requested memory reservation overflows"))?;
+    Ok(lease_bytes)
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+fn validate_memory_reservation(
+    config: &Config,
+    class: &str,
+    parallelism: u32,
+    lease_bytes: u64,
+) -> Result<()> {
+    let per_job = config
+        .memory_reserve_per_job_by_class
+        .get(class)
+        .copied()
+        .unwrap_or(config.memory_reserve_per_job_bytes);
     let budget = config.memory_budget_bytes.unwrap_or(0);
     if lease_bytes > budget {
         return Err(Error::new(
             ErrorCode::Request,
-            format!("requested memory lease {lease_bytes} exceeds memory budget {budget}"),
+            format!("memory reservation {lease_bytes} exceeds memory budget {budget}; per-job reservation {per_job}; effective jobs {parallelism}"),
         )
         .with_failure(crate::diagnostics::Failure::refused(
             ix_build::wire::Code::RefusedMemoryBudget,
@@ -451,12 +471,13 @@ fn estimate_memory_reservation(config: &Config, class: &str, parallelism: u32) -
             "policy.memory_budget_bytes",
             budget.into(),
             lease_bytes.into(),
-            "requested memory reservation bytes",
+            &format!("memory reservation bytes; per_job_bytes={per_job}; effective_jobs={parallelism}"),
         )));
     }
-    Ok(lease_bytes)
+    Ok(())
 }
 
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
 fn resolve_build_parallelism(
     config: &crate::config::Config,
     command: &[String],
@@ -487,14 +508,34 @@ fn resolve_build_parallelism(
     if is_cargo {
         let jobs = prepared.record.cargo_build_jobs.unwrap_or(units);
         let test_threads = prepared.record.rust_test_threads;
-        (
-            Some(jobs),
-            test_threads,
-            jobs.max(test_threads.unwrap_or_default()),
-        )
+        (Some(jobs), test_threads, jobs.max(1))
     } else {
         (None, prepared.record.rust_test_threads, units)
     }
+}
+
+/// Reservation evaluated with the jobs that would be granted now, not at enqueue.
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+pub(crate) fn admission_reservation(
+    request: &Request,
+    config: &Config,
+    active_units: u32,
+) -> Result<u64> {
+    if request.memory_parallelism.is_none()
+        || request.memory_limit_key.as_deref() == Some("request.memory_bytes")
+        || config.memory_admission != crate::config::MemoryAdmissionMode::LeaseAccounted
+    {
+        return Ok(request.reservation_bytes());
+    }
+    let (_, _, jobs) = resolve_build_parallelism(
+        config,
+        &request.command,
+        request.caller_cargo_build_jobs.as_deref(),
+        request.caller_rust_test_threads.as_deref(),
+        request.units,
+        active_units,
+    );
+    estimate_memory_reservation(config, &request.class, jobs)
 }
 
 fn validate_parallelism_input(
@@ -775,6 +816,10 @@ fn launch_worker(
 /// Redacted snapshot suitable for deterministic monitoring consumers.
 #[derive(Serialize)]
 pub struct Report {
+    /// Sum of reservations held by active leases.
+    pub memory_reserved_bytes: u64,
+    /// Whole host admission budget for comparison with active and head reservations.
+    pub memory_budget_bytes: Option<u64>,
     /// Durable admission hold; queued identity and ordering remain unchanged.
     pub queue_hold: Option<crate::queue::Hold>,
     /// Effective policy bound for explicitly sized memory requests.
@@ -1031,6 +1076,7 @@ fn status_at(store: &Store, now: u64, clock: u64) -> Result<Report> {
     status_with_clock(store, || Ok((now, clock)))
 }
 
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
 fn status_with_clock(
     store: &Store,
     mut read_clock: impl FnMut() -> Result<(u64, u64)>,
@@ -1057,6 +1103,7 @@ fn status_with_clock(
         Err(error) => (None, Some(error.to_string())),
     };
     let positions = state.queue_positions(&config, clock);
+    let used = state.used();
     let free_budget = config
         .memory_budget_bytes
         .map(|budget| budget.saturating_sub(state.memory_used(&config)));
@@ -1070,7 +1117,7 @@ fn status_with_clock(
                     .as_ref()
                     .map(|processes| processes.identity(worker, &request.id))
             });
-            RequestReport {
+            Ok(RequestReport {
                 trace: {
                     let mut trace = request.trace_snapshot(clock);
                     if request.phase == Phase::Queued {
@@ -1078,9 +1125,18 @@ fn status_with_clock(
                     }
                     trace
                 },
-                memory_needed_bytes: request
-                    .memory_reservation_bytes
-                    .or(request.memory_cap_bytes),
+                memory_needed_bytes: if request.phase == Phase::Queued
+                    && config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted
+                {
+                    admission_reservation(request, &config, used.saturating_add(request.units))
+                        .ok()
+                        .or(request.memory_reservation_bytes)
+                        .or(request.memory_cap_bytes)
+                } else {
+                    request
+                        .memory_reservation_bytes
+                        .or(request.memory_cap_bytes)
+                },
                 memory_free_budget_bytes: free_budget,
                 pid_namespace: request.pid_namespace.clone(),
                 request_id: request.id.clone(),
@@ -1110,11 +1166,12 @@ fn status_with_clock(
                 exit_code: request.exit_code,
                 signal: request.signal,
                 lease_record: request.lease_record.clone(),
-            }
+            })
         })
-        .collect();
-    let used = state.used();
+        .collect::<Result<Vec<_>>>()?;
     Ok(Report {
+        memory_reserved_bytes: state.memory_used(&config),
+        memory_budget_bytes: config.memory_budget_bytes,
         queue_hold: store.queue_hold()?,
         max_request_memory: config.request_memory_cap(),
         max_queued_per_owner: config.owner_queue_cap(),
@@ -1499,6 +1556,9 @@ pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
         |state, config, now, clock| {
             let sample = config.sample(now).ok();
             while admission.is_some() {
+                if refuse_impossible_head(state, config, now, clock)? {
+                    continue;
+                }
                 let positions = state.queue_positions(config, clock);
                 let mut ordered: Vec<_> = positions.iter().collect();
                 ordered.sort_by_key(|(_, position)| **position);
@@ -1527,6 +1587,9 @@ pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
                 let Some(id) = candidate else {
                     break;
                 };
+                if refuse_impossible_request(state, config, &id, now, clock)? {
+                    continue;
+                }
                 grant_request(state, config, &id, now, clock)?;
             }
             let positions = state.queue_positions(config, clock);
@@ -1582,6 +1645,75 @@ pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
     )
 }
 
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+fn refuse_impossible_head(
+    state: &mut crate::model::State,
+    config: &Config,
+    now: u64,
+    clock: u64,
+) -> Result<bool> {
+    let Some(id) = state.next(config, clock).map(|request| request.id.clone()) else {
+        return Ok(false);
+    };
+    refuse_impossible_request(state, config, &id, now, clock)
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+fn refuse_impossible_request(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    now: u64,
+    clock: u64,
+) -> Result<bool> {
+    let request = state.find(id)?;
+    if config.memory_admission != crate::config::MemoryAdmissionMode::LeaseAccounted
+        || request.memory_parallelism.is_none()
+        || request.memory_limit_key.as_deref() == Some("request.memory_bytes")
+    {
+        return Ok(false);
+    }
+    let (_, _, jobs) = resolve_build_parallelism(
+        config,
+        &request.command,
+        request.caller_cargo_build_jobs.as_deref(),
+        request.caller_rust_test_threads.as_deref(),
+        request.units,
+        state.used().saturating_add(request.units),
+    );
+    let allocation = estimate_memory_reservation(config, &request.class, jobs)
+        .and_then(|bytes| validate_memory_reservation(config, &request.class, jobs, bytes))
+        .and_then(|()| estimate_memory_lease(config, &request.class, jobs));
+    let Err(error) = allocation else {
+        return Ok(false);
+    };
+    let id = request.id.clone();
+    let mut failure = crate::diagnostics::unscoped(&error, id.0.clone());
+    if let Some(message) = &mut failure.diagnostic.message {
+        *message = message.replace("request=pending ", &format!("request={} ", id.0));
+    }
+    state.finish(
+        &id,
+        Completion {
+            reason: Some("refused"),
+            ..Completion::default()
+        },
+        config,
+        now,
+        clock,
+    )?;
+    let request = state.find_mut(&id)?;
+    request.trace.lifecycle_state = "refused".into();
+    request.trace.diagnostic = failure.diagnostic;
+    let trace = request.trace_snapshot(clock);
+    if let Some(event) = state.events.last_mut() {
+        event.kind = "refused".into();
+        event.trace = trace;
+    }
+    Ok(true)
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
 fn grant_request(
     state: &mut crate::model::State,
     config: &Config,
@@ -1589,7 +1721,35 @@ fn grant_request(
     now: u64,
     clock: u64,
 ) -> Result<()> {
+    let active_units = state.used().saturating_add(state.find(id)?.units);
     let request = state.find_mut(id)?;
+    if request.memory_parallelism.is_some()
+        && config.memory_admission == crate::config::MemoryAdmissionMode::LeaseAccounted
+    {
+        let (jobs, threads, parallelism) = resolve_build_parallelism(
+            config,
+            &request.command,
+            request.caller_cargo_build_jobs.as_deref(),
+            request.caller_rust_test_threads.as_deref(),
+            request.units,
+            active_units,
+        );
+        if request.memory_limit_key.as_deref() != Some("request.memory_bytes") {
+            request.memory_cap_bytes =
+                Some(estimate_memory_lease(config, &request.class, parallelism)?);
+            request.memory_reservation_bytes = Some(estimate_memory_reservation(
+                config,
+                &request.class,
+                parallelism,
+            )?);
+        }
+        request.memory_cargo_jobs = jobs;
+        request.memory_rust_test_threads = threads;
+        request.memory_parallelism = Some(parallelism);
+        let mut arguments = request.command.get(1..).unwrap_or_default().to_vec();
+        request.lease_record =
+            Some(prepare_request_environment(config, request, &mut arguments, active_units).record);
+    }
     request.observe_blocks(Vec::new(), clock);
     request.phase = Phase::Running;
     request.started_at_ms = Some(now);
@@ -1662,6 +1822,10 @@ fn admit_worker_with_clock(
             state.finish(id, Completion::default(), config, now, clock)?;
             return Ok(Admission::Stopped);
         }
+        while refuse_impossible_head(state, config, now, clock)? {}
+        if state.find(id)?.phase.terminal() {
+            return Ok(Admission::Stopped);
+        }
         let sample = sample_for(config, now);
         let reason = state.admission_reason(id, config, sample.as_ref(), now, clock)?;
         let blockers = state.block_observations(id, config, sample.as_ref(), now, clock)?;
@@ -1683,6 +1847,9 @@ fn admit_worker_with_clock(
                 }
             }
             return Ok(Admission::Waiting);
+        }
+        if refuse_impossible_request(state, config, id, now, clock)? {
+            return Ok(Admission::Stopped);
         }
         grant_request(state, config, id, now, clock)?;
         Ok(Admission::Granted)
