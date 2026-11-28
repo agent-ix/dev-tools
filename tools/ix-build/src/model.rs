@@ -742,7 +742,29 @@ impl State {
             return Ok(Some("no_eligible_request"));
         };
         if next.id != *id {
-            return Ok(Some("fifo_or_priority_reservation"));
+            // Backfill only memory-blocked heads before their bounded reservation.
+            // Capacity remains charged to every admitted lease; never overcommit.
+            let reservation_ms =
+                (u64::from(config.max_priority()) + 1).saturating_mul(config.aging_ms);
+            let free = config
+                .memory_budget_bytes
+                .unwrap_or(0)
+                .saturating_sub(self.memory_used(config));
+            let backfill = config.memory_admission == MemoryAdmissionMode::LeaseAccounted
+                && crate::runtime::admission_reservation(
+                    next,
+                    config,
+                    self.used().saturating_add(next.units),
+                )? > free
+                && clock.saturating_sub(next.enqueued_clock_ms) < reservation_ms
+                && crate::runtime::admission_reservation(
+                    request,
+                    config,
+                    self.used().saturating_add(request.units),
+                )? <= free;
+            if !backfill {
+                return Ok(Some("fifo_or_priority_reservation"));
+            }
         }
         let used = self.used();
         if u64::from(used) + u64::from(request.units) > u64::from(config.capacity_units) {

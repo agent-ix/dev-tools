@@ -1588,6 +1588,9 @@ pub(crate) fn schedule_queue(store: &Store) -> Result<()> {
                 let Some(id) = candidate else {
                     break;
                 };
+                if refuse_impossible_request(state, config, &id, now, clock)? {
+                    continue;
+                }
                 grant_request(state, config, &id, now, clock)?;
             }
             let positions = state.queue_positions(config, clock);
@@ -1650,30 +1653,42 @@ fn refuse_impossible_head(
     now: u64,
     clock: u64,
 ) -> Result<bool> {
-    let Some(head) = state.next(config, clock) else {
+    let Some(id) = state.next(config, clock).map(|request| request.id.clone()) else {
         return Ok(false);
     };
+    refuse_impossible_request(state, config, &id, now, clock)
+}
+
+/// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
+fn refuse_impossible_request(
+    state: &mut crate::model::State,
+    config: &Config,
+    id: &RequestId,
+    now: u64,
+    clock: u64,
+) -> Result<bool> {
+    let request = state.find(id)?;
     if config.memory_admission != crate::config::MemoryAdmissionMode::LeaseAccounted
-        || head.memory_parallelism.is_none()
-        || head.memory_limit_key.as_deref() == Some("request.memory_bytes")
+        || request.memory_parallelism.is_none()
+        || request.memory_limit_key.as_deref() == Some("request.memory_bytes")
     {
         return Ok(false);
     }
     let (_, _, jobs) = resolve_build_parallelism(
         config,
-        &head.command,
-        head.caller_cargo_build_jobs.as_deref(),
-        head.caller_rust_test_threads.as_deref(),
-        head.units,
-        state.used().saturating_add(head.units),
+        &request.command,
+        request.caller_cargo_build_jobs.as_deref(),
+        request.caller_rust_test_threads.as_deref(),
+        request.units,
+        state.used().saturating_add(request.units),
     );
-    let allocation = estimate_memory_reservation(config, &head.class, jobs)
-        .and_then(|bytes| validate_memory_reservation(config, &head.class, jobs, bytes))
-        .and_then(|()| estimate_memory_lease(config, &head.class, jobs));
+    let allocation = estimate_memory_reservation(config, &request.class, jobs)
+        .and_then(|bytes| validate_memory_reservation(config, &request.class, jobs, bytes))
+        .and_then(|()| estimate_memory_lease(config, &request.class, jobs));
     let Err(error) = allocation else {
         return Ok(false);
     };
-    let id = head.id.clone();
+    let id = request.id.clone();
     let mut failure = crate::diagnostics::unscoped(&error, id.0.clone());
     if let Some(message) = &mut failure.diagnostic.message {
         *message = message.replace("request=pending ", &format!("request={} ", id.0));
@@ -1833,6 +1848,9 @@ fn admit_worker_with_clock(
                 }
             }
             return Ok(Admission::Waiting);
+        }
+        if refuse_impossible_request(state, config, id, now, clock)? {
+            return Ok(Admission::Stopped);
         }
         grant_request(state, config, id, now, clock)?;
         Ok(Admission::Granted)

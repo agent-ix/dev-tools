@@ -138,7 +138,7 @@ fn stable_boot_identity_and_timestamp_jitter_never_expire_healthy_leases() {
 
 /// Trace: FR-005-AC-1, FR-005-AC-8
 #[test]
-fn memory_blocked_head_keeps_its_reservation_without_backfill() -> Result<()> {
+fn titan_memory_backfill_is_bounded_and_never_overcommits() -> Result<()> {
     let mut config = policy();
     config.capacity_units = 8;
     config.memory_admission = MemoryAdmissionMode::LeaseAccounted;
@@ -165,7 +165,7 @@ fn memory_blocked_head_keeps_its_reservation_without_backfill() -> Result<()> {
         config.memory_budget_bytes.unwrap_or(0) - state.memory_used(&config),
         1_400_000_000
     );
-    // Even when 6 GB fits, it must not starve the blocked 30 GB head.
+    // A 24 GB lease ends; a 30 GB head cannot fit, but the 6 GB backfill can.
     state.requests[0].phase = Phase::Succeeded;
     state.requests[2].memory_cap_bytes = Some(30_000_000_000);
     assert_eq!(
@@ -174,7 +174,7 @@ fn memory_blocked_head_keeps_its_reservation_without_backfill() -> Result<()> {
     );
     assert_eq!(
         state.admission_reason(&RequestId("r4".into()), &config, Some(&sample()), 500, 10)?,
-        Some("fifo_or_priority_reservation")
+        None
     );
     assert_eq!(
         state.admission_reason(&RequestId("r4".into()), &config, Some(&sample()), 500, 400)?,
