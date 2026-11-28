@@ -299,6 +299,10 @@ fn telemetry_every_dashboard_question_matches_hand_written_replay_values() -> Re
     );
     covered.extend(
         [
+            // Aggregated panel queries have hand-written dashboard.test.yml fixtures.
+            "sum(ix_kache:hits_1h",
+            "sum(ix_kache:misses_1h",
+            "sum by(host) (ix_kache:misses_1h",
             "ix_kache:miss_ratio",
             "ix_kache:hits_1h",
             "ix_kache:misses_1h",
