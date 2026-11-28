@@ -32,7 +32,7 @@ pub(crate) fn select(
 }
 
 pub(crate) fn default_root(home: Option<&Path>, disks: &sysinfo::Disks) -> Result<PathBuf> {
-    let host_root = std::path::absolute(crate::writable::host_root(home))?;
+    let host_root = std::path::absolute(crate::writable::validated_host_root(home)?)?;
     let home_disk = disks
         .list()
         .iter()

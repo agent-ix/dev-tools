@@ -329,7 +329,8 @@ fn execute(cli: Cli) -> Result<i32> {
             .state
             .clone()
             .or_else(|| transition_env::os("IX_BUILD_STATE").map(PathBuf::from))
-            .unwrap_or_else(writable::shared_path);
+            .map(Ok)
+            .unwrap_or_else(writable::shared_path)?;
         let config = cli
             .config
             .clone()
@@ -366,7 +367,8 @@ fn execute(cli: Cli) -> Result<i32> {
             .state
             .clone()
             .or_else(|| transition_env::os("IX_BUILD_STATE").map(PathBuf::from))
-            .unwrap_or_else(writable::shared_path);
+            .map(Ok)
+            .unwrap_or_else(writable::shared_path)?;
         let config = cli
             .config
             .clone()

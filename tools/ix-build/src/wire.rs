@@ -3,8 +3,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Encoding support for a store shared with pre-rename readers.
+pub mod persistence;
+
 /// Stable abnormal-outcome codes. Spellings are part of the monitoring contract.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize)]
 pub enum Code {
     /// Illegal control-plane state transition.
     #[serde(rename = "IB_INVALID_TRANSITION", alias = "LB_INVALID_TRANSITION")]
@@ -106,6 +109,62 @@ impl Code {
             Self::CommandExit => "IB_COMMAND_EXIT",
             Self::InvalidRequest => "IB_INVALID_REQUEST",
             Self::StateUnavailable => "IB_STATE_UNAVAILABLE",
+        }
+    }
+}
+
+impl Serialize for Code {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let spelling = if persistence::active() {
+            self.legacy_spelling()
+        } else {
+            self.as_str()
+        };
+        serializer.serialize_str(spelling)
+    }
+}
+impl Code {
+    /// Oldest deployed reader's equivalent; exact new diagnostics live in the extension ledger.
+    pub fn legacy_equivalent(self) -> Self {
+        match self {
+            Self::InvalidTransition
+            | Self::StoreVersion
+            | Self::PolicyModified
+            | Self::TargetUnavailable => Self::StateUnavailable,
+            Self::RssCap
+            | Self::OomKilled
+            | Self::HoldTimeout
+            | Self::SupervisionLost
+            | Self::RefusedMemoryBudget
+            | Self::RefusedClassCap
+            | Self::RefusedQueue
+            | Self::RefusedCapUnavailable
+            | Self::Cancelled
+            | Self::ExternalSignal
+            | Self::CommandExit
+            | Self::InvalidRequest
+            | Self::StateUnavailable => self,
+        }
+    }
+    fn legacy_spelling(self) -> &'static str {
+        match self {
+            Self::InvalidTransition
+            | Self::StoreVersion
+            | Self::PolicyModified
+            | Self::TargetUnavailable
+            | Self::StateUnavailable => "LB_STATE_UNAVAILABLE",
+            Self::RssCap => "LB_RSS_CAP",
+            Self::OomKilled => "LB_OOM_KILLED",
+            Self::HoldTimeout => "LB_HOLD_TIMEOUT",
+            Self::SupervisionLost => "LB_SUPERVISION_LOST",
+            Self::RefusedMemoryBudget => "LB_REFUSED_MEMORY_BUDGET",
+            Self::RefusedClassCap => "LB_REFUSED_CLASS_CAP",
+            Self::RefusedQueue => "LB_REFUSED_QUEUE",
+            Self::RefusedCapUnavailable => "LB_REFUSED_CAP_UNAVAILABLE",
+            Self::Cancelled => "LB_CANCELLED",
+            Self::ExternalSignal => "LB_EXTERNAL_SIGNAL",
+            Self::CommandExit => "LB_COMMAND_EXIT",
+            Self::InvalidRequest => "LB_INVALID_REQUEST",
         }
     }
 }

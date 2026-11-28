@@ -86,107 +86,234 @@ impl Fixture {
     }
 }
 
-/// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-431.
+/// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-436.
 #[test]
-fn first_rename_refuses_retained_legacy_waiters_without_changing_the_queue() -> Result<()> {
+fn first_rename_shares_busy_store_and_preserves_live_legacy_callers_on_rerun() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
     let fixture = Fixture::new()?;
+    let running = fixture.enqueue()?;
     let queued = fixture.enqueue()?;
+    fixture.store.transaction(|state, _| {
+        let request = state.find_mut(&running)?;
+        request.phase = Phase::Running;
+        request.worker = Some(crate::process::Processes::self_identity()?);
+        request.worker_generation = 1;
+        request.started_at_ms = Some(crate::runtime::now_ms()?);
+        request.started_clock_ms = Some(crate::runtime::clock_ms()?);
+        Ok(())
+    })?;
     std::fs::write(
         fixture.home.join(".local/bin/locked-build"),
         b"legacy artifact",
     )?;
-    let before = serde_json::to_value(fixture.store.snapshot()?.0.find(&queued)?)?;
+    let state_before = std::fs::read(fixture.store.path.join("state.json"))?;
+    let policy_before = std::fs::read(&fixture.store.config_path)?;
+    let inode = std::fs::metadata(fixture.store.path.join("lock"))?.ino();
+    let scheduler = fixture.store.try_lock_member("scheduler.lock")?;
+    assert!(scheduler.is_some());
+    for _ in 0..2 {
+        fixture.install(Duration::from_millis(200), || Ok(()), || Ok(()))?;
+        assert_eq!(
+            std::fs::read(fixture.store.path.join("state.json"))?,
+            state_before
+        );
+        assert_eq!(std::fs::read(&fixture.store.config_path)?, policy_before);
+        assert_eq!(
+            std::fs::metadata(fixture.store.path.join("lock"))?.ino(),
+            inode
+        );
+        let (state, _) = fixture.store.snapshot()?;
+        assert_eq!(state.find(&running)?.phase, Phase::Running);
+        assert_eq!(state.find(&queued)?.phase, Phase::Queued);
+        assert!(state.find(&running)?.client.is_some());
+        assert!(fixture.store.queue_hold()?.is_none());
+        assert!(fixture.store.try_admission_lock()?.is_some());
+    }
+    assert!(!first_rename_required(&fixture.home, &fixture.store.path)?);
+    assert!(fixture.store.coexisting()?);
+    Ok(())
+}
+
+/// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-436.
+#[test]
+fn busy_rename_rollback_preserves_store_and_legacy_caller() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fixture.enqueue()?;
+    std::fs::write(
+        fixture.home.join(".local/bin/locked-build"),
+        b"legacy artifact",
+    )?;
+    let before = std::fs::read(fixture.store.path.join("state.json"))?;
+    let scheduler = fixture.store.try_lock_member("scheduler.lock")?;
     assert!(
         fixture
-            .install(Duration::from_secs(1), || Ok(()), || Ok(()))
+            .install(
+                Duration::from_millis(200),
+                || Ok(()),
+                || Err(Error::new(ErrorCode::Io, "rollback fixture"))
+            )
             .is_err()
     );
     assert_eq!(
-        serde_json::to_value(fixture.store.snapshot()?.0.find(&queued)?)?,
+        std::fs::read(fixture.store.path.join("state.json"))?,
         before
     );
     assert_eq!(
         std::fs::read(fixture.home.join(".local/bin/locked-build"))?,
         b"legacy artifact"
     );
+    assert_eq!(
+        std::fs::read(fixture.home.join(".local/bin/ix-build"))?,
+        b"old artifact"
+    );
+    // Conversion is additive: rollback restores commands, never rewinds state.
+    assert!(fixture.store.coexisting()?);
+    assert!(fixture.store.path.join("state-v2.json").exists());
     assert!(fixture.store.queue_hold()?.is_none());
-    fixture.store.transaction(|state, _| {
-        let request = state.find_mut(&queued)?;
-        request.phase = Phase::Succeeded;
-        request.ended_at_ms = Some(crate::runtime::now_ms()?);
-        request.ended_clock_ms = Some(crate::runtime::clock_ms()?);
-        Ok(())
-    })?;
-    // A terminal record still has an original waiter (this test process).
-    assert!(!legacy_readers_finished(&fixture.store.path)?);
-    fixture.store.transaction(|state, _| {
-        state.find_mut(&queued)?.client = None;
-        Ok(())
-    })?;
-    assert!(legacy_readers_finished(&fixture.store.path)?);
+    assert!(fixture.store.try_lock_member("lock")?.is_some());
+    drop(scheduler);
     Ok(())
 }
 
-/// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-431.
+/// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-436.
 #[test]
-fn first_rename_drain_waits_with_admission_open_then_migrates_when_idle() -> Result<()> {
+#[ignore = "requires deployed legacy and candidate executables; isolated store, no host installation"]
+fn busy_rename_with_real_legacy_binary() -> Result<()> {
+    let legacy = std::env::var_os("IX_BUILD_LEGACY_BIN")
+        .ok_or_else(|| Error::new(ErrorCode::State, "legacy fixture executable required"))?;
+    for executable in std::env::split_paths(&legacy) {
+        real_legacy_roundtrip(&executable)?;
+    }
+    Ok(())
+}
+
+fn real_legacy_roundtrip(legacy: &Path) -> Result<()> {
+    let candidate = std::env::var_os("IX_BUILD_CANDIDATE_BIN")
+        .ok_or_else(|| Error::new(ErrorCode::State, "candidate fixture executable required"))?;
     let fixture = Fixture::new()?;
-    let queued = fixture.enqueue()?;
-    std::fs::write(
-        fixture.home.join(".local/bin/locked-build"),
-        b"legacy artifact",
-    )?;
-    std::thread::scope(|scope| -> Result<()> {
-        let (ready, wait) = std::sync::mpsc::channel();
-        let fixture_ref = &fixture;
-        let installer = scope.spawn(move || {
-            fixture_ref.install(
-                Duration::from_secs(3),
-                || {
-                    ready
-                        .send(())
-                        .map_err(|_| Error::new(ErrorCode::State, "installer receiver"))
-                },
-                || Ok(()),
-            )
-        });
-        wait.recv_timeout(Duration::from_secs(2))
-            .map_err(|_| Error::new(ErrorCode::State, "installer preflight"))?;
-        assert!(fixture.store.queue_hold()?.is_none());
-        assert!(fixture.store.try_admission_lock()?.is_some());
-        assert_eq!(
-            fixture.store.snapshot()?.0.find(&queued)?.phase,
-            Phase::Queued
+    std::fs::copy(candidate, &fixture.artifact)?;
+    let old = fixture.home.join(".local/bin/locked-build");
+    std::fs::copy(legacy, &old)?;
+    let policy = br#"{"host":"coexistence-fixture","capacity_units":4,"maximum_units":4,"maximum_load":100000,"disk_reserve_bytes":0,"memory_reserve_bytes":0,"hold_ms":30000,"termination_grace_ms":100,"memory_budget_bytes":16000000000,"memory_reserve_per_job_bytes":1000000,"memory_limit_per_job_bytes":1000000000}"#;
+    std::fs::write(&fixture.store.config_path, policy)?;
+    let output = std::fs::File::create(fixture._root.path().join("legacy-output"))?;
+    let mut caller = Command::new(&old)
+        .arg("--state")
+        .arg(&fixture.store.path)
+        .arg("--config")
+        .arg(&fixture.store.config_path)
+        .args([
+            "run",
+            "--owner",
+            "legacy-fixture",
+            "--ticket",
+            "SWM-436",
+            "--class",
+            "must-fix",
+            "--",
+            "/usr/bin/sleep",
+            "6",
+        ])
+        .stdout(output.try_clone()?)
+        .stderr(output)
+        .spawn()?;
+    let started = Instant::now();
+    let legacy_schema = loop {
+        if let Ok((state, _)) = fixture.store.snapshot()
+            && state
+                .requests
+                .iter()
+                .any(|r| r.phase == Phase::Running && r.lease_record.is_some())
+        {
+            break state.schema_version;
+        }
+        assert!(
+            caller.try_wait()?.is_none(),
+            "legacy fixture exited before admission"
         );
-        fixture.store.transaction(|state, _| {
-            let request = state.find_mut(&queued)?;
-            request.phase = Phase::Succeeded;
-            request.ended_at_ms = Some(crate::runtime::now_ms()?);
-            request.ended_clock_ms = Some(crate::runtime::clock_ms()?);
-            request.client = None;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "legacy fixture admission timed out"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    fixture.install(
+        Duration::from_secs(1),
+        || Ok(()),
+        || {
+            assert!(
+                caller.try_wait()?.is_none(),
+                "legacy caller must remain live during swap"
+            );
             Ok(())
-        })?;
-        installer
-            .join()
-            .map_err(|_| Error::new(ErrorCode::State, "installer panic"))??;
-        Ok(())
-    })?;
-    assert!(fixture.store.queue_hold()?.is_none());
-    assert_eq!(
-        std::fs::read(fixture.home.join(".local/bin/ix-build"))?,
-        b"new artifact"
-    );
-    assert_eq!(
-        std::fs::read(fixture.store.path.join("rename-ix-build"))?,
-        b"1\n"
-    );
-    // Recognition is durable, independent of the compatibility command's shape.
-    std::fs::remove_file(fixture.home.join(".local/bin/locked-build"))?;
-    std::fs::write(
-        fixture.home.join(".local/bin/locked-build"),
-        b"new artifact",
+        },
     )?;
-    assert!(!first_rename_required(&fixture.home, &fixture.store.path)?);
+    let new = fixture.home.join(".local/bin/ix-build");
+    let result = Command::new(&new)
+        .arg("--state")
+        .arg(&fixture.store.path)
+        .arg("--config")
+        .arg(&fixture.store.config_path)
+        .args([
+            "run",
+            "--owner",
+            "new-fixture",
+            "--ticket",
+            "SWM-436",
+            "--class",
+            "must-fix",
+            "--",
+            "/usr/bin/false",
+        ])
+        .output()?;
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("IB_COMMAND_EXIT"));
+    assert!(
+        caller.wait()?.success(),
+        "{}",
+        std::fs::read_to_string(fixture._root.path().join("legacy-output"))?
+    );
+    let (state, _) = fixture.store.snapshot()?;
+    assert!(
+        state
+            .requests
+            .iter()
+            .any(|r| r.owner == "legacy-fixture" && r.phase == Phase::Succeeded)
+    );
+    assert!(
+        state
+            .requests
+            .iter()
+            .any(|r| r.owner == "new-fixture" && r.phase == Phase::Failed)
+    );
+    assert_eq!(std::fs::read(&fixture.store.config_path)?, policy);
+    let durable: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.store.path.join("state.json"))?)?;
+    // A surviving legacy writer may republish its own supported schema (bc3
+    // writes v2; Titan's older binary writes v1). New writes project to v1.
+    let written_schema = durable["schema_version"].as_u64().unwrap_or(u64::MAX);
+    assert!((1..=u64::from(legacy_schema)).contains(&written_schema));
+    if written_schema == 1 {
+        assert!(durable.get("min_reader_version").is_none());
+    }
+    // The same inode still hosts legacy-readable durable records after new writes.
+    let status = Command::new(legacy)
+        .arg("--state")
+        .arg(&fixture.store.path)
+        .arg("--config")
+        .arg(&fixture.store.config_path)
+        .arg("status")
+        .output()?;
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
     Ok(())
 }
 

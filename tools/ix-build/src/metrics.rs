@@ -175,6 +175,29 @@ impl MetricsState {
         }
     }
 
+    pub(crate) fn allow_legacy_gaps(&mut self, state: &State) -> Result<()> {
+        let latest = state.next_event.saturating_sub(1);
+        if self.last_event_sequence > latest {
+            return Err(Error::new(
+                ErrorCode::State,
+                "coexistence metrics cursor exceeds state",
+            ));
+        }
+        let retained = state
+            .events
+            .iter()
+            .filter_map(|event| event_sequence(&event.event_id))
+            .filter(|sequence| *sequence > self.last_event_sequence && *sequence <= latest)
+            .count();
+        let missing = latest
+            .saturating_sub(self.last_event_sequence)
+            .saturating_sub(u64::try_from(retained).unwrap_or(u64::MAX));
+        if missing > 0 {
+            self.telemetry.legacy_gap(missing)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn reconcile_events(&mut self, events: &[Event], next_event: u64) -> Result<()> {
         let mut ordered: Vec<_> = events
             .iter()

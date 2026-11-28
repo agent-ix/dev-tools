@@ -248,6 +248,44 @@ impl Checked {
             stage: PhantomData,
         })
     }
+    pub(super) fn share(self, timeout: Option<Duration>) -> Result<Transaction<Idle>> {
+        let started = Instant::now();
+        let store = crate::store::Store {
+            path: self.shared.clone(),
+            config_path: self.shared.join("policy.json"),
+        };
+        let limit = timeout.unwrap_or(Duration::from_secs(30));
+        let (admission, state) = loop {
+            if let Some(admission) = store.try_lock_member("admission.lock")?
+                && let Some(state) = store.try_lock_member("lock")?
+            {
+                break (admission, state);
+            }
+            if started.elapsed() >= limit {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "rename timed out acquiring state publication locks",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        Ok(Transaction {
+            inner: Some(Inner {
+                home: self.home,
+                shared: self.shared,
+                timeout,
+                hold: Some(InstallHold {
+                    admission: Some(admission),
+                    state: Some(state),
+                    election: None,
+                    durable: None,
+                    started,
+                }),
+                journal: None,
+            }),
+            stage: PhantomData,
+        })
+    }
 }
 
 impl<S> Transaction<S> {
@@ -410,7 +448,7 @@ impl Transaction<Verified> {
             .as_ref()
             .and_then(|hold| hold.durable.as_ref())
             .map(|(_, id)| id.clone())
-            .ok_or_else(|| Error::new(ErrorCode::State, "install commit token missing"))?;
+            .unwrap_or_else(|| "live-rename".into());
         let mut pending = PendingChild(None);
         if let Some(election) = inner.hold.as_ref().and_then(|hold| hold.election.as_ref()) {
             pending.0 = successor(election.try_clone()?, &token)?;
@@ -707,6 +745,19 @@ mod tests {
         let stage = std::env::var("IX_INSTALL_CRASH_STAGE")
             .map_err(|e| Error::new(ErrorCode::State, e.to_string()))?;
         let checked = Checked::new(&root.join("home"), &root.join("shared"))?;
+        if stage == "live_swap" {
+            let ready = checked.share(Some(Duration::from_secs(1)))?;
+            crate::store::Store {
+                path: root.join("shared"),
+                config_path: root.join("policy.json"),
+            }
+            .begin_coexistence()?;
+            let _swapped = ready.swap(
+                &root.join("artifact"),
+                &root.join("home/.local/bin/ix-build"),
+            )?;
+            std::process::exit(80);
+        }
         if stage == "check" {
             std::process::exit(80);
         }
@@ -760,6 +811,68 @@ mod tests {
             assert!(recover(&store).is_err());
             assert_eq!(std::fs::read(&target)?, b"keep");
         }
+        Ok(())
+    }
+
+    /// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-436.
+    #[test]
+    fn live_rename_crash_recovery_preserves_post_crash_worker_progress() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let policy = root.path().join("policy.json");
+        std::fs::write(&policy, serde_json::to_vec(&Config::default())?)?;
+        let store = crate::store::Store::open(&root.path().join("shared"), &policy)?;
+        let id = crate::runtime::enqueue(
+            &store,
+            "live-crash",
+            "SWM-436",
+            1,
+            0,
+            None,
+            &["true".into()],
+        )?;
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join(".local/bin"))?;
+        std::fs::write(home.join(".local/bin/ix-build"), b"old")?;
+        std::fs::write(root.path().join("artifact"), b"new")?;
+        let status = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "install::transaction::tests::install_transaction_crash_child",
+                "--ignored",
+                "--test-threads=4",
+            ])
+            .env("IX_INSTALL_CRASH_ROOT", root.path())
+            .env("IX_INSTALL_CRASH_STAGE", "live_swap")
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert_eq!(status.code(), Some(80));
+        assert!(store.queue_hold()?.is_none());
+        assert!(store.try_admission_lock()?.is_some());
+        store.transaction(|state, config| {
+            state.finish(
+                &id,
+                crate::model::Completion {
+                    code: Some(0),
+                    ..Default::default()
+                },
+                config,
+                crate::runtime::now_ms()?,
+                crate::runtime::clock_ms()?,
+            )
+        })?;
+        let state = std::fs::read(store.path.join("state.json"))?;
+        let extra = std::fs::read(store.path.join("state-v2.json"))?;
+        let metrics = std::fs::read(store.path.join("metrics-v2.json"))?;
+        recover(&store)?;
+        assert_eq!(std::fs::read(home.join(".local/bin/ix-build"))?, b"old");
+        assert!(store.coexisting()?);
+        assert_eq!(std::fs::read(store.path.join("state.json"))?, state);
+        assert_eq!(std::fs::read(store.path.join("state-v2.json"))?, extra);
+        assert_eq!(std::fs::read(store.path.join("metrics-v2.json"))?, metrics);
+        assert_eq!(
+            store.snapshot()?.0.find(&id)?.phase,
+            crate::model::Phase::Succeeded
+        );
         Ok(())
     }
 }
