@@ -1,0 +1,454 @@
+{
+  "groups": [
+    {
+      "name": "ix-build",
+      "rules": [
+        {
+          "alert": "IxBuildQueueHoldOverdue",
+          "expr": "(ix_build_queue_paused == 1) and on(host) (ix_build_queue_hold_age_seconds > on(host) ix_build_queue_hold_alert_after_seconds)",
+          "for": "1m",
+          "labels": {"severity": "warning"},
+          "annotations": {
+            "summary": "Build admission hold overdue on {{ $labels.host }}",
+            "description": "Admission is held past its configured deadline. Inspect status and use queue resume after resolving the cause."
+          }
+        },
+        {
+          "record": "ix_build:wasted_run_seconds_per_second",
+          "expr": "sum by (host, cause) (rate(ix_build_wasted_run_seconds_total[5m]))"
+        },
+        {
+          "record": "ix_build:wait_p50_seconds",
+          "expr": "histogram_quantile(0.50, sum by (host, class, le) (rate(ix_build_wait_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:wait_p95_seconds",
+          "expr": "histogram_quantile(0.95, sum by (host, class, le) (rate(ix_build_wait_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:wait_p99_seconds",
+          "expr": "histogram_quantile(0.99, sum by (host, class, le) (rate(ix_build_wait_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:oldest_queued_seconds",
+          "expr": "ix_build_oldest_queued_seconds"
+        },
+        {
+          "record": "ix_build:idle_with_queue",
+          "expr": "(sum by (host) (ix_build_queue_depth_by_reason) > bool 0) * on (host) (ix_build_running == bool 0)"
+        },
+        {
+          "record": "ix_build:reserved_memory_bytes",
+          "expr": "sum by (host, class) (rate(ix_build_memory_reserved_bytes_sum[5m])) / sum by (host, class) (rate(ix_build_memory_reserved_bytes_count[5m]))"
+        },
+        {
+          "record": "ix_build:peak_memory_bytes",
+          "expr": "sum by (host, class) (rate(ix_build_memory_peak_bytes_sum[5m])) / sum by (host, class) (rate(ix_build_memory_peak_bytes_count[5m]))"
+        },
+        {
+          "record": "ix_build:kills_per_second",
+          "expr": "sum by (host, code) (rate(ix_build_failures_total{code=~\"IB_RSS_CAP|IB_OOM_KILLED\"}[5m]))"
+        },
+        {
+          "record": "ix_build:load_policy_ratio",
+          "expr": "node_load1 / on (host) ix_build_policy_maximum_load"
+        },
+        {
+          "record": "ix_build:restarts_per_second",
+          "expr": "rate(ix_build_supervisor_restarts_total[5m])"
+        },
+        {
+          "record": "ix_build:supervision_lost_per_second",
+          "expr": "sum by (host) (rate(ix_build_failures_total{code=\"IB_SUPERVISION_LOST\"}[5m]))"
+        },
+        {
+          "record": "ix_build:queue_stuck",
+          "expr": "(max by (host) (ix_build_oldest_queued_seconds) > bool 600) * on (host) ix_build:idle_with_queue"
+        },
+        {
+          "record": "ix_build:lane_unit_seconds_per_second",
+          "expr": "rate(ix_build_lane_unit_seconds_total[5m])"
+        },
+        {
+          "record": "ix_build:cancelled_per_second",
+          "expr": "sum by (host) (rate(ix_build_builds_total{outcome=\"cancelled\"}[5m]))"
+        },
+        {
+          "record": "ix_build:late_kills_per_second",
+          "expr": "sum by (host) (rate(ix_build_failures_total{code=~\"IB_RSS_CAP|IB_OOM_KILLED|IB_HOLD_TIMEOUT\"}[5m]))"
+        },
+        {
+          "record": "ix_build:lease_overhead_seconds_per_second",
+          "expr": "sum by (host, class) (rate(ix_build_hold_seconds_sum[5m])) - sum by (host, class) (rate(ix_build_run_seconds_sum[5m]))"
+        },
+        {
+          "record": "ix_build:refusals_per_second",
+          "expr": "sum by (host, code) (rate(ix_build_failures_total{code=~\"IB_REFUSED_.*\"}[5m]))"
+        },
+        {
+          "record": "ix_build:policy_epochs",
+          "expr": "count by (host) (count_over_time(ix_build_info[1h]))"
+        },
+        {
+          "record": "ix_build:unit_utilization_ratio",
+          "expr": "ix_build_units_used / ix_build_units_capacity"
+        },
+        {
+          "record": "ix_build:leaked_leases",
+          "expr": "ix_build_leases_missing_process"
+        },
+        {
+          "record": "ix_build:unleased_builds",
+          "expr": "ix_build_unleased_build_processes"
+        },
+        {
+          "record": "ix_build:repo_run_mean_seconds",
+          "expr": "ix_build_repo_run_seconds_total / ix_build_repo_run_count_total"
+        },
+        {
+          "record": "ix_build:memory_measurement_ratio",
+          "expr": "(sum by (host) (rate(ix_build_memory_peak_bytes_count[15m])) or on (host) (0 * sum by (host) (rate(ix_build_builds_total[15m])))) / sum by (host) (rate(ix_build_builds_total[15m]))"
+        },
+        {
+          "alert": "IxBuildMustFixWaitHigh",
+          "expr": "ix_build:wait_p95_seconds{class=\"must-fix\"} > 60",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build MustFixWaitHigh"
+          }
+        },
+        {
+          "alert": "IxBuildPointWaitHigh",
+          "expr": "ix_build:wait_p95_seconds{class=\"point\"} > 300",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build PointWaitHigh"
+          }
+        },
+        {
+          "alert": "IxBuildBlockWaitHigh",
+          "expr": "ix_build:wait_p95_seconds{class=\"block\"} > 900",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build BlockWaitHigh"
+          }
+        },
+        {
+          "alert": "IxBuildBackgroundWaitHigh",
+          "expr": "ix_build:wait_p95_seconds{class=~\"periodic|kani|arch-test\"} > 3600",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build BackgroundWaitHigh"
+          }
+        },
+        {
+          "alert": "IxBuildIdleWithQueue",
+          "expr": "ix_build:idle_with_queue > 0",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build IdleWithQueue"
+          }
+        },
+        {
+          "alert": "IxBuildQueueStuck",
+          "expr": "ix_build:queue_stuck > 0",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build QueueStuck"
+          }
+        },
+        {
+          "alert": "IxBuildVersionSkew",
+          "expr": "count(count by (version, commit, dirty) (ix_build_info)) > 1",
+          "for": "10m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build VersionSkew"
+          }
+        },
+        {
+          "alert": "IxBuildPolicySkew",
+          "expr": "count(count by (policy_hash) (ix_build_info)) > 1",
+          "for": "10m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build PolicySkew"
+          }
+        },
+        {
+          "alert": "IxBuildHostNoMetrics",
+          "expr": "(up{job=\"node\"} == 1) unless on (host) ix_build_export_timestamp_seconds",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build HostNoMetrics"
+          }
+        },
+        {
+          "alert": "IxBuildNodeDown",
+          "expr": "(up{job=\"node\"} == 0) or absent(up{job=\"node\"})",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build NodeDown"
+          }
+        },
+        {
+          "alert": "IxBuildExportStale",
+          "expr": "time() - ix_build_export_timestamp_seconds > 600",
+          "for": "0m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build ExportStale"
+          }
+        },
+        {
+          "alert": "IxBuildExportError",
+          "expr": "ix_build_export_error > 0",
+          "for": "1m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build ExportError"
+          }
+        },
+        {
+          "alert": "IxBuildMemoryMeasurementLow",
+          "expr": "ix_build:memory_measurement_ratio < 0.8",
+          "for": "10m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build MemoryMeasurementLow"
+          }
+        },
+        {
+          "alert": "IxBuildRepeatedFailure",
+          "expr": "sum by (host, code) (increase(ix_build_failures_total[15m])) >= 3",
+          "for": "0m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build RepeatedFailure"
+          }
+        },
+        {
+          "alert": "IxBuildLeakedLease",
+          "expr": "ix_build_leases_missing_process > 0",
+          "for": "2m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build LeakedLease"
+          }
+        },
+        {
+          "alert": "IxBuildUnleasedProcess",
+          "expr": "ix_build_unleased_build_processes > 0",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build UnleasedProcess"
+          }
+        },
+        {
+          "alert": "IxBuildStateDirFreeLow",
+          "expr": "ix_build_state_dir_free_bytes < 1073741824",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build StateDirFreeLow"
+          }
+        },
+        {
+          "alert": "IxBuildSnapshotLarge",
+          "expr": "ix_build_snapshot_size_bytes > 52428800",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build SnapshotLarge"
+          }
+        },
+        {
+          "alert": "IxBuildMemoryHeadroomLow",
+          "expr": "ix_build_running_memory_headroom_ratio < 0.1",
+          "for": "2m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build MemoryHeadroomLow"
+          }
+        },
+        {
+          "alert": "IxBuildRunningStuck",
+          "expr": "ix_build_oldest_running_seconds > on (host) ix_build_policy_hold_seconds",
+          "for": "5m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "IX-build RunningStuck"
+          }
+        },
+        {
+          "record": "ix_kache:hit_ratio",
+          "expr": "rate(ix_kache_hits_total[1h]) / clamp_min(rate(ix_kache_hits_total[1h]) + rate(ix_kache_misses_total[1h]), 0.000001)"
+        },
+        {
+          "record": "ix_kache:store_fill_ratio",
+          "expr": "ix_kache_store_bytes / clamp_min(ix_kache_store_limit_bytes, 1)"
+        },
+        {
+          "record": "ix_kache:evicted_bytes_1h",
+          "expr": "increase(ix_kache_gc_evicted_bytes_total[1h])"
+        },
+        {
+          "record": "ix_kache:permit_wait_share",
+          "expr": "rate(ix_kache_permit_wait_seconds_total[1h]) / clamp_min(rate(ix_kache_miss_compile_seconds_total[1h]) + rate(ix_kache_hit_elapsed_seconds_total[1h]), 0.000001)"
+        },
+        {
+          "alert": "KacheHitRatioCollapse",
+          "expr": "(ix_kache:hit_ratio < 0.20) and (increase(ix_kache_hits_total[1h]) + increase(ix_kache_misses_total[1h]) >= 10)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache hit ratio below 20% while compiles are active"
+          }
+        },
+        {
+          "alert": "KacheStoreNearLimit",
+          "expr": "(ix_kache:store_fill_ratio > 0.90) and (ix_kache_store_limit_bytes > 0)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache store above 90% of its limit"
+          }
+        },
+        {
+          "alert": "KacheEvictionThrash",
+          "expr": "(ix_kache:evicted_bytes_1h > ix_kache_store_limit_bytes) and (ix_kache_store_limit_bytes > 0) and (resets(ix_kache_gc_evicted_bytes_total[1h]) == 0)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache evicted more than one store capacity in an hour"
+          }
+        },
+        {
+          "alert": "KacheScrapeFailing",
+          "expr": "(min by (host) (ix_kache_up) == 0) and on (host) (ix_kache_daemon_expected == 1)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache unavailable while this host expects its daemon"
+          }
+        },
+        {
+          "alert": "KachePermitWaitHigh",
+          "expr": "(ix_kache:permit_wait_share > 0.20) and (increase(ix_kache_hits_total[1h]) + increase(ix_kache_misses_total[1h]) >= 10)",
+          "for": "15m",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Kache permit wait exceeds 20% of compile elapsed time"
+          }
+        },
+        {
+          "record": "ix_kache:miss_ratio",
+          "expr": "rate(ix_kache_misses_total[1h]) / clamp_min(rate(ix_kache_hits_total[1h]) + rate(ix_kache_misses_total[1h]), 0.000001)"
+        },
+        {
+          "record": "ix_kache:hits_1h",
+          "expr": "increase(ix_kache_hits_total[1h])"
+        },
+        {
+          "record": "ix_kache:misses_1h",
+          "expr": "increase(ix_kache_misses_total[1h])"
+        },
+        {
+          "record": "ix_kache:time_saved_seconds_1h",
+          "expr": "increase(ix_kache_hit_compile_seconds_total[1h])"
+        },
+        {
+          "record": "ix_kache:local_hits_1h",
+          "expr": "increase(ix_kache_local_hits_total[1h])"
+        },
+        {
+          "record": "ix_kache:remote_hits_1h",
+          "expr": "increase(ix_kache_remote_hits_total[1h])"
+        },
+        {
+          "record": "ix_build:run_p50_seconds",
+          "expr": "histogram_quantile(0.50, sum by (host, le) (rate(ix_build_run_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:run_p95_seconds",
+          "expr": "histogram_quantile(0.95, sum by (host, le) (rate(ix_build_run_seconds_bucket[5m])))"
+        },
+        {
+          "record": "ix_build:builds_1h",
+          "expr": "sum by (host, outcome) (increase(ix_build_builds_total[1h]))"
+        },
+        {
+          "record": "ix_build:failures_1h",
+          "expr": "sum by (host, code) (increase(ix_build_failures_total[1h]))"
+        },
+        {
+          "record": "ix_build:storage_free_bytes",
+          "expr": "node_filesystem_avail_bytes{fstype!~\"tmpfs|devtmpfs|overlay\"}"
+        },
+        {
+          "record": "ix_build:storage_io_utilisation_pct",
+          "expr": "100 * rate(node_disk_io_time_seconds_total[5m])"
+        }
+      ]
+    }
+  ]
+}

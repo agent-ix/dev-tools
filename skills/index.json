@@ -84,7 +84,7 @@
       ]
     },
     {
-      "name": "locked-build",
+      "name": "ix-build",
       "version": "0.1.0",
       "files": [
         "SKILL.md"

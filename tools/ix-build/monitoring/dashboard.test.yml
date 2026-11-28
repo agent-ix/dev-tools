@@ -1,0 +1,339 @@
+{
+  "rule_files": [
+    "alerts.yml"
+  ],
+  "evaluation_interval": "1m",
+  "fuzzy_compare": true,
+  "tests": [
+    {
+      "name": "every provisioned daily-health panel; hand-written values",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "0+8x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_kache_local_hits_total{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "0+6x120"
+        },
+        {
+          "series": "ix_kache_hit_compile_seconds_total{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "0+60x120"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "80+0x120"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "ix_kache_entries{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "42+0x120"
+        },
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "0+10x120"
+        },
+        {
+          "series": "ix_kache_up{host=\"luna\",store=\"local\",cache_role=\"client\"}",
+          "values": "1+0x120"
+        },
+        {
+          "series": "ix_kache_remote_hits_total{host=\"luna\",store=\"shared\",cache_role=\"client\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_kache_remote_reachable{host=\"luna\",store=\"shared\",cache=\"remote\",backend=\"filesystem\",cache_role=\"client\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_build_cache_policy_info{host=\"luna\",cache_role=\"client\",cache_mode=\"local\"}",
+          "values": "1+0x120"
+        },
+        {
+          "series": "ix_build_run_seconds_bucket{host=\"luna\",class=\"point\",le=\"1\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_build_run_seconds_bucket{host=\"luna\",class=\"point\",le=\"10\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_build_run_seconds_bucket{host=\"luna\",class=\"point\",le=\"60\"}",
+          "values": "0+4x120"
+        },
+        {
+          "series": "ix_build_run_seconds_bucket{host=\"luna\",class=\"point\",le=\"+Inf\"}",
+          "values": "0+4x120"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"luna\",class=\"point\",le=\"60\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"luna\",class=\"point\",le=\"300\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"luna\",class=\"point\",le=\"900\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"luna\",class=\"point\",le=\"+Inf\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_build_repo_run_seconds_total{host=\"luna\",repo=\"dev-tools\",subcommand=\"build\"}",
+          "values": "0+120x120"
+        },
+        {
+          "series": "ix_build_repo_run_count_total{host=\"luna\",repo=\"dev-tools\",subcommand=\"build\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_build_builds_total{host=\"luna\",class=\"point\",outcome=\"ok\"}",
+          "values": "0+3x120"
+        },
+        {
+          "series": "ix_build_builds_total{host=\"luna\",class=\"point\",outcome=\"failed\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_build_failures_total{host=\"luna\",class=\"point\",code=\"IB_RSS_CAP\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "node_filesystem_avail_bytes{host=\"luna\",mountpoint=\"/mnt/build\",device=\"/dev/nvme0n1p1\",fstype=\"xfs\"}",
+          "values": "42000000000+0x120"
+        },
+        {
+          "series": "node_disk_io_time_seconds_total{host=\"luna\",device=\"nvme0n1\"}",
+          "values": "0+30x120"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_kache_up{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache_up\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:hit_ratio{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:hit_ratio\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 0.8
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:miss_ratio{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:miss_ratio\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 0.2
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:hits_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:hits_1h\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 480
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:misses_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:misses_1h\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 120
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:time_saved_seconds_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:time_saved_seconds_1h\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 3600
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache_store_bytes{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache_store_bytes\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 80
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache_store_limit_bytes{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache_store_limit_bytes\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 100
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache_entries{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache_entries\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 42
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:evicted_bytes_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:evicted_bytes_1h\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 600
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:local_hits_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:local_hits_1h\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 360
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:remote_hits_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:remote_hits_1h\",host=\"luna\",store=\"shared\",cache_role=\"client\"}",
+              "value": 120
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache_remote_reachable{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache_remote_reachable\",host=\"luna\",store=\"shared\",cache=\"remote\",backend=\"filesystem\",cache_role=\"client\"}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:run_p50_seconds{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:run_p50_seconds\",host=\"luna\"}",
+              "value": 10
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:run_p95_seconds{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:run_p95_seconds\",host=\"luna\"}",
+              "value": 55
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:repo_run_mean_seconds{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:repo_run_mean_seconds\",host=\"luna\",repo=\"dev-tools\",subcommand=\"build\"}",
+              "value": 60
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:builds_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:builds_1h\",host=\"luna\",outcome=\"ok\"}",
+              "value": 180
+            },
+            {
+              "labels": "{__name__=\"ix_build:builds_1h\",host=\"luna\",outcome=\"failed\"}",
+              "value": 60
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:wait_p95_seconds{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:wait_p95_seconds\",host=\"luna\",class=\"point\"}",
+              "value": 840
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:failures_1h{host=\"luna\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:failures_1h\",host=\"luna\",code=\"IB_RSS_CAP\"}",
+              "value": 60
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:storage_free_bytes{host=\"luna\",mountpoint=\"/mnt/build\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:storage_free_bytes\",host=\"luna\",mountpoint=\"/mnt/build\",device=\"/dev/nvme0n1p1\",fstype=\"xfs\"}",
+              "value": 42000000000
+            }
+          ]
+        },
+        {
+          "expr": "ix_build:storage_io_utilisation_pct{host=\"luna\",device=\"nvme0n1\"} and on(host) ix_build_cache_policy_info{cache_role=\"client\"}",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_build:storage_io_utilisation_pct\",host=\"luna\",device=\"nvme0n1\"}",
+              "value": 50
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

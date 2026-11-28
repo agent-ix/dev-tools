@@ -1,0 +1,10 @@
+[Unit]
+Description=Export ix-build Prometheus telemetry
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=10
+TimeoutStartSec=10
+ExecStart=@BINARY@ --state @STATE@ --config @CONFIG@ metrics --output @OUTPUT@

@@ -1,0 +1,1113 @@
+{
+  "rule_files": [
+    "alerts.yml"
+  ],
+  "evaluation_interval": "1m",
+  "tests": [
+    {
+      "name": "durable queue hold alerts only after its bound",
+      "interval": "1m",
+      "input_series": [
+        {"series": "ix_build_queue_paused{host=\"fixture\"}", "values": "1+0x10"},
+        {"series": "ix_build_queue_hold_age_seconds{host=\"fixture\"}", "values": "0+60x10"},
+        {"series": "ix_build_queue_hold_alert_after_seconds{host=\"fixture\"}", "values": "120+0x10"}
+      ],
+      "alert_rule_test": [
+        {"eval_time": "1m", "alertname": "IxBuildQueueHoldOverdue", "exp_alerts": []},
+        {"eval_time": "4m", "alertname": "IxBuildQueueHoldOverdue", "exp_alerts": [
+          {"exp_labels": {"host": "fixture", "severity": "warning"}, "exp_annotations": {
+            "summary": "Build admission hold overdue on fixture",
+            "description": "Admission is held past its configured deadline. Inspect status and use queue resume after resolving the cause."
+          }}
+        ]}
+      ]
+    },
+    {
+      "name": "IxBuildMustFixWaitHigh",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"must-fix\",le=\"60\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"must-fix\",le=\"300\"}",
+          "values": "0+1x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"must-fix\",le=\"+Inf\"}",
+          "values": "0+1x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildMustFixWaitHigh\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildMustFixWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"must-fix\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildPointWaitHigh",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"point\",le=\"300\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"point\",le=\"900\"}",
+          "values": "0+1x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"point\",le=\"+Inf\"}",
+          "values": "0+1x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildPointWaitHigh\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildPointWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"point\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildBlockWaitHigh",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"block\",le=\"900\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"block\",le=\"3600\"}",
+          "values": "0+1x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"block\",le=\"+Inf\"}",
+          "values": "0+1x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildBlockWaitHigh\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildBlockWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"block\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildBackgroundWaitHigh",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"periodic\",le=\"3600\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"periodic\",le=\"7200\"}",
+          "values": "0+1x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"periodic\",le=\"+Inf\"}",
+          "values": "0+1x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"periodic\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildBackgroundWaitHigh",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"kani\",le=\"3600\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"kani\",le=\"7200\"}",
+          "values": "0+1x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"kani\",le=\"+Inf\"}",
+          "values": "0+1x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"kani\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildBackgroundWaitHigh",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"arch-test\",le=\"3600\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"arch-test\",le=\"7200\"}",
+          "values": "0+1x30"
+        },
+        {
+          "series": "ix_build_wait_seconds_bucket{host=\"draco\",class=\"arch-test\",le=\"+Inf\"}",
+          "values": "0+1x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"arch-test\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildIdleWithQueue",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_queue_depth_by_reason{host=\"draco\",class=\"point\",reason=\"units\"}",
+          "values": "2+0x30"
+        },
+        {
+          "series": "ix_build_running{host=\"draco\"}",
+          "values": "0+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildIdleWithQueue\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildIdleWithQueue\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildQueueStuck",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_queue_depth_by_reason{host=\"draco\",class=\"point\",reason=\"units\"}",
+          "values": "2+0x30"
+        },
+        {
+          "series": "ix_build_running{host=\"draco\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_oldest_queued_seconds{host=\"draco\",class=\"point\"}",
+          "values": "1200+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildQueueStuck\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildQueueStuck\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildVersionSkew",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_info{host=\"draco\",version=\"0.2.0\",commit=\"1111111111111111111111111111111111111111\",dirty=\"false\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "ix_build_info{host=\"luna\",version=\"0.2.0\",commit=\"2222222222222222222222222222222222222222\",dirty=\"false\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildVersionSkew\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildVersionSkew\",alertstate=\"firing\",severity=\"warning\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildPolicySkew",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_info{host=\"draco\",policy_hash=\"a\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "ix_build_info{host=\"luna\",policy_hash=\"b\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildPolicySkew\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildPolicySkew\",alertstate=\"firing\",severity=\"warning\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildHostNoMetrics",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{job=\"node\",host=\"draco\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildHostNoMetrics\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildHostNoMetrics\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",job=\"node\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildNodeDown",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{job=\"node\",host=\"draco\"}",
+          "values": "0+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildNodeDown\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildNodeDown\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",job=\"node\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildNodeDown",
+      "interval": "1m",
+      "input_series": [],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildNodeDown\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildNodeDown\",alertstate=\"firing\",severity=\"warning\",job=\"node\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildExportStale",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_export_timestamp_seconds{host=\"draco\"}",
+          "values": "0+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildExportStale\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildExportStale\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildExportError",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_export_error{host=\"draco\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildExportError\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildExportError\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildMemoryMeasurementLow",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_memory_peak_bytes_count{host=\"draco\",class=\"point\"}",
+          "values": "0+1x30"
+        },
+        {
+          "series": "ix_build_builds_total{host=\"draco\",class=\"point\",outcome=\"ok\"}",
+          "values": "0+2x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildMemoryMeasurementLow\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildMemoryMeasurementLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildRepeatedFailure",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_failures_total{host=\"draco\",class=\"point\",code=\"IB_COMMAND_EXIT\"}",
+          "values": "0+1x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildRepeatedFailure\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildRepeatedFailure\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",code=\"IB_COMMAND_EXIT\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildLeakedLease",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_leases_missing_process{host=\"draco\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildLeakedLease\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildLeakedLease\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildUnleasedProcess",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_unleased_build_processes{host=\"draco\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildUnleasedProcess\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildUnleasedProcess\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildStateDirFreeLow",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_state_dir_free_bytes{host=\"draco\"}",
+          "values": "100+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildStateDirFreeLow\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildStateDirFreeLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildSnapshotLarge",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_snapshot_size_bytes{host=\"draco\"}",
+          "values": "52428801+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildSnapshotLarge\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildSnapshotLarge\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildMemoryHeadroomLow",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_running_memory_headroom_ratio{host=\"draco\"}",
+          "values": "0.05+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildMemoryHeadroomLow\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildMemoryHeadroomLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "IxBuildRunningStuck",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_oldest_running_seconds{host=\"draco\"}",
+          "values": "7200+0x30"
+        },
+        {
+          "series": "ix_build_policy_hold_seconds{host=\"draco\"}",
+          "values": "5400+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertname=\"IxBuildRunningStuck\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildRunningStuck\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "healthy and boundary controls",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{job=\"node\",host=\"draco\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "ix_build_export_timestamp_seconds{host=\"draco\"}",
+          "values": "0+60x30"
+        },
+        {
+          "series": "ix_build_running{host=\"draco\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_queue_depth_by_reason{host=\"draco\",class=\"point\",reason=\"ready\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_leases_missing_process{host=\"draco\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_unleased_build_processes{host=\"draco\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_state_dir_free_bytes{host=\"draco\"}",
+          "values": "1073741824+0x30"
+        },
+        {
+          "series": "ix_build_snapshot_size_bytes{host=\"draco\"}",
+          "values": "52428800+0x30"
+        },
+        {
+          "series": "ix_build_export_error{host=\"draco\"}",
+          "values": "0+0x30"
+        },
+        {
+          "series": "ix_build_info{host=\"draco\",version=\"v2\",policy_hash=\"same\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": []
+        }
+      ]
+    },
+    {
+      "name": "missing_peak_observations_have_zero_coverage_and_alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_builds_total{host=\"draco\",class=\"point\",outcome=\"ok\"}",
+          "values": "0+2x30"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_build:memory_measurement_ratio",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ix_build:memory_measurement_ratio{host=\"draco\"}",
+              "value": 0
+            }
+          ]
+        },
+        {
+          "expr": "ALERTS{alertname=\"IxBuildMemoryMeasurementLow\",alertstate=\"firing\"}",
+          "eval_time": "20m",
+          "exp_samples": [
+            {
+              "labels": "ALERTS{alertname=\"IxBuildMemoryMeasurementLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "value": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "kache active warning cases and pending durations",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\"}",
+          "values": "0+9x120"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\"}",
+          "values": "95+0x120"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "0+3x120"
+        },
+        {
+          "series": "ix_kache_permit_wait_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+30x120"
+        },
+        {
+          "series": "ix_kache_miss_compile_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+90x120"
+        },
+        {
+          "series": "ix_kache_hit_elapsed_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+10x120"
+        },
+        {
+          "series": "ix_kache_up{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_daemon_expected{host=\"luna\"}",
+          "values": "1+0x120"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "1m",
+          "alertname": "KacheHitRatioCollapse",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheHitRatioCollapse",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache hit ratio below 20% while compiles are active"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "1m",
+          "alertname": "KacheStoreNearLimit",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheStoreNearLimit",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache store above 90% of its limit"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "1m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache evicted more than one store capacity in an hour"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "1m",
+          "alertname": "KacheScrapeFailing",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheScrapeFailing",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache unavailable while this host expects its daemon"
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "1m",
+          "alertname": "KachePermitWaitHigh",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KachePermitWaitHigh",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache permit wait exceeds 20% of compile elapsed time"
+              }
+            }
+          ]
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_kache:hit_ratio",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:hit_ratio\",host=\"luna\",store=\"local\"}",
+              "value": 0.1
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:permit_wait_share",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:permit_wait_share\",host=\"luna\",store=\"local\"}",
+              "value": 0.3
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:store_fill_ratio",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:store_fill_ratio\",host=\"luna\",store=\"local\"}",
+              "value": 0.95
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache:evicted_bytes_1h",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:evicted_bytes_1h\",host=\"luna\",store=\"local\"}",
+              "value": 180
+            }
+          ]
+        },
+        {
+          "expr": "ix_kache_up",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache_up\",host=\"luna\",store=\"local\"}",
+              "value": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "kache idle and daemon not expected do not alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\"}",
+          "values": "10+0x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\"}",
+          "values": "90+0x120"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\"}",
+          "values": "90+0x120"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_permit_wait_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_miss_compile_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_hit_elapsed_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_up{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_daemon_expected{host=\"luna\"}",
+          "values": "0+0x120"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "90m",
+          "alertname": "KacheHitRatioCollapse",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheStoreNearLimit",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheScrapeFailing",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KachePermitWaitHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "kache active healthy thresholds do not alert",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\"}",
+          "values": "0+8x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\"}",
+          "values": "90+0x120"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x120"
+        },
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x120"
+        },
+        {
+          "series": "ix_kache_permit_wait_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_kache_miss_compile_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+9x120"
+        },
+        {
+          "series": "ix_kache_hit_elapsed_seconds_total{host=\"luna\",store=\"local\"}",
+          "values": "0+1x120"
+        },
+        {
+          "series": "ix_kache_up{host=\"luna\",store=\"local\"}",
+          "values": "1+0x120"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "90m",
+          "alertname": "KacheHitRatioCollapse",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheStoreNearLimit",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KacheScrapeFailing",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "90m",
+          "alertname": "KachePermitWaitHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "kache second per-run GC crosses capacity; counter reset suppresses thrash",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "0+0x9 60+0x9 120+0x50"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x70"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "19m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "36m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "luna",
+                "store": "local",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Kache evicted more than one store capacity in an hour"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "kache ledger counter reset cannot create eviction thrash",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_gc_evicted_bytes_total{host=\"luna\",store=\"local\"}",
+          "values": "1000+0x19 0+0x9 10+0x40"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "5+0x70"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "50m",
+          "alertname": "KacheEvictionThrash",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "same compiled commit does not cause version skew",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_info{host=\"draco\",version=\"0.2.0\",commit=\"1111111111111111111111111111111111111111\",dirty=\"false\"}",
+          "values": "1+0x30"
+        },
+        {
+          "series": "ix_build_info{host=\"luna\",version=\"0.2.0\",commit=\"1111111111111111111111111111111111111111\",dirty=\"false\"}",
+          "values": "1+0x30"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "20m",
+          "alertname": "IxBuildVersionSkew",
+          "exp_alerts": []
+        }
+      ]
+    }
+  ]
+}
