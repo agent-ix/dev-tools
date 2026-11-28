@@ -74,6 +74,9 @@ pub(crate) fn host_root(home: Option<&Path>) -> PathBuf {
 
 pub(crate) fn validated_host_root(home: Option<&Path>) -> Result<PathBuf> {
     let root = home.map_or_else(|| PathBuf::from(".ix"), |home| home.join(".ix"));
+    if !root.try_exists()? {
+        return Ok(std::path::absolute(root.join("ix-build"))?);
+    }
     shared_path_at(&root.join("ix-build"), &root.join("locked-build"))
 }
 
@@ -401,6 +404,7 @@ mod tests {
     #[test]
     fn host_build_root_resolves_the_validated_migration_alias() -> Result<()> {
         let home = tempfile::tempdir()?;
+        private_directory(&home.path().join(".ix"))?;
         let legacy = private_directory(&home.path().join(".ix/locked-build"))?;
         let new = home.path().join(".ix/ix-build");
         std::os::unix::fs::symlink(&legacy, &new)?;

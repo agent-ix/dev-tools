@@ -31,13 +31,20 @@ aliases to those exact directories. This preserves open lock inodes, queued
 and running lease paths, policy history and the event ledger. Before
 installation, the new binary selects the existing namespace automatically.
 Conflicting old and new stores cause an error; neither is overwritten.
-Fresh hosts create only the new paths. The initial rename needs an idle queue
-and exited original callers because old readers cannot decode `IB_*` records.
-On a busy host, `--drain` waits with admission open so existing queued work
-and callers can finish, then takes the install hold and rechecks idle before
-migrating. A race retries with the hold released; timeout or any returned
-refusal retains no installer hold and cancels no requests. A durable migration
-marker identifies later ix-build upgrades, which retain live-queue drain.
+Fresh hosts create only the new paths. The initial rename can run with active
+leases, queued work and legacy callers. Aliases share the existing store and
+lock; installation keeps the legacy directory and policy in place. During
+this transition, `--drain` waits only for short publication locks. It takes
+no queue hold and leaves the running scheduler in charge. Conflicting stores
+and unsafe aliases still cause refusal.
+
+New writers keep shared state readable by legacy callers. Additional metadata
+and telemetry use separate durable files; the legacy metrics ledger stays in
+place. New telemetry starts at the recorded migration boundary. Events pruned
+by a legacy writer before new telemetry observes them produce an explicit
+`legacy_pruned_history` count. Installation rollback restores commands without
+rewinding completed work or its telemetry. Upgrades outside this compatibility
+mode retain the usual lease drain.
 
 Environment variables use `IX_BUILD_*`; every legacy `LOCKED_BUILD_*` runtime
 setting remains a fallback during transition. The new spelling wins, and each
@@ -129,7 +136,7 @@ The install target runs the version check after setup. Its machine-readable
 one-line results report `ok` or `mismatch` per tool and it exits 0 when every
 minimum is met and every presence-only executable is available, 1 otherwise.
 Presence-only tools are checked without invoking their help/version commands.
-For example, ix-board 0.12.3 meets a 0.12.2 minimum. Pins live in
+ix-board 0.12.4 meets a 0.12.3 minimum. Pins live in
 [`tool-versions.json`](tool-versions.json); the host capacity examples in
 [`host-capacity-examples.json`](host-capacity-examples.json) record measured
 cores and RAM for draco (18), luna (8), titan (32), and terra (14). The
