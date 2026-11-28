@@ -229,13 +229,47 @@ fn telemetry_generated_full_budget_is_below_1500_series() -> Result<()> {
             metrics.reconcile_events(&[e], sequence + 1)?;
         }
     }
-    let text = metrics.exposition(&state(vec![]), &policy()?, 0, 0)?;
+    let mut active = Vec::new();
+    for class in PriorityClass::ALL {
+        for phase in [Phase::Queued, Phase::Running] {
+            let mut row = request(
+                u64::try_from(active.len()).unwrap_or(0) + 1,
+                "draco:tooling:active".into(),
+                phase,
+            );
+            row.class = class.label().into();
+            row.memory_reservation_bytes = Some(42);
+            row.memory_cap_bytes = Some(64);
+            active.push(row);
+        }
+    }
+    let text = metrics.exposition(&state(active), &policy()?, 0, 0)?;
+    for class in PriorityClass::ALL {
+        for phase in ["queued", "running"] {
+            assert_eq!(
+                sample(
+                    &text,
+                    "ix_build_active_memory_reserved_bytes",
+                    &[("class", class.label()), ("state", phase)]
+                ),
+                42.
+            );
+            assert_eq!(
+                sample(
+                    &text,
+                    "ix_build_active_memory_limit_bytes",
+                    &[("class", class.label()), ("state", phase)]
+                ),
+                64.
+            );
+        }
+    }
     let series = text
         .lines()
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .count();
     eprintln!("SWM-417 generated series={series} (+6 runtime/exporter gauges)");
-    assert!(series + 6 <= 1500, "series budget exceeded: {}", series + 6);
+    assert!(series + 9 <= 1500, "series budget exceeded: {}", series + 9);
     assert_eq!(
         text.lines()
             .filter(|l| l.starts_with("ix_build_identity_total{"))
@@ -277,6 +311,9 @@ fn telemetry_generated_full_budget_is_below_1500_series() -> Result<()> {
             "ix_build_snapshot_size_bytes",
             "ix_build_export_error",
             "ix_build_running_memory_headroom_ratio",
+            "ix_build_queue_paused",
+            "ix_build_queue_hold_age_seconds",
+            "ix_build_queue_hold_alert_after_seconds",
         ]
         .into_iter()
         .map(str::to_owned),

@@ -5,6 +5,24 @@
   "evaluation_interval": "1m",
   "tests": [
     {
+      "name": "durable queue hold alerts only after its bound",
+      "interval": "1m",
+      "input_series": [
+        {"series": "ix_build_queue_paused{host=\"fixture\"}", "values": "1+0x10"},
+        {"series": "ix_build_queue_hold_age_seconds{host=\"fixture\"}", "values": "0+60x10"},
+        {"series": "ix_build_queue_hold_alert_after_seconds{host=\"fixture\"}", "values": "120+0x10"}
+      ],
+      "alert_rule_test": [
+        {"eval_time": "1m", "alertname": "LockedBuildQueueHoldOverdue", "exp_alerts": []},
+        {"eval_time": "4m", "alertname": "LockedBuildQueueHoldOverdue", "exp_alerts": [
+          {"exp_labels": {"host": "fixture", "severity": "warning"}, "exp_annotations": {
+            "summary": "Build admission hold overdue on fixture",
+            "description": "Admission is held past its configured deadline. Inspect status and use queue resume after resolving the cause."
+          }}
+        ]}
+      ]
+    },
+    {
       "name": "LockedBuildMustFixWaitHigh",
       "interval": "1m",
       "input_series": [

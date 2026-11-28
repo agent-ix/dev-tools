@@ -129,9 +129,15 @@ pub struct LeaseRecord {
     /// Why the per-request wrapper was selected or skipped.
     #[serde(default)]
     pub cache_wrapper_status: CacheWrapperStatus,
+    /// Exact systemd scope owned by this lease, excluding nested caller scopes.
+    #[serde(default)]
+    pub memory_scope: Option<String>,
     /// Observed kernel OOM-kill counter for this command's memory scope.
     #[serde(default)]
     pub oom_kill_count: u64,
+    /// The owned systemd unit reported Result=oom-kill; not a counter sample.
+    #[serde(default)]
+    pub scope_oom_killed: bool,
     /// Identity of the launched command; memory accounting starts here.
     #[serde(default)]
     pub command: Option<ProcessIdentity>,
@@ -220,6 +226,11 @@ pub enum MemoryEnforcement {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Request {
+    /// Original caller identity, independent of later scheduler launches.
+    #[serde(default)]
+    pub client: Option<ProcessIdentity>,
+    #[serde(default)]
+    pub client_pid_namespace: Option<String>,
     #[serde(default)]
     pub telemetry: crate::telemetry::EventTelemetry,
     #[serde(default)]
@@ -303,6 +314,8 @@ pub(crate) struct Request {
 #[serde(deny_unknown_fields)]
 pub(crate) struct State {
     pub schema_version: u32,
+    #[serde(default = "legacy_reader_version")]
+    pub min_reader_version: u32,
     pub store_id: String,
     pub config_path: PathBuf,
     pub host: String,
@@ -316,6 +329,10 @@ pub(crate) struct State {
     pub metrics: MetricsState,
     pub requests: Vec<Request>,
     pub events: Vec<Event>,
+}
+
+fn legacy_reader_version() -> u32 {
+    1
 }
 
 fn ignore_legacy_metrics<'de, D>(deserializer: D) -> std::result::Result<MetricsState, D::Error>

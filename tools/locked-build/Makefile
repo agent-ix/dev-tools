@@ -1,5 +1,6 @@
 CARGO ?= cargo
 PREFIX ?= $(HOME)/.local
+ROLLOUT_OWNER ?=
 
 .PHONY: build fmt fmt-check lint test ci install install-tools clean
 
@@ -20,12 +21,11 @@ test:
 
 ci: fmt-check lint test
 
-install:
-	$(CARGO) install --locked --path . --root $(PREFIX)
+install: install-tools
 
 install-tools:
-	$(CARGO) install --locked --path . --root $(PREFIX) -j 4
-	$(PREFIX)/bin/locked-build install-tools
+	CARGO_TARGET_DIR=$(CURDIR)/target $(CARGO) build --locked --release -j 4
+	$(CURDIR)/target/release/locked-build install-tools --owner "$(ROLLOUT_OWNER)"
 
 clean:
 	$(CARGO) clean

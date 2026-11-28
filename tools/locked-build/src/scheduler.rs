@@ -14,8 +14,12 @@ use crate::runtime;
 use crate::store::Store;
 
 const ELECTION_LOCK: &str = "scheduler.lock";
+pub(crate) const DRAIN_PROTOCOL: &[u8] = b"install-drain-v1";
 
 pub(crate) fn ensure(store: &Store) -> Result<()> {
+    let Some(_admission) = store.try_admission_lock()? else {
+        return Ok(());
+    };
     let Some(mut lease) = store.try_lock_member(ELECTION_LOCK)? else {
         return Ok(());
     };
@@ -31,22 +35,57 @@ pub(crate) fn ensure(store: &Store) -> Result<()> {
     lease.seek(SeekFrom::Start(0))?;
     lease.write_all(&now.to_le_bytes())?;
     lease.set_len(8)?;
+    let child = spawn(store, &store.service_binary()?, lease, false, None)?;
+    detach(child);
+    Ok(())
+}
+
+/// Transfers the owned election to the installed successor without an election
+/// gap in which an old queued caller could start its replaced executable.
+/// Provenance: SWM-429. Trace: FR-011-AC-7, FR-005-AC-4
+pub(crate) fn handoff(
+    store: &Store,
+    binary: &std::path::Path,
+    lease: std::fs::File,
+    token: &str,
+) -> Result<Child> {
+    spawn(store, binary, lease, true, Some(token))
+}
+
+fn spawn(
+    store: &Store,
+    binary: &std::path::Path,
+    lease: std::fs::File,
+    wait: bool,
+    token: Option<&str>,
+) -> Result<Child> {
     let stderr = OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
         .open(store.path.join("scheduler.stderr"))?;
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(binary);
+    command
         .arg("--state")
         .arg(&store.path)
         .arg("--config")
         .arg(&store.config_path)
-        .arg("scheduler")
+        .arg("scheduler");
+    if wait {
+        command.arg("--wait-for-admission");
+    }
+    if let Some(token) = token {
+        command.arg("--install-token").arg(token);
+    }
+    Ok(command
         .stdin(Stdio::from(lease))
         .stdout(Stdio::null())
         .stderr(stderr)
         .process_group(0)
-        .spawn()?;
+        .spawn()?)
+}
+
+pub(crate) fn detach(mut child: Child) {
     // Observe this detached service child; callers need not wait for the whole
     // queue after their own request has finished.
     std::thread::spawn(move || {
@@ -54,10 +93,9 @@ pub(crate) fn ensure(store: &Store) -> Result<()> {
             eprintln!("locked-build: scheduler child wait failed: {error}");
         }
     });
-    Ok(())
 }
 
-pub(crate) fn run(store: &Store) -> Result<()> {
+pub(crate) fn run(store: &Store, wait_for_admission: bool, token: Option<&str>) -> Result<()> {
     let Some(mut lease) = store.inherited_or_try_lock(ELECTION_LOCK)? else {
         return Ok(());
     };
@@ -65,10 +103,29 @@ pub(crate) fn run(store: &Store) -> Result<()> {
     // PID, determines election ownership.
     lease.seek(SeekFrom::Start(8))?;
     lease.write_all(&std::process::id().to_le_bytes())?;
-    lease.set_len(12)?;
+    lease.write_all(DRAIN_PROTOCOL)?;
+    lease.set_len(12 + DRAIN_PROTOCOL.len() as u64)?;
+    if wait_for_admission {
+        while store.try_admission_lock()?.is_none() {
+            std::thread::sleep(Duration::from_millis(crate::config::POLL_INTERVAL_MS));
+        }
+    }
+    if let Some(token) = token {
+        let committed: Option<String> = std::fs::read(store.path.join("install-committed.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if committed.as_deref() != Some(token) {
+            return Ok(());
+        }
+    }
     let mut children: Vec<Child> = Vec::new();
     let mut recovered = None;
     loop {
+        // The installer will inherit election ownership and restart us after
+        // the swap. Queued workers yield too; running leases keep supervising.
+        if store.try_admission_lock()?.is_none() {
+            return Ok(());
+        }
         let mut active = Vec::new();
         for mut child in children {
             if child.try_wait()?.is_none() {

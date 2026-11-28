@@ -68,13 +68,17 @@ impl Failure {
     }
 }
 
-pub(crate) fn process(request: &Request, refused: bool) -> String {
-    let name = request
+fn command_name(request: &Request) -> String {
+    request
         .command
         .first()
         .and_then(|command| Path::new(command).file_name())
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "command".to_owned());
+        .unwrap_or_else(|| "command".to_owned())
+}
+
+pub(crate) fn process(request: &Request, refused: bool) -> String {
+    let name = command_name(request);
     if refused {
         return format!("not-started/{name}");
     }
@@ -119,6 +123,16 @@ pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Dia
                 .is_some_and(|record| record.memory_enforcement == MemoryEnforcement::Refused),
     );
     let finish = |code, key: &str, limit: Value, value: Value, what: &str| {
+        let killed = if code == Code::OomKilled {
+            request
+                .lease_record
+                .as_ref()
+                .and_then(|record| record.memory_scope.as_ref())
+                .map(|scope| format!("scope:{scope}/{}", command_name(request)))
+                .unwrap_or_else(|| killed.clone())
+        } else {
+            killed.clone()
+        };
         let detail = if code == Code::SupervisionLost {
             request
                 .supervision_detail
@@ -140,14 +154,34 @@ pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Dia
     if let Some(record) = request
         .lease_record
         .as_ref()
-        .filter(|record| record.oom_kill_count > 0)
+        .filter(|record| record.oom_kill_count > 0 || record.scope_oom_killed)
     {
         return finish(
             Code::OomKilled,
             &memory_key,
             request.memory_cap_bytes.unwrap_or(0).into(),
-            record.oom_kill_count.into(),
-            "cgroup memory.events oom_kill counter",
+            request
+                .measured_memory_bytes
+                .map_or_else(|| Value::from("unavailable"), Value::from),
+            &format!(
+                "rss_bytes; cgroup_oom_kill={}; cgroup_memory_peak_bytes={}",
+                if record.oom_kill_count > 0 {
+                    record.oom_kill_count.to_string()
+                } else {
+                    "unavailable; source=systemd.Result=oom-kill".to_owned()
+                },
+                record
+                    .memory_sample
+                    .as_ref()
+                    .filter(|sample| matches!(
+                        sample.metric,
+                        crate::model::MemoryMetric::CgroupMemoryPeak
+                    ))
+                    .map_or_else(
+                        || "unavailable".to_owned(),
+                        |sample| sample.bytes.to_string()
+                    )
+            ),
         );
     }
     match request.stop {
@@ -295,7 +329,20 @@ pub(crate) fn unscoped(error: &Error, request: String) -> Failure {
     if let Some(failure) = &error.failure {
         return failure.as_ref().clone();
     }
-    let (code, key, limit) = if error.code == ErrorCode::Request {
+    let (code, key, limit) = if matches!(
+        error.code,
+        ErrorCode::Transition | ErrorCode::StoreVersion | ErrorCode::PolicyModified
+    ) {
+        (
+            match error.code {
+                ErrorCode::Transition => Code::InvalidTransition,
+                ErrorCode::StoreVersion => Code::StoreVersion,
+                _ => Code::PolicyModified,
+            },
+            "control.transition_valid",
+            Value::Boolean(true),
+        )
+    } else if error.code == ErrorCode::Request {
         (
             Code::InvalidRequest,
             "policy.valid_request",
@@ -317,8 +364,46 @@ pub(crate) fn unscoped(error: &Error, request: String) -> Failure {
             key,
             limit,
             "unavailable".into(),
-            &error.message,
+            &error.to_string(),
             "not-started/command",
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Provenance: SWM-421. Trace: FR-005-AC-4
+    #[test]
+    fn state_failure_keeps_the_error_kind_and_message() {
+        let error = Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let failure = unscoped(&error, "fixture:r1".into());
+        assert_eq!(failure.diagnostic.code, Some(Code::StateUnavailable));
+        assert_eq!(
+            failure.diagnostic.measured_what.as_deref(),
+            Some("Io: PermissionDenied: permission denied")
+        );
+        assert_eq!(
+            failure.diagnostic.message.as_deref(),
+            Some(
+                "locked-build: LB_STATE_UNAVAILABLE request=fixture:r1 limit=policy.state_access=read_write measured=unavailable (Io: PermissionDenied: permission denied) killed=not-started/command"
+            )
+        );
+    }
+
+    /// Provenance: SWM-421. Trace: FR-005-AC-4
+    #[test]
+    fn state_failure_keeps_the_supervision_cause() {
+        let error = Error::new(
+            ErrorCode::State,
+            "command-tree memory supervision unavailable",
+        );
+        let failure = unscoped(&error, "fixture:r2".into());
+        assert_eq!(failure.diagnostic.code, Some(Code::StateUnavailable));
+        assert_eq!(
+            failure.diagnostic.measured_what.as_deref(),
+            Some("State: command-tree memory supervision unavailable")
+        );
     }
 }

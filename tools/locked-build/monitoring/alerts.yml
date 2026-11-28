@@ -4,6 +4,16 @@
       "name": "locked-build",
       "rules": [
         {
+          "alert": "LockedBuildQueueHoldOverdue",
+          "expr": "(ix_build_queue_paused == 1) and on(host) (ix_build_queue_hold_age_seconds > on(host) ix_build_queue_hold_alert_after_seconds)",
+          "for": "1m",
+          "labels": {"severity": "warning"},
+          "annotations": {
+            "summary": "Build admission hold overdue on {{ $labels.host }}",
+            "description": "Admission is held past its configured deadline. Inspect status and use queue resume after resolving the cause."
+          }
+        },
+        {
           "record": "ix_build:wasted_run_seconds_per_second",
           "expr": "sum by (host, cause) (rate(ix_build_wasted_run_seconds_total[5m]))"
         },

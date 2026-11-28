@@ -14,6 +14,36 @@ use crate::process::{IdentityState, Processes};
 const STATE_LIMIT: u64 = 32 * 1024 * 1024;
 const METRICS_FILE: &str = "metrics.json";
 
+/// Decode compatibility before the request payload, so future fields do not
+/// turn a required upgrade into a misleading payload/serde failure.
+/// Provenance: SWM-427, SWM-428. Trace: FR-005-AC-4
+pub(crate) fn check_state_header(bytes: &[u8], reader: u32) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        schema_version: u32,
+        #[serde(default = "legacy_reader")]
+        min_reader_version: u32,
+    }
+    fn legacy_reader() -> u32 {
+        1
+    }
+    let header: Header = serde_json::from_slice(bytes)?;
+    check_version(header.schema_version, header.min_reader_version, reader)
+}
+
+fn check_version(schema: u32, minimum: u32, reader: u32) -> Result<()> {
+    if !(1..=2).contains(&schema) || minimum > reader || minimum == 0 {
+        return Err(Error::new(
+            ErrorCode::StoreVersion,
+            format!(
+                "store schema={} min_reader_version={} reader_version={reader}; upgrade locked-build before reading this store",
+                schema, minimum
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileStamp {
@@ -54,6 +84,53 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    pub(crate) fn queue_hold(&self) -> Result<Option<crate::queue::Hold>> {
+        match self
+            .read_member::<crate::queue::Mode>("queue-hold.json", 4096)?
+            .unwrap_or_default()
+        {
+            crate::queue::Mode::Open => Ok(None),
+            crate::queue::Mode::Held { hold } => Ok(Some(hold)),
+        }
+    }
+    /// Installed successor used by callers that survived an executable swap.
+    /// Provenance: SWM-429. Trace: FR-011-AC-7, FR-005-AC-4
+    pub(crate) fn service_binary(&self) -> Result<PathBuf> {
+        Ok(self
+            .read_member::<PathBuf>("service-binary.json", 32_768)?
+            .unwrap_or(std::env::current_exe()?))
+    }
+
+    /// Publishes the replacement path before lifting admission.
+    /// Provenance: SWM-429. Trace: FR-011-AC-7, FR-005-AC-4
+    pub(crate) fn publish_service_binary(&self, binary: &Path) -> Result<()> {
+        self.write_atomic("service-binary.json", &serde_json::to_vec(binary)?)
+    }
+
+    /// Shared grant guard, excluded by install-tools' exclusive drain hold.
+    /// Provenance: SWM-429. Trace: FR-005-AC-4, FR-011-AC-7
+    pub(crate) fn try_admission_lock(&self) -> Result<Option<File>> {
+        self.reject_link("admission.lock")?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(self.path.join("admission.lock"))?;
+        match file.try_lock_shared() {
+            Ok(()) => {
+                if self.queue_hold()?.is_some() {
+                    Ok(None)
+                } else {
+                    Ok(Some(file))
+                }
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
     pub(crate) fn try_lock_member(&self, name: &str) -> Result<Option<File>> {
         if name.contains('/') || name == "." || name == ".." {
             return Err(Error::new(ErrorCode::State, "invalid store member"));
@@ -122,9 +199,12 @@ impl Store {
                         "store member exceeds size limit",
                     ));
                 }
-                Ok(Some(serde_json::from_reader(BufReader::new(
-                    file.take(limit),
-                ))?))
+                let mut bytes = Vec::new();
+                file.take(limit).read_to_end(&mut bytes)?;
+                if name == "state.json" {
+                    check_state_header(&bytes, 2)?;
+                }
+                Ok(Some(serde_json::from_slice(&bytes)?))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
@@ -141,7 +221,8 @@ impl Store {
         {
             let mut state = snapshot.state;
             state.metrics = snapshot.metrics;
-            if state.schema_version != 1 || state.host != config.host {
+            check_version(state.schema_version, state.min_reader_version, 2)?;
+            if state.host != config.host {
                 return Err(Error::new(
                     ErrorCode::State,
                     "unsupported schema or different host/configuration",
@@ -160,6 +241,7 @@ impl Store {
                 Some(state) => state,
                 None => State {
                     schema_version: 1,
+                    min_reader_version: 1,
                     store_id: "00000000000000000000000000000000".to_owned(),
                     config_path: self.config_path.clone(),
                     host: config.host.clone(),
@@ -173,7 +255,8 @@ impl Store {
                     events: Vec::new(),
                 },
             };
-            if state.schema_version != 1 || state.host != config.host {
+            check_version(state.schema_version, state.min_reader_version, 2)?;
+            if state.host != config.host {
                 return Err(Error::new(
                     ErrorCode::State,
                     "unsupported schema or different host/configuration",
@@ -299,10 +382,14 @@ impl Store {
                 if file.metadata()?.len() > STATE_LIMIT {
                     return Err(Error::new(ErrorCode::State, "state exceeds size limit"));
                 }
-                serde_json::from_reader(BufReader::new(file.take(STATE_LIMIT)))?
+                let mut bytes = Vec::new();
+                file.take(STATE_LIMIT).read_to_end(&mut bytes)?;
+                check_state_header(&bytes, 2)?;
+                serde_json::from_slice(&bytes)?
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => State {
-                schema_version: 1,
+                schema_version: 2,
+                min_reader_version: 2,
                 store_id: random_id()?,
                 config_path: self.config_path.clone(),
                 host: config.host.clone(),
@@ -317,12 +404,15 @@ impl Store {
             },
             Err(error) => return Err(error.into()),
         };
-        if state.schema_version != 1 || state.host != config.host {
+        check_version(state.schema_version, state.min_reader_version, 2)?;
+        if state.host != config.host {
             return Err(Error::new(
                 ErrorCode::State,
                 "unsupported schema or different host/configuration",
             ));
         }
+        state.schema_version = 2;
+        state.min_reader_version = 2;
         // The random store ID and host identify the queue, not the location
         // from which a lane happened to read identical host policy.
         let policy_path_changed = state.config_path != self.config_path;
@@ -402,7 +492,7 @@ impl Store {
                     return false;
                 };
                 if self.claim(&request.id).ok().flatten().is_some_and(|claim| {
-                    claim.protocol == 1
+                    matches!(claim.protocol, 1 | 2)
                         && claim.store_id == store_id
                         && claim.generation == request.worker_generation
                         && claim.worker.as_ref() == Some(worker)
@@ -497,7 +587,7 @@ impl Store {
         Ok(output)
     }
 
-    fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<()> {
         // Notifications can be repaired concurrently with a canonical commit.
         // Each publication needs its own temporary inode before atomic rename.
         let next = format!("{name}.{}.next", random_id()?);
@@ -571,4 +661,50 @@ fn load_metrics(path: &Path) -> Result<crate::metrics::MetricsState> {
     }
     let file = File::open(path)?;
     serde_json::from_reader(BufReader::new(file.take(STATE_LIMIT))).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    #[test]
+    fn state_reader_refuses_future_schema_before_decoding_request_payload() -> Result<()> {
+        for bytes in [
+            br#"{"schema_version":2,"min_reader_version":3,"requests":"future-layout"}"#.as_slice(),
+            br#"{"schema_version":99,"min_reader_version":1}"#.as_slice(),
+        ] {
+            assert_eq!(
+                check_state_header(bytes, 2).err().map(|e| e.code),
+                Some(ErrorCode::StoreVersion)
+            );
+        }
+        assert_eq!(
+            check_state_header(br#"{"schema_version":2,"min_reader_version":2}"#, 1)
+                .err()
+                .map(|e| e.code),
+            Some(ErrorCode::StoreVersion)
+        );
+        check_state_header(br#"{"schema_version":1}"#, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn state_cached_snapshot_refuses_a_newer_minimum_reader_with_the_same_code() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let policy = root.path().join("policy.json");
+        std::fs::write(&policy, serde_json::to_vec(&Config::default())?)?;
+        let store = Store::open(&root.path().join("state"), &policy)?;
+        store.transaction(|_, _| Ok(()))?;
+        let mut cache: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.path.join("snapshot.json"))?)?;
+        cache["state"]["min_reader_version"] = 3.into();
+        std::fs::write(
+            store.path.join("snapshot.json"),
+            serde_json::to_vec(&cache)?,
+        )?;
+        assert_eq!(
+            store.snapshot().err().map(|e| e.code),
+            Some(ErrorCode::StoreVersion)
+        );
+        Ok(())
+    }
 }

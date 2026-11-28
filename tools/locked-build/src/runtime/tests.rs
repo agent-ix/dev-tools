@@ -5,8 +5,333 @@ use std::fs::{File, TryLockError};
 use std::sync::mpsc;
 
 use super::*;
+
+/// Provenance: SWM-421. Trace: FR-005-AC-4
+#[test]
+fn scope_probe_and_launch_require_the_same_oom_policy() {
+    let spec = lease_command_spec(LauncherPlatform::Linux, "/usr/bin/true", &[], Some(64));
+    let args: Vec<_> = spec
+        .arguments
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "--user",
+            "--scope",
+            "--quiet",
+            "-p",
+            "MemoryMax=64",
+            "-p",
+            "MemorySwapMax=0",
+            "-p",
+            "OOMPolicy=stop",
+            "--",
+            "/usr/bin/true"
+        ]
+    );
+}
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
+
+/// Provenance: SWM-429. Trace: FR-005-AC-4, FR-011-AC-7
+#[test]
+fn install_drain_holds_admission_without_reordering_or_cancelling_waiters() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let first = queued(&store)?;
+    let second = queued(&store)?;
+    let identity = Processes::self_identity()?;
+    let mut leases = Vec::new();
+    for id in [&first, &second] {
+        let (generation, lease) = spawn_worker_with(&store, id, false, |claim, lease| {
+            Ok((claim.generation, lease))
+        })?
+        .ok_or_else(|| Error::new(ErrorCode::State, "claim missing"))?;
+        claim_spawned_worker(&store, id, &identity, generation)?;
+        leases.push(lease);
+    }
+    let (before, config) = store.snapshot()?;
+    let positions = before.queue_positions(&config, clock_ms()?);
+    let hold = store
+        .try_lock_member("admission.lock")?
+        .ok_or_else(|| Error::new(ErrorCode::State, "admission hold missing"))?;
+    schedule_queue(&store)?;
+    let (held, _) = store.snapshot()?;
+    assert_eq!(held.find(&first)?.phase, Phase::Queued);
+    assert_eq!(held.find(&second)?.phase, Phase::Queued);
+    assert_eq!(held.queue_positions(&config, clock_ms()?), positions);
+    assert!(held.requests.iter().all(|request| request.stop.is_none()));
+    drop(hold);
+    schedule_queue(&store)?;
+    assert_eq!(store.snapshot()?.0.find(&first)?.phase, Phase::Running);
+    assert_eq!(store.snapshot()?.0.find(&second)?.phase, Phase::Queued);
+    Ok(())
+}
+
+/// Provenance: SWM-400. Trace: FR-005-AC-4
+#[test]
+fn owned_oom_result_does_not_invent_a_memory_events_counter() -> Result<()> {
+    for (count, result, counter, scope, killed) in [
+        (
+            0,
+            true,
+            "unavailable; source=systemd.Result=oom-kill",
+            Some("owned.scope"),
+            "scope:owned.scope/true",
+        ),
+        (3, false, "3", None, "pgid:42/true"),
+        (3, true, "3", Some("owned.scope"), "scope:owned.scope/true"),
+    ] {
+        let root = tempfile::tempdir()?;
+        let store = store(root.path())?;
+        let id = queued(&store)?;
+        store.transaction(|state, config| {
+            let request = state.find_mut(&id)?;
+            request.memory_cap_bytes = Some(67_108_864);
+            request.memory_limit_key = Some("policy.memory_limit_per_job_bytes*parallelism".into());
+            request.measured_memory_bytes = Some(12_345_678);
+            request.watchdog = Some(ProcessIdentity {pid:42,started_seconds:7});
+            request.lease_record = Some(LeaseRecord {memory_scope:scope.map(str::to_owned),memory_enforcement:MemoryEnforcement::SystemdScope,..Default::default()});
+            record_scope_oom(request, Some(MemoryEnforcement::SystemdScope), count, result);
+            state.finish(&id, Completion {signal:Some(9),..Completion::default()}, config, now_ms()?, clock_ms()?)?;
+            assert_eq!(state.find(&id)?.trace.diagnostic.message, Some(format!("locked-build: LB_OOM_KILLED request={} limit=policy.memory_limit_per_job_bytes*parallelism=67108864 measured=12345678 (rss_bytes; cgroup_oom_kill={counter}; cgroup_memory_peak_bytes=unavailable) killed={killed}", id.0)));
+            assert_eq!(state.find(&id)?.lease_record.as_ref().map(|record|record.oom_kill_count), Some(count));
+            assert_eq!(state.find(&id)?.reason.as_deref(), Some("rss_cap"));
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Provenance: SWM-400, OOM proof. Trace: FR-005-AC-4
+#[test]
+fn only_owned_scope_evidence_can_identify_a_kernel_memory_kill() {
+    let mut evidence = CgroupOomEvidence {
+        scope: Some("owned.scope".into()),
+        ..Default::default()
+    };
+    evidence.event_files.extend([
+        Path::new("/cgroup/owned.scope/memory.events").to_owned(),
+        Path::new("/cgroup/nested-16GB.scope/memory.events").to_owned(),
+    ]);
+    evidence.retain_owned_scope();
+    assert_eq!(
+        evidence.event_files.into_iter().collect::<Vec<_>>(),
+        [Path::new("/cgroup/owned.scope/memory.events").to_owned()]
+    );
+    let mut evidence = CgroupOomEvidence::default();
+    evidence.observe_scope_text("Result=success\nMemoryPeak=67108864\n");
+    assert!(!evidence.detected());
+    evidence.observe_scope_text("Result=oom-kill\nMemoryPeak=67112960\n");
+    assert!(evidence.detected());
+    assert_eq!(evidence.oom_kill_count, 0);
+    assert!(evidence.scope_oom_killed);
+    assert_eq!(evidence.peak_bytes, Some(67_112_960));
+}
+
+/// Provenance: SWM-400. Trace: FR-005-AC-4, FR-005-AC-7
+#[test]
+fn owned_exit_result_corrects_an_orphan_inference_without_losing_success() -> Result<()> {
+    for (code, phase) in [(0, Phase::Succeeded), (75, Phase::Failed)] {
+        let root = tempfile::tempdir()?;
+        let store = store(root.path())?;
+        let id = queued(&store)?;
+        let worker = ProcessIdentity {
+            pid: 2_000_000_000,
+            started_seconds: 1,
+        };
+        let fence = claim_worker(&store, &id, &worker)?
+            .ok_or_else(|| Error::new(ErrorCode::State, "no claim"))?;
+        store.transaction(|state, config| {
+            let request = state.find_mut(&id)?;
+            request.phase = Phase::Running;
+            request.started_at_ms = Some(now_ms()?);
+            request.started_clock_ms = Some(clock_ms()?);
+            state.finish(
+                &id,
+                Completion {
+                    reason: Some("supervisor_lost"),
+                    ..Completion::default()
+                },
+                config,
+                now_ms()?,
+                clock_ms()?,
+            )?;
+            reconcile_orphan_outcome(
+                state,
+                config,
+                &id,
+                &fence,
+                CommandOutcome {
+                    code: Some(code),
+                    signal: None,
+                },
+            )?;
+            assert_eq!(state.find(&id)?.phase, phase);
+            assert_eq!(state.find(&id)?.exit_code, Some(code));
+            assert_eq!(
+                state.find(&id)?.reason.as_deref(),
+                Some(if code == 0 {
+                    "supervision_degraded"
+                } else {
+                    "command_exit"
+                })
+            );
+            assert!(state.events.last().is_some_and(|event| event.correction));
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Provenance: SWM-406. Trace: FR-005-AC-1, FR-005-AC-2
+#[test]
+fn explicit_memory_is_reserved_enforced_bounded_and_budget_authoritative() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = lease_accounted_store(root.path(), 4, 34_359_738_368, 0)?;
+    let submit = |bytes| {
+        enqueue_with_memory(
+            &store,
+            "memory-owner",
+            "SWM-406",
+            1,
+            0,
+            None,
+            &["cargo".into()],
+            Some(bytes),
+        )
+    };
+    let first = submit(17_179_869_184)?;
+    let second = submit(17_179_869_184)?;
+    let third = submit(1)?;
+    let refused = submit(17_179_869_185)
+        .err()
+        .ok_or_else(|| Error::new(ErrorCode::State, "oversized request accepted"))?;
+    let diagnostic = crate::diagnostics::unscoped(&refused, "unused".into()).diagnostic;
+    assert_eq!(
+        diagnostic.code,
+        Some(locked_build::wire::Code::RefusedClassCap)
+    );
+    assert!(
+        diagnostic
+            .message
+            .unwrap_or_default()
+            .contains("limit=policy.max_request_memory=17179869184 measured=17179869185")
+    );
+    store.transaction(|state, config| {
+        assert_eq!(state.find(&first)?.memory_cap_bytes, Some(17_179_869_184));
+        assert_eq!(
+            state.find(&first)?.memory_reservation_bytes,
+            Some(17_179_869_184)
+        );
+        state.find_mut(&first)?.phase = Phase::Running;
+        state.find_mut(&first)?.worker = Some(ProcessIdentity {
+            pid: 2_000_000_000,
+            started_seconds: 1,
+        });
+        state.find_mut(&first)?.worker_generation = 1;
+        state.find_mut(&first)?.started_at_ms = Some(now_ms()?);
+        state.find_mut(&first)?.started_clock_ms = Some(clock_ms()?);
+        state.find_mut(&second)?.phase = Phase::Running;
+        state.find_mut(&second)?.worker = Some(ProcessIdentity {
+            pid: 2_000_000_001,
+            started_seconds: 1,
+        });
+        state.find_mut(&second)?.worker_generation = 1;
+        state.find_mut(&second)?.started_at_ms = Some(now_ms()?);
+        state.find_mut(&second)?.started_clock_ms = Some(clock_ms()?);
+        let sample = HostSample {
+            host: config.host.clone(),
+            observed_at_ms: now_ms()?,
+            memory_available_bytes: 1_000_000,
+            disk_available_bytes: 1_000_000,
+            load_one: 0.0,
+        };
+        assert_eq!(
+            state.admission_reason(&third, config, Some(&sample), now_ms()?, clock_ms()?)?,
+            Some("memory_budget")
+        );
+        Ok(())
+    })?;
+    let report = status(&store)?;
+    assert_eq!(
+        report.requests[0].trace.requested_memory_bytes,
+        Some(17_179_869_184)
+    );
+    let scrape = metrics(&store)?;
+    assert!(scrape.contains("ix_build_active_memory_reserved_bytes{class=\"periodic\",host=\"your-build-host\",state=\"running\"} 34359738368"), "{scrape}");
+    let mut policy = Config::read(&store.config_path)?;
+    policy.max_request_memory = Some(68_719_476_736);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let over_budget = submit(51_539_607_552)
+        .err()
+        .ok_or_else(|| Error::new(ErrorCode::State, "over-budget accepted"))?;
+    let diagnostic = crate::diagnostics::unscoped(&over_budget, "unused".into()).diagnostic;
+    assert_eq!(
+        diagnostic.code,
+        Some(locked_build::wire::Code::RefusedMemoryBudget)
+    );
+    assert_eq!(
+        diagnostic.limit_key.as_deref(),
+        Some("policy.memory_budget_bytes")
+    );
+    policy
+        .memory_cap_by_class
+        .insert("periodic".into(), 8_589_934_592);
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let over_class = submit(17_179_869_184)
+        .err()
+        .ok_or_else(|| Error::new(ErrorCode::State, "over-class accepted"))?;
+    let diagnostic = crate::diagnostics::unscoped(&over_class, "unused".into()).diagnostic;
+    assert_eq!(
+        diagnostic.code,
+        Some(locked_build::wire::Code::RefusedClassCap)
+    );
+    assert_eq!(
+        diagnostic.limit_key.as_deref(),
+        Some("policy.memory_cap_by_class.periodic")
+    );
+    Ok(())
+}
+
+/// Provenance: SWM-401. Trace: FR-005-AC-1
+#[test]
+fn owner_queue_cap_refuses_only_that_owners_queued_work() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = store(root.path())?;
+    let mut policy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+    policy["max_queued_per_owner"] = 2.into();
+    std::fs::write(&store.config_path, serde_json::to_vec(&policy)?)?;
+    let submit = |owner| enqueue(&store, owner, "SWM-401", 1, 0, None, &["cargo".into()]);
+    let first = submit("owner-a")?;
+    submit("owner-a")?;
+    let error = submit("owner-a")
+        .err()
+        .ok_or_else(|| Error::new(ErrorCode::State, "third request admitted"))?;
+    let diagnostic = crate::diagnostics::unscoped(&error, "test".into()).diagnostic;
+    assert_eq!(
+        diagnostic.code,
+        Some(locked_build::wire::Code::RefusedQueue)
+    );
+    let line = diagnostic.message.unwrap_or_default();
+    assert!(
+        line.contains("limit=policy.max_queued_per_owner=2 measured=3"),
+        "{line}"
+    );
+    submit("owner-b")?;
+    let report = serde_json::to_value(status(&store)?)?;
+    assert_eq!(
+        report["queued_by_owner"],
+        serde_json::json!({"owner-a":2,"owner-b":1})
+    );
+    assert_eq!(report["max_queued_per_owner"], 2);
+    cancel(&store, &first)?;
+    submit("owner-a")?;
+    Ok(())
+}
 
 /// Provenance: SWM-391. Trace: FR-005-AC-1, FR-005-AC-4
 #[test]
@@ -846,6 +1171,8 @@ fn cancel_at_clock(store: &Store, id: &RequestId, clock: TestClock) -> Result<()
 fn store(root: &Path) -> Result<Store> {
     let mut policy: Config = serde_json::from_str(include_str!("../../policy.example.json"))?;
     policy.capacity_units = 1;
+    // Scheduler tests deliberately enqueue many requests; quota tests override this.
+    policy.max_queued_per_owner = Some(1000);
     policy.memory_per_unit_bytes = 1;
     policy.memory_reserve_bytes = 0;
     policy.disk_reserve_bytes = 0;
@@ -2252,6 +2579,8 @@ fn lease_launcher_builds_systemd_argv_without_spawning_a_cgroup() {
             "MemoryMax=4294967296",
             "-p",
             "MemorySwapMax=0",
+            "-p",
+            "OOMPolicy=stop",
             "--",
             "/usr/bin/cargo",
             "test",
@@ -2396,6 +2725,7 @@ fn supervise_scope_exit(
         request.started_clock_ms = Some(clock_ms()?);
         request.watchdog = Some(watchdog.clone());
         request.memory_cap_bytes = Some(1_000_000);
+        request.measured_memory_bytes = Some(123_456);
         request.lease_record = Some(LeaseRecord {
             memory_enforcement: MemoryEnforcement::SystemdScope,
             ..LeaseRecord::default()
@@ -2437,7 +2767,7 @@ fn supervise_scope_exit(
         assert_eq!(
             report.requests[0].trace.diagnostic.message,
             Some(format!(
-                "locked-build: LB_OOM_KILLED request={} limit=policy.memory_limit_per_job_bytes*parallelism=1000000 measured=1 (cgroup memory.events oom_kill counter) killed=pgid:{}/true",
+                "locked-build: LB_OOM_KILLED request={} limit=policy.memory_limit_per_job_bytes*parallelism=1000000 measured=123456 (rss_bytes; cgroup_oom_kill=1; cgroup_memory_peak_bytes=unavailable) killed=pgid:{}/true",
                 id.0, watchdog.pid
             ))
         );
@@ -2529,6 +2859,7 @@ fn scope_oom_evidence_survives_watchdog_finalizing_first() -> Result<()> {
             request,
             Some(MemoryEnforcement::SystemdScope),
             evidence.oom_kill_count,
+            evidence.scope_oom_killed,
         );
         request.command_finished = Some(CommandOutcome {
             code: None,
@@ -3023,6 +3354,8 @@ fn legacy_embedded_metrics_field_is_ignored_without_breaking_state_decode() -> R
     let object = encoded
         .as_object_mut()
         .ok_or_else(|| Error::new(ErrorCode::State, "state JSON is not an object"))?;
+    object.insert("schema_version".into(), 1.into());
+    object.remove("min_reader_version");
     object.insert(
         "metrics".to_owned(),
         serde_json::json!({
@@ -3211,6 +3544,8 @@ fn concurrent_textfile_exports_leave_a_complete_document_without_scheduler_lock(
             .filter(|line| {
                 !line.starts_with("ix_build_export_timestamp_seconds{")
                     && !line.starts_with("ix_build_state_dir_free_bytes{")
+                    // Other lanes can start/end unleased compilers between scrapes.
+                    && !line.starts_with("ix_build_unleased_build_processes{")
             })
             .map(str::to_owned)
             .collect::<Vec<_>>()

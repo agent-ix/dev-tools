@@ -5,6 +5,67 @@ type: reference
 
 A host policy is a JSON document defining build admission and supervision limits.
 
+## Architecture
+
+The store owns durable requests, transition history, policy audit hashes and host
+admission mode. The scheduler grants leases; workers and watchdogs retain process
+ownership until verified exit. OS locks coordinate writers and elections; they
+are not a substitute for persisted state.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open
+    Open --> Held: queue pause / install-tools
+    Held --> Open: queue resume / completed install / rollback
+    state Held {
+        [*] --> Waiting
+        Waiting --> Overdue: persisted deadline exceeded
+    }
+```
+
+```mermaid
+flowchart LR
+    Check --> Hold --> WaitIdle --> SwapBackup --> Verify --> Resume
+    Hold & WaitIdle & SwapBackup & Verify --> Rollback
+    Rollback --> Resume
+```
+
+Rules:
+
+1. Held blocks grants and new supervisor launches. Requests retain identity,
+   enqueue sequence and age; running work continues. `queue pause
+   --alert-after-ms 900000` persists the hold, and `queue resume` releases it.
+   Repeated pause/resume in the wrong mode returns `LB_INVALID_TRANSITION`.
+2. `install-tools --owner OWNER --drain --drain-timeout-ms 300000` waits at most
+   the configured bound for active leases. Timeout rolls back and resumes;
+   nothing is cancelled. Ordinary installs still require an empty queue.
+   Ordinary preflight (npm, discovery and host measurement) runs before the hold
+   and idle check. Drain takes the hold before preflight, leaving the state lock
+   free for running completion. Neither path does network work during the swap.
+3. Rust stage types enforce Check → Hold → WaitIdle → Swap → Verify → Resume.
+   Files are backed up before replacement. A returned failure restores them
+   before reopening admission. An unreadable backup fails closed with the hold
+   and recovery journal retained, rather than admitting into a mixed install.
+4. A crash retains Held. Explicit `queue resume` restores an uncommitted backup
+   first. A durable committed journal retains the verified replacement. Hold age,
+   bound and paused gauges drive `LockedBuildQueueHoldOverdue` after one minute
+   beyond the configured deadline.
+5. Queued supervisors acknowledge the hold, retain their lifetime lock and exec
+   the successor in place. Environment, PID namespace and stdio survive. The
+   installed scheduler receives the election lock and a commit token. Unsupported
+   old participants refuse drain before swap; the initial rollout needs an
+   ordinary empty-queue install.
+6. `policy set KEY VALUE` validates the typed policy and cross-field constraints,
+   including `max_bytes` requiring `target_root` and a disk reserve of at least
+   100 GB. It backs up the previous bytes and atomically records the policy hash
+   in `policy-ledger.json`. `check-install` reports `LB_POLICY_MODIFIED` for edits
+   outside the audited command.
+7. Store schema 2 declares `min_reader_version: 2`. Readers check compatibility
+   before decoding request payloads and return `LB_STORE_VERSION` with upgrade
+   guidance. Legacy schema 1 remains readable and is upgraded on a write.
+8. Admission still enforces resource budgets and priority/FIFO rules. Recovery
+   retains live or unverifiable leases; a hold never authorizes release.
+
 Status and events carry a flat diagnostic (`code`, `message`, `limit_key`,
 `limit_value`, `measured_value`, `measured_what`, `killed`) and queue trace.
 The [locked-build skill](../../skills/locked-build/SKILL.md) lists the stable
@@ -76,7 +137,7 @@ Existing policies are not regenerated during installation.
 inherited root-disk temp path. Caller targets remain authoritative and relative
 targets resolve against the recorded command cwd. `.tmp` symlinks are refused.
 
-`make install-tools` builds and copies the locked-build executable only when it
+`make install-tools ROLLOUT_OWNER=<owner>` builds and copies the locked-build executable only when it
 changes, generates a measured policy on first install, installs the `cargo`
 shim, and writes `~/.local/share/dev-tools/installed.json`. It places the shim
 directory before `~/.local/bin` in `.profile`, `.bashrc`, and `.zshrc`.
@@ -87,12 +148,23 @@ minimum pin. Newer versions pass; prereleases follow SemVer ordering and build
 metadata is ignored. Entries without `version` require executable presence and
 are never invoked. It prints one `ok` or `mismatch` line per tool and exits 1
 when a tool is missing, version output is unavailable, or its version is older.
+It also prints `~/.ix/locked-build/install.json` provenance and fails on an
+installed binary hash mismatch. The record contains `schema_version: u32`,
+`owner: string`, `source_commit: string` (full Git SHA), `artifact_sha256: string`,
+`installed_at_ms: u64` (UTC Unix milliseconds), and
+`transfers: [{from: string, to: string, at_ms: u64}]`. An exclusive install lock
+rejects concurrent writers; only the recorded owner may install. An explicit
+`install-tools --owner <new> --transfer-from <old>` records ownership transfer.
+Git builds embed HEAD and working-tree status. Verified clean source archives
+require `IX_BUILD_COMMIT=<full-sha> IX_BUILD_DIRTY=false`.
 
 | Field | Meaning |
 |---|---|
 | `host` | Stable host label for requests and samples. |
 | `capacity_units` | Currently enabled units; zero pauses admission. |
 | `maximum_units` | Largest feasible request; temporary shrink preserves queue age. |
+| `max_queued_per_owner` | Positive queue cap override; absent/null uses ceil(maximum_units/4), minimum one. Running and terminal records are excluded. |
+| `max_request_memory` | Positive explicit request ceiling in bytes; absent/null uses half `memory_budget_bytes`. `run --memory 16GiB` sets both reservation and hard cap without changing jobs or class defaults. Requires lease accounting and respects total budget and absolute class caps. |
 | `memory_per_unit_bytes` | RAM budget charged per requested unit in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_reserve_bytes` | RAM retained outside build leases in `live_available` mode; optional in `lease_accounted` mode. |
 | `memory_admission` | `lease_accounted` (default) checks reservations against `memory_budget_bytes`; `live_available` checks measured available RAM. |

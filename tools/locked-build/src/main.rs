@@ -12,7 +12,10 @@ mod install;
 mod kache_wrapper;
 mod metrics;
 mod model;
+mod policy;
 mod process;
+mod provenance;
+mod queue;
 mod recovery;
 mod runtime;
 mod sample;
@@ -37,6 +40,29 @@ use crate::model::RequestId;
 
 const DEFAULT_CARGO_CLASS: &str = "point";
 const DEFAULT_CARGO_TICKET: &str = "MANUAL";
+
+fn parse_memory(input: &str) -> std::result::Result<u64, String> {
+    let split = input
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(input.len());
+    let number = input[..split]
+        .parse::<u64>()
+        .map_err(|_| "memory must be a positive integer size".to_owned())?;
+    let multiplier = match input[split..].to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "kb" => 1000,
+        "mb" => 1_000_000,
+        "gb" => 1_000_000_000,
+        "kib" => 1024,
+        "mib" => 1_048_576,
+        "gib" => 1_073_741_824,
+        _ => return Err("memory unit must be B, KB, MB, GB, KiB, MiB or GiB".into()),
+    };
+    number
+        .checked_mul(multiplier)
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| "memory size is zero or overflows bytes".into())
+}
 
 #[derive(Parser)]
 #[command(version = build_info::VERSION, about = "Fair persistent build admission for shared hosts")]
@@ -63,11 +89,19 @@ enum Action {
         units: u32,
         #[arg(long)]
         class: Option<String>,
+        /// Explicit total reservation and hard cap, e.g. 16GiB; policy bounded.
+        #[arg(long, value_parser = parse_memory)]
+        memory: Option<u64>,
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
     /// Print a redacted JSON snapshot of capacity, requests and transitions.
     Status,
+    /// Pause or resume admission without cancelling or reordering requests.
+    Queue {
+        #[command(subcommand)]
+        command: QueueAction,
+    },
     /// Cancel a queued or running request, preserving the lease through cleanup.
     Cancel { request: String },
     /// Recover durable queued requests and verify orphaned running groups.
@@ -110,7 +144,20 @@ enum Action {
         output: PathBuf,
     },
     /// Finish host setup after installing the locked-build binary.
-    InstallTools,
+    InstallTools {
+        /// Stable rollout owner recorded on this host.
+        #[arg(long)]
+        owner: String,
+        /// Explicitly transfer from the previously recorded rollout owner.
+        #[arg(long)]
+        transfer_from: Option<String>,
+        /// Hold new admissions and wait for running leases before installation.
+        #[arg(long)]
+        drain: bool,
+        /// Maximum drain wait in milliseconds (1..=86400000; default 300000).
+        #[arg(long, requires = "drain", value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
+        drain_timeout_ms: Option<u64>,
+    },
     /// Compare installed CLI versions against the pinned tool manifest.
     CheckInstall {
         #[arg(long)]
@@ -138,7 +185,12 @@ enum Action {
         generation: Option<u64>,
     },
     #[command(hide = true)]
-    Scheduler,
+    Scheduler {
+        #[arg(long)]
+        wait_for_admission: bool,
+        #[arg(long)]
+        install_token: Option<String>,
+    },
     #[command(hide = true)]
     Watchdog { request: String, generation: u64 },
     #[command(hide = true)]
@@ -146,7 +198,21 @@ enum Action {
 }
 
 #[derive(Subcommand)]
+enum QueueAction {
+    /// Durably hold admissions; running leases finish and queued requests retain order.
+    Pause {
+        /// Age in milliseconds after which monitoring alerts (default fifteen minutes).
+        #[arg(long, default_value_t = 900_000, value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
+        alert_after_ms: u64,
+    },
+    /// Release a durable operator hold, including one retained after a crash.
+    Resume,
+}
+
+#[derive(Subcommand)]
 enum PolicyAction {
+    /// Validate and atomically update one policy key, with backup and audit hash.
+    Set { key: String, value: String },
     /// Print the effective host policy as JSON.
     Show,
     /// Write a measured default policy; use --force to replace an existing file.
@@ -183,11 +249,18 @@ fn execute(cli: Cli) -> Result<i32> {
                 ticket,
                 units: 1,
                 class: Some("arch-test".to_owned()),
+                memory: None,
                 command,
             },
         });
     }
-    if matches!(cli.command, Action::InstallTools) {
+    if let Action::InstallTools {
+        owner,
+        transfer_from,
+        drain,
+        drain_timeout_ms,
+    } = &cli.command
+    {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "HOME is not set"))?;
@@ -195,6 +268,9 @@ fn execute(cli: Cli) -> Result<i32> {
             &home,
             &std::env::current_exe()?,
             std::env::var_os("PATH").as_deref(),
+            owner,
+            transfer_from.as_deref(),
+            drain.then(|| std::time::Duration::from_millis(drain_timeout_ms.unwrap_or(300_000))),
         )
         .map(|()| 0);
     }
@@ -304,6 +380,13 @@ fn execute(cli: Cli) -> Result<i32> {
             }
             PolicyAction::Init { force } => {
                 ensure_policy(&config, *force)?;
+                writable::private_directory(&state)?;
+                policy::baseline(&state, &config, "init")?;
+                return Ok(0);
+            }
+            PolicyAction::Set { key, value } => {
+                let store = store::Store::open(&state, &config)?;
+                policy::set(&store, key, value)?;
                 return Ok(0);
             }
         }
@@ -318,13 +401,14 @@ fn execute(cli: Cli) -> Result<i32> {
             ticket,
             units,
             class,
+            memory,
             command,
         } => {
             let owner = owner.unwrap_or_else(default_owner);
             let ticket = ticket.unwrap_or_else(default_ticket);
             let class_name = class.as_deref().unwrap_or("periodic");
             let priority = runtime::priority_for_class(&store, class_name)?;
-            let id = runtime::enqueue(
+            let id = runtime::enqueue_with_memory(
                 &store,
                 &owner,
                 &ticket,
@@ -332,6 +416,7 @@ fn execute(cli: Cli) -> Result<i32> {
                 priority,
                 Some(class_name),
                 &command,
+                memory,
             )?;
             eprintln!("request={} output={}", id.0, store.path.display());
             let workers = runtime::spawn_worker(&store, &id)?.into_iter().collect();
@@ -339,6 +424,21 @@ fn execute(cli: Cli) -> Result<i32> {
         }
         Action::Status => {
             println!("{}", serde_json::to_string(&runtime::status(&store)?)?);
+            Ok(0)
+        }
+        Action::Queue { command } => {
+            match command {
+                QueueAction::Pause { alert_after_ms } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&queue::pause(&store, alert_after_ms)?)?
+                    );
+                }
+                QueueAction::Resume => {
+                    queue::resume(&store)?;
+                    scheduler::ensure(&store)?;
+                }
+            }
             Ok(0)
         }
         Action::Cancel { request } => {
@@ -372,7 +472,7 @@ fn execute(cli: Cli) -> Result<i32> {
             unreachable!("metrics handled before scheduler setup")
         }
         Action::Sample { .. } => unreachable!("sample handled before opening scheduler state"),
-        Action::InstallTools | Action::CheckInstall { .. } => {
+        Action::InstallTools { .. } | Action::CheckInstall { .. } => {
             unreachable!("installation commands handled before opening scheduler state")
         }
         Action::WorktreeRun { .. } => unreachable!("worktree command normalized at entry"),
@@ -386,8 +486,11 @@ fn execute(cli: Cli) -> Result<i32> {
             runtime::worker(&store, &RequestId(request), generation)?;
             Ok(0)
         }
-        Action::Scheduler => {
-            scheduler::run(&store)?;
+        Action::Scheduler {
+            wait_for_admission,
+            install_token,
+        } => {
+            scheduler::run(&store, wait_for_admission, install_token.as_deref())?;
             Ok(0)
         }
         Action::Watchdog {
@@ -895,6 +998,55 @@ fn emit_error(error: &error::Error, explicit_state: Option<&std::path::Path>) {
 mod tests {
     use super::*;
 
+    /// Provenance: SWM-429. Trace: FR-011-AC-7
+    #[test]
+    fn install_drain_cli_requires_a_positive_bounded_timeout_and_explicit_hold() {
+        for tail in [
+            vec!["--drain-timeout-ms", "100"],
+            vec!["--drain", "--drain-timeout-ms", "0"],
+            vec!["--drain", "--drain-timeout-ms", "86400001"],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    ["locked-build", "install-tools", "--owner", "fixture"]
+                        .into_iter()
+                        .chain(tail)
+                )
+                .is_err()
+            );
+        }
+        let parsed = Cli::try_parse_from([
+            "locked-build",
+            "install-tools",
+            "--owner",
+            "fixture",
+            "--drain",
+        ]);
+        assert!(matches!(
+            parsed,
+            Ok(Cli {
+                command: Action::InstallTools {
+                    drain: true,
+                    drain_timeout_ms: None,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "locked-build",
+                "install-tools",
+                "--owner",
+                "fixture",
+                "--drain",
+                "--drain-timeout-ms",
+                "86400000",
+            ])
+            .is_ok()
+        );
+    }
+
     /// Provenance: SWM-380. Trace: FR-011-AC-7
     #[test]
     fn lane_ix_homes_share_one_host_policy_and_store_identity() -> Result<()> {
@@ -1117,9 +1269,9 @@ mod tests {
     #[test]
     fn install_and_version_check_commands_accept_the_documented_inputs() {
         assert!(matches!(
-            Cli::try_parse_from(["locked-build", "install-tools"]),
+            Cli::try_parse_from(["locked-build", "install-tools", "--owner", "rollout"]),
             Ok(Cli {
-                command: Action::InstallTools,
+                command: Action::InstallTools { .. },
                 ..
             })
         ));
@@ -1321,6 +1473,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Provenance: SWM-406. Trace: FR-005-AC-1
+    #[test]
+    fn run_accepts_a_bounded_explicit_memory_request() {
+        assert!(
+            Cli::try_parse_from([
+                "locked-build",
+                "run",
+                "--memory",
+                "16GiB",
+                "--",
+                "cargo",
+                "test"
+            ])
+            .is_ok()
+        );
+        for (text, bytes) in [
+            ("16GiB", 17_179_869_184),
+            ("16GB", 16_000_000_000),
+            ("64MiB", 67_108_864),
+            ("1", 1),
+        ] {
+            assert_eq!(parse_memory(text), Ok(bytes));
+        }
+        for text in ["0", "-1GiB", "1.5GiB", "18446744073709551615GiB", "12watts"] {
+            assert!(parse_memory(text).is_err(), "{text}");
+        }
     }
 
     #[test]

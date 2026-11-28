@@ -444,6 +444,7 @@ pub(crate) mod tests {
 
     pub(crate) fn state(requests: Vec<crate::model::Request>) -> State {
         State {
+            min_reader_version: 1,
             schema_version: 1,
             store_id: "0123456789abcdef0123456789abcdef".to_owned(),
             config_path: "/policy.json".into(),
@@ -461,6 +462,8 @@ pub(crate) mod tests {
 
     pub(crate) fn request(sequence: u64, owner: String, phase: crate::model::Phase) -> Request {
         Request {
+            client: None,
+            client_pid_namespace: None,
             telemetry: Default::default(),
             supervision_detail: None,
             trace: Default::default(),
@@ -594,6 +597,8 @@ pub(crate) mod tests {
     #[test]
     fn exposition_excludes_ticket_request_command_and_environment_values() -> Result<()> {
         let mut request = crate::model::Request {
+            client: None,
+            client_pid_namespace: None,
             telemetry: Default::default(),
             supervision_detail: None,
             trace: Default::default(),

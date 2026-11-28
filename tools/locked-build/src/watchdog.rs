@@ -257,10 +257,30 @@ fn observe_with_clock(
         );
         let no_command_members =
             !processes.group_has_live_members(watchdog.pid, Some(watchdog.pid));
-        if (worker_lost || request.command_finished.is_some())
+        // The worker may still be polling a launch that never happened after
+        // its original client disappeared. Fence that launch in this same
+        // transaction; a live worker alone is not evidence of live work.
+        let command_absent = request
+            .lease_record
+            .as_ref()
+            .and_then(|record| record.command.as_ref())
+            .map_or(request.command_started_clock_ms.is_none(), |root| {
+                processes.birth_identity_absent(root) && crate::process::group_absent(root.pid)
+            });
+        let abandoned_launch = command_absent
+            && request.client_pid_namespace == crate::process::pid_namespace()?
+            && request
+                .client
+                .as_ref()
+                .is_some_and(|client| processes.birth_identity_absent(client));
+        if (worker_lost || abandoned_launch || request.command_finished.is_some())
             && no_command_members
             && probe_exit(watchdog.pid)?
         {
+            if abandoned_launch {
+                request.supervision_detail =
+                    Some("original client and command are absent; worker fenced".into());
+            }
             let completion = match &request.command_finished {
                 Some(outcome) => Completion {
                     code: outcome.code,
