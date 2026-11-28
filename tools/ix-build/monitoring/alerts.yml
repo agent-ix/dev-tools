@@ -4,7 +4,7 @@
       "name": "ix-build",
       "rules": [
         {
-          "alert": "LockedBuildQueueHoldOverdue",
+          "alert": "IxBuildQueueHoldOverdue",
           "expr": "(ix_build_queue_paused == 1) and on(host) (ix_build_queue_hold_age_seconds > on(host) ix_build_queue_hold_alert_after_seconds)",
           "for": "1m",
           "labels": {"severity": "warning"},
@@ -110,7 +110,7 @@
           "expr": "(sum by (host) (rate(ix_build_memory_peak_bytes_count[15m])) or on (host) (0 * sum by (host) (rate(ix_build_builds_total[15m])))) / sum by (host) (rate(ix_build_builds_total[15m]))"
         },
         {
-          "alert": "LockedBuildMustFixWaitHigh",
+          "alert": "IxBuildMustFixWaitHigh",
           "expr": "ix_build:wait_p95_seconds{class=\"must-fix\"} > 60",
           "for": "5m",
           "labels": {
@@ -121,7 +121,7 @@
           }
         },
         {
-          "alert": "LockedBuildPointWaitHigh",
+          "alert": "IxBuildPointWaitHigh",
           "expr": "ix_build:wait_p95_seconds{class=\"point\"} > 300",
           "for": "5m",
           "labels": {
@@ -132,7 +132,7 @@
           }
         },
         {
-          "alert": "LockedBuildBlockWaitHigh",
+          "alert": "IxBuildBlockWaitHigh",
           "expr": "ix_build:wait_p95_seconds{class=\"block\"} > 900",
           "for": "5m",
           "labels": {
@@ -143,7 +143,7 @@
           }
         },
         {
-          "alert": "LockedBuildBackgroundWaitHigh",
+          "alert": "IxBuildBackgroundWaitHigh",
           "expr": "ix_build:wait_p95_seconds{class=~\"periodic|kani|arch-test\"} > 3600",
           "for": "5m",
           "labels": {
@@ -154,7 +154,7 @@
           }
         },
         {
-          "alert": "LockedBuildIdleWithQueue",
+          "alert": "IxBuildIdleWithQueue",
           "expr": "ix_build:idle_with_queue > 0",
           "for": "5m",
           "labels": {
@@ -165,7 +165,7 @@
           }
         },
         {
-          "alert": "LockedBuildQueueStuck",
+          "alert": "IxBuildQueueStuck",
           "expr": "ix_build:queue_stuck > 0",
           "for": "5m",
           "labels": {
@@ -176,7 +176,7 @@
           }
         },
         {
-          "alert": "LockedBuildVersionSkew",
+          "alert": "IxBuildVersionSkew",
           "expr": "count(count by (version, commit, dirty) (ix_build_info)) > 1",
           "for": "10m",
           "labels": {
@@ -187,7 +187,7 @@
           }
         },
         {
-          "alert": "LockedBuildPolicySkew",
+          "alert": "IxBuildPolicySkew",
           "expr": "count(count by (policy_hash) (ix_build_info)) > 1",
           "for": "10m",
           "labels": {
@@ -198,7 +198,7 @@
           }
         },
         {
-          "alert": "LockedBuildHostNoMetrics",
+          "alert": "IxBuildHostNoMetrics",
           "expr": "(up{job=\"node\"} == 1) unless on (host) ix_build_export_timestamp_seconds",
           "for": "5m",
           "labels": {
@@ -209,7 +209,7 @@
           }
         },
         {
-          "alert": "LockedBuildNodeDown",
+          "alert": "IxBuildNodeDown",
           "expr": "(up{job=\"node\"} == 0) or absent(up{job=\"node\"})",
           "for": "5m",
           "labels": {
@@ -220,7 +220,7 @@
           }
         },
         {
-          "alert": "LockedBuildExportStale",
+          "alert": "IxBuildExportStale",
           "expr": "time() - ix_build_export_timestamp_seconds > 600",
           "for": "0m",
           "labels": {
@@ -231,7 +231,7 @@
           }
         },
         {
-          "alert": "LockedBuildExportError",
+          "alert": "IxBuildExportError",
           "expr": "ix_build_export_error > 0",
           "for": "1m",
           "labels": {
@@ -242,7 +242,7 @@
           }
         },
         {
-          "alert": "LockedBuildMemoryMeasurementLow",
+          "alert": "IxBuildMemoryMeasurementLow",
           "expr": "ix_build:memory_measurement_ratio < 0.8",
           "for": "10m",
           "labels": {
@@ -253,7 +253,7 @@
           }
         },
         {
-          "alert": "LockedBuildRepeatedFailure",
+          "alert": "IxBuildRepeatedFailure",
           "expr": "sum by (host, code) (increase(ix_build_failures_total[15m])) >= 3",
           "for": "0m",
           "labels": {
@@ -264,7 +264,7 @@
           }
         },
         {
-          "alert": "LockedBuildLeakedLease",
+          "alert": "IxBuildLeakedLease",
           "expr": "ix_build_leases_missing_process > 0",
           "for": "2m",
           "labels": {
@@ -275,7 +275,7 @@
           }
         },
         {
-          "alert": "LockedBuildUnleasedProcess",
+          "alert": "IxBuildUnleasedProcess",
           "expr": "ix_build_unleased_build_processes > 0",
           "for": "5m",
           "labels": {
@@ -286,7 +286,7 @@
           }
         },
         {
-          "alert": "LockedBuildStateDirFreeLow",
+          "alert": "IxBuildStateDirFreeLow",
           "expr": "ix_build_state_dir_free_bytes < 1073741824",
           "for": "5m",
           "labels": {
@@ -297,7 +297,7 @@
           }
         },
         {
-          "alert": "LockedBuildSnapshotLarge",
+          "alert": "IxBuildSnapshotLarge",
           "expr": "ix_build_snapshot_size_bytes > 52428800",
           "for": "5m",
           "labels": {
@@ -308,7 +308,7 @@
           }
         },
         {
-          "alert": "LockedBuildMemoryHeadroomLow",
+          "alert": "IxBuildMemoryHeadroomLow",
           "expr": "ix_build_running_memory_headroom_ratio < 0.1",
           "for": "2m",
           "labels": {
@@ -319,7 +319,7 @@
           }
         },
         {
-          "alert": "LockedBuildRunningStuck",
+          "alert": "IxBuildRunningStuck",
           "expr": "ix_build_oldest_running_seconds > on (host) ix_build_policy_hold_seconds",
           "for": "5m",
           "labels": {

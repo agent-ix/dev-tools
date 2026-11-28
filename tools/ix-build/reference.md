@@ -48,7 +48,7 @@ Rules:
    and recovery journal retained, rather than admitting into a mixed install.
 4. A crash retains Held. Explicit `queue resume` restores an uncommitted backup
    first. A durable committed journal retains the verified replacement. Hold age,
-   bound and paused gauges drive `LockedBuildQueueHoldOverdue` after one minute
+   bound and paused gauges drive `IxBuildQueueHoldOverdue` after one minute
    beyond the configured deadline.
 5. Queued supervisors acknowledge the hold, retain their lifetime lock and exec
    the successor in place. Environment, PID namespace and stdio survive. The

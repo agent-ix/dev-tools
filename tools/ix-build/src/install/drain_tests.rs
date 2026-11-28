@@ -86,6 +86,47 @@ impl Fixture {
     }
 }
 
+/// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-431.
+#[test]
+fn first_rename_refuses_retained_legacy_waiters_without_changing_the_queue() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let queued = fixture.enqueue()?;
+    std::fs::write(
+        fixture.home.join(".local/bin/locked-build"),
+        b"legacy artifact",
+    )?;
+    let before = serde_json::to_value(fixture.store.snapshot()?.0.find(&queued)?)?;
+    assert!(
+        fixture
+            .install(Duration::from_secs(1), || Ok(()), || Ok(()))
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(fixture.store.snapshot()?.0.find(&queued)?)?,
+        before
+    );
+    assert_eq!(
+        std::fs::read(fixture.home.join(".local/bin/locked-build"))?,
+        b"legacy artifact"
+    );
+    assert!(fixture.store.queue_hold()?.is_none());
+    fixture.store.transaction(|state, _| {
+        let request = state.find_mut(&queued)?;
+        request.phase = Phase::Succeeded;
+        request.ended_at_ms = Some(crate::runtime::now_ms()?);
+        request.ended_clock_ms = Some(crate::runtime::clock_ms()?);
+        Ok(())
+    })?;
+    // A terminal record still has an original waiter (this test process).
+    assert!(require_legacy_readers_finished(&fixture.store.path).is_err());
+    fixture.store.transaction(|state, _| {
+        state.find_mut(&queued)?.client = None;
+        Ok(())
+    })?;
+    require_legacy_readers_finished(&fixture.store.path)?;
+    Ok(())
+}
+
 #[test]
 fn install_preflight_precedes_normal_hold_and_drain_idle_check() -> Result<()> {
     for drain in [false, true] {

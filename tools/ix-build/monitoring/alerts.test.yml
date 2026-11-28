@@ -13,8 +13,8 @@
         {"series": "ix_build_queue_hold_alert_after_seconds{host=\"fixture\"}", "values": "120+0x10"}
       ],
       "alert_rule_test": [
-        {"eval_time": "1m", "alertname": "LockedBuildQueueHoldOverdue", "exp_alerts": []},
-        {"eval_time": "4m", "alertname": "LockedBuildQueueHoldOverdue", "exp_alerts": [
+        {"eval_time": "1m", "alertname": "IxBuildQueueHoldOverdue", "exp_alerts": []},
+        {"eval_time": "4m", "alertname": "IxBuildQueueHoldOverdue", "exp_alerts": [
           {"exp_labels": {"host": "fixture", "severity": "warning"}, "exp_annotations": {
             "summary": "Build admission hold overdue on fixture",
             "description": "Admission is held past its configured deadline. Inspect status and use queue resume after resolving the cause."
@@ -23,7 +23,7 @@
       ]
     },
     {
-      "name": "LockedBuildMustFixWaitHigh",
+      "name": "IxBuildMustFixWaitHigh",
       "interval": "1m",
       "input_series": [
         {
@@ -41,11 +41,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildMustFixWaitHigh\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildMustFixWaitHigh\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildMustFixWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"must-fix\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildMustFixWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"must-fix\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -53,7 +53,7 @@
       ]
     },
     {
-      "name": "LockedBuildPointWaitHigh",
+      "name": "IxBuildPointWaitHigh",
       "interval": "1m",
       "input_series": [
         {
@@ -71,11 +71,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildPointWaitHigh\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildPointWaitHigh\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildPointWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"point\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildPointWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"point\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -83,7 +83,7 @@
       ]
     },
     {
-      "name": "LockedBuildBlockWaitHigh",
+      "name": "IxBuildBlockWaitHigh",
       "interval": "1m",
       "input_series": [
         {
@@ -101,11 +101,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildBlockWaitHigh\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildBlockWaitHigh\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildBlockWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"block\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildBlockWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"block\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -113,7 +113,7 @@
       ]
     },
     {
-      "name": "LockedBuildBackgroundWaitHigh",
+      "name": "IxBuildBackgroundWaitHigh",
       "interval": "1m",
       "input_series": [
         {
@@ -131,11 +131,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"periodic\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"periodic\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -143,7 +143,7 @@
       ]
     },
     {
-      "name": "LockedBuildBackgroundWaitHigh",
+      "name": "IxBuildBackgroundWaitHigh",
       "interval": "1m",
       "input_series": [
         {
@@ -161,11 +161,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"kani\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"kani\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -173,7 +173,7 @@
       ]
     },
     {
-      "name": "LockedBuildBackgroundWaitHigh",
+      "name": "IxBuildBackgroundWaitHigh",
       "interval": "1m",
       "input_series": [
         {
@@ -191,11 +191,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"arch-test\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildBackgroundWaitHigh\",alertstate=\"firing\",severity=\"warning\",class=\"arch-test\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -203,7 +203,7 @@
       ]
     },
     {
-      "name": "LockedBuildIdleWithQueue",
+      "name": "IxBuildIdleWithQueue",
       "interval": "1m",
       "input_series": [
         {
@@ -217,11 +217,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildIdleWithQueue\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildIdleWithQueue\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildIdleWithQueue\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildIdleWithQueue\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -229,7 +229,7 @@
       ]
     },
     {
-      "name": "LockedBuildQueueStuck",
+      "name": "IxBuildQueueStuck",
       "interval": "1m",
       "input_series": [
         {
@@ -247,11 +247,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildQueueStuck\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildQueueStuck\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildQueueStuck\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildQueueStuck\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -259,7 +259,7 @@
       ]
     },
     {
-      "name": "LockedBuildVersionSkew",
+      "name": "IxBuildVersionSkew",
       "interval": "1m",
       "input_series": [
         {
@@ -273,11 +273,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildVersionSkew\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildVersionSkew\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildVersionSkew\",alertstate=\"firing\",severity=\"warning\"}",
+              "labels": "ALERTS{alertname=\"IxBuildVersionSkew\",alertstate=\"firing\",severity=\"warning\"}",
               "value": 1
             }
           ]
@@ -285,7 +285,7 @@
       ]
     },
     {
-      "name": "LockedBuildPolicySkew",
+      "name": "IxBuildPolicySkew",
       "interval": "1m",
       "input_series": [
         {
@@ -299,11 +299,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildPolicySkew\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildPolicySkew\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildPolicySkew\",alertstate=\"firing\",severity=\"warning\"}",
+              "labels": "ALERTS{alertname=\"IxBuildPolicySkew\",alertstate=\"firing\",severity=\"warning\"}",
               "value": 1
             }
           ]
@@ -311,7 +311,7 @@
       ]
     },
     {
-      "name": "LockedBuildHostNoMetrics",
+      "name": "IxBuildHostNoMetrics",
       "interval": "1m",
       "input_series": [
         {
@@ -321,11 +321,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildHostNoMetrics\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildHostNoMetrics\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildHostNoMetrics\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",job=\"node\"}",
+              "labels": "ALERTS{alertname=\"IxBuildHostNoMetrics\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",job=\"node\"}",
               "value": 1
             }
           ]
@@ -333,7 +333,7 @@
       ]
     },
     {
-      "name": "LockedBuildNodeDown",
+      "name": "IxBuildNodeDown",
       "interval": "1m",
       "input_series": [
         {
@@ -343,11 +343,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildNodeDown\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildNodeDown\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildNodeDown\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",job=\"node\"}",
+              "labels": "ALERTS{alertname=\"IxBuildNodeDown\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",job=\"node\"}",
               "value": 1
             }
           ]
@@ -355,16 +355,16 @@
       ]
     },
     {
-      "name": "LockedBuildNodeDown",
+      "name": "IxBuildNodeDown",
       "interval": "1m",
       "input_series": [],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildNodeDown\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildNodeDown\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildNodeDown\",alertstate=\"firing\",severity=\"warning\",job=\"node\"}",
+              "labels": "ALERTS{alertname=\"IxBuildNodeDown\",alertstate=\"firing\",severity=\"warning\",job=\"node\"}",
               "value": 1
             }
           ]
@@ -372,7 +372,7 @@
       ]
     },
     {
-      "name": "LockedBuildExportStale",
+      "name": "IxBuildExportStale",
       "interval": "1m",
       "input_series": [
         {
@@ -382,11 +382,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildExportStale\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildExportStale\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildExportStale\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildExportStale\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -394,7 +394,7 @@
       ]
     },
     {
-      "name": "LockedBuildExportError",
+      "name": "IxBuildExportError",
       "interval": "1m",
       "input_series": [
         {
@@ -404,11 +404,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildExportError\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildExportError\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildExportError\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildExportError\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -416,7 +416,7 @@
       ]
     },
     {
-      "name": "LockedBuildMemoryMeasurementLow",
+      "name": "IxBuildMemoryMeasurementLow",
       "interval": "1m",
       "input_series": [
         {
@@ -430,11 +430,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildMemoryMeasurementLow\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildMemoryMeasurementLow\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildMemoryMeasurementLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildMemoryMeasurementLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -442,7 +442,7 @@
       ]
     },
     {
-      "name": "LockedBuildRepeatedFailure",
+      "name": "IxBuildRepeatedFailure",
       "interval": "1m",
       "input_series": [
         {
@@ -452,11 +452,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildRepeatedFailure\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildRepeatedFailure\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildRepeatedFailure\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",code=\"IB_COMMAND_EXIT\"}",
+              "labels": "ALERTS{alertname=\"IxBuildRepeatedFailure\",alertstate=\"firing\",severity=\"warning\",host=\"draco\",code=\"IB_COMMAND_EXIT\"}",
               "value": 1
             }
           ]
@@ -464,7 +464,7 @@
       ]
     },
     {
-      "name": "LockedBuildLeakedLease",
+      "name": "IxBuildLeakedLease",
       "interval": "1m",
       "input_series": [
         {
@@ -474,11 +474,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildLeakedLease\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildLeakedLease\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildLeakedLease\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildLeakedLease\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -486,7 +486,7 @@
       ]
     },
     {
-      "name": "LockedBuildUnleasedProcess",
+      "name": "IxBuildUnleasedProcess",
       "interval": "1m",
       "input_series": [
         {
@@ -496,11 +496,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildUnleasedProcess\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildUnleasedProcess\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildUnleasedProcess\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildUnleasedProcess\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -508,7 +508,7 @@
       ]
     },
     {
-      "name": "LockedBuildStateDirFreeLow",
+      "name": "IxBuildStateDirFreeLow",
       "interval": "1m",
       "input_series": [
         {
@@ -518,11 +518,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildStateDirFreeLow\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildStateDirFreeLow\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildStateDirFreeLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildStateDirFreeLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -530,7 +530,7 @@
       ]
     },
     {
-      "name": "LockedBuildSnapshotLarge",
+      "name": "IxBuildSnapshotLarge",
       "interval": "1m",
       "input_series": [
         {
@@ -540,11 +540,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildSnapshotLarge\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildSnapshotLarge\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildSnapshotLarge\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildSnapshotLarge\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -552,7 +552,7 @@
       ]
     },
     {
-      "name": "LockedBuildMemoryHeadroomLow",
+      "name": "IxBuildMemoryHeadroomLow",
       "interval": "1m",
       "input_series": [
         {
@@ -562,11 +562,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildMemoryHeadroomLow\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildMemoryHeadroomLow\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildMemoryHeadroomLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildMemoryHeadroomLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -574,7 +574,7 @@
       ]
     },
     {
-      "name": "LockedBuildRunningStuck",
+      "name": "IxBuildRunningStuck",
       "interval": "1m",
       "input_series": [
         {
@@ -588,11 +588,11 @@
       ],
       "promql_expr_test": [
         {
-          "expr": "ALERTS{alertname=\"LockedBuildRunningStuck\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildRunningStuck\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildRunningStuck\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildRunningStuck\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -673,11 +673,11 @@
           ]
         },
         {
-          "expr": "ALERTS{alertname=\"LockedBuildMemoryMeasurementLow\",alertstate=\"firing\"}",
+          "expr": "ALERTS{alertname=\"IxBuildMemoryMeasurementLow\",alertstate=\"firing\"}",
           "eval_time": "20m",
           "exp_samples": [
             {
-              "labels": "ALERTS{alertname=\"LockedBuildMemoryMeasurementLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
+              "labels": "ALERTS{alertname=\"IxBuildMemoryMeasurementLow\",alertstate=\"firing\",severity=\"warning\",host=\"draco\"}",
               "value": 1
             }
           ]
@@ -1104,7 +1104,7 @@
       "alert_rule_test": [
         {
           "eval_time": "20m",
-          "alertname": "LockedBuildVersionSkew",
+          "alertname": "IxBuildVersionSkew",
           "exp_alerts": []
         }
       ]

@@ -30,12 +30,180 @@ struct Inner {
 struct Journal {
     stage: String,
     entries: Vec<Entry>,
+    #[serde(default)]
+    monitoring: Option<MonitoringSnapshot>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
     path: PathBuf,
     original: Original,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MonitoringSnapshot {
+    home: PathBuf,
+    active: Vec<String>,
+    enabled: Vec<String>,
+}
+
+fn monitoring_command(args: &[std::ffi::OsString]) -> Result<bool> {
+    Ok(Command::new(if cfg!(target_os = "macos") {
+        "launchctl"
+    } else {
+        "systemctl"
+    })
+    .args(args)
+    .output()?
+    .status
+    .success())
+}
+
+impl MonitoringSnapshot {
+    fn units() -> &'static [&'static str] {
+        if cfg!(target_os = "macos") {
+            &[
+                "com.agent-ix.locked-build-metrics",
+                "com.agent-ix.locked-build-prune",
+                "com.agentix.locked-build-metrics",
+                "com.agent-ix.ix-build-metrics",
+                "com.agent-ix.ix-build-prune",
+            ]
+        } else {
+            &[
+                "locked-build-metrics.timer",
+                "locked-build-prune.timer",
+                "ix-build-metrics.timer",
+                "ix-build-prune.timer",
+            ]
+        }
+    }
+
+    fn file(home: &Path, unit: &str) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            home.join("Library/LaunchAgents")
+                .join(format!("{unit}.plist"))
+        } else {
+            home.join(".config/systemd/user").join(unit)
+        }
+    }
+
+    fn capture(home: &Path) -> Result<Self> {
+        Self::capture_with(home, &mut monitoring_command)
+    }
+
+    fn capture_with(
+        home: &Path,
+        control: &mut impl FnMut(&[std::ffi::OsString]) -> Result<bool>,
+    ) -> Result<Self> {
+        let mut snapshot = Self {
+            home: home.to_owned(),
+            active: Vec::new(),
+            enabled: Vec::new(),
+        };
+        for unit in Self::units() {
+            if !Self::file(home, unit).exists() {
+                continue;
+            }
+            let active = if cfg!(target_os = "macos") {
+                control(
+                    &["print", &format!("gui/{}/{unit}", nix::unistd::getuid())]
+                        .map(std::ffi::OsString::from),
+                )?
+            } else {
+                if control(&["--user", "is-enabled", unit].map(std::ffi::OsString::from))? {
+                    snapshot.enabled.push((*unit).into());
+                }
+                control(&["--user", "is-active", unit].map(std::ffi::OsString::from))?
+            };
+            if active {
+                snapshot.active.push((*unit).into());
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn stop(&self) -> Result<()> {
+        self.stop_with(&mut monitoring_command)
+    }
+
+    fn stop_with(
+        &self,
+        control: &mut impl FnMut(&[std::ffi::OsString]) -> Result<bool>,
+    ) -> Result<()> {
+        for unit in Self::units() {
+            if !Self::file(&self.home, unit).exists() {
+                continue;
+            }
+            let status = if cfg!(target_os = "macos") {
+                let target = format!("gui/{}/{unit}", nix::unistd::getuid());
+                if !control(&["print", &target].map(std::ffi::OsString::from))? {
+                    continue;
+                }
+                control(&["bootout", &target].map(std::ffi::OsString::from))?
+            } else {
+                let service = unit.replace(".timer", ".service");
+                control(
+                    &["--user", "disable", "--now", unit, &service].map(std::ffi::OsString::from),
+                )?
+            };
+            if !status {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "monitoring rollback stop failed",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn resume(&self) -> Result<()> {
+        self.resume_with(&mut monitoring_command)
+    }
+
+    fn resume_with(
+        &self,
+        control: &mut impl FnMut(&[std::ffi::OsString]) -> Result<bool>,
+    ) -> Result<()> {
+        if !cfg!(target_os = "macos") {
+            if self.active.is_empty() && self.enabled.is_empty() {
+                return Ok(());
+            }
+            if !control(&["--user", "daemon-reload"].map(std::ffi::OsString::from))? {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "monitoring rollback reload failed",
+                ));
+            }
+            for unit in &self.enabled {
+                if !control(&["--user", "enable", unit].map(std::ffi::OsString::from))? {
+                    return Err(Error::new(
+                        ErrorCode::Configuration,
+                        "monitoring rollback enable failed",
+                    ));
+                }
+            }
+        }
+        for unit in &self.active {
+            let status = if cfg!(target_os = "macos") {
+                control(&[
+                    "bootstrap".into(),
+                    format!("gui/{}", nix::unistd::getuid()).into(),
+                    Self::file(&self.home, unit).into_os_string(),
+                ])?
+            } else {
+                control(&["--user", "start", unit].map(std::ffi::OsString::from))?
+            };
+            if !status {
+                return Err(Error::new(
+                    ErrorCode::Configuration,
+                    "monitoring rollback restart failed",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -147,6 +315,7 @@ impl Transaction<Idle> {
         for plist in [
             "com.agent-ix.locked-build-metrics.plist",
             "com.agent-ix.locked-build-prune.plist",
+            "com.agentix.locked-build-metrics.plist",
             "com.agent-ix.ix-build-metrics.plist",
             "com.agent-ix.ix-build-prune.plist",
         ] {
@@ -155,6 +324,7 @@ impl Transaction<Idle> {
         let mut journal = Journal {
             stage: "before_swap".into(),
             entries: Vec::new(),
+            monitoring: Some(MonitoringSnapshot::capture(&inner.home)?),
         };
         for (index, path) in paths.into_iter().enumerate() {
             let mut entry = Entry {
@@ -343,6 +513,9 @@ fn restore(journal: &Journal) -> Result<()> {
             "unknown install transaction stage; refusing recovery",
         ));
     }
+    if let Some(monitoring) = &journal.monitoring {
+        monitoring.stop()?;
+    }
     for entry in journal.entries.iter().rev() {
         if matches!(entry.original, Original::Directory) {
             continue;
@@ -367,6 +540,9 @@ fn restore(journal: &Journal) -> Result<()> {
         {
             std::fs::File::open(parent)?.sync_all()?;
         }
+    }
+    if let Some(monitoring) = &journal.monitoring {
+        monitoring.resume()?;
     }
     Ok(())
 }
@@ -406,6 +582,72 @@ pub(super) fn recover(store: &crate::store::Store) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trace: FR-011-AC-7, FR-015-AC-10. Provenance: SWM-431.
+    #[test]
+    fn monitoring_rollback_restarts_only_previously_active_producers() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let old = MonitoringSnapshot::units()[0];
+        let new = MonitoringSnapshot::units()[MonitoringSnapshot::units().len() - 2];
+        for unit in [old, new] {
+            let path = MonitoringSnapshot::file(root.path(), unit);
+            std::fs::create_dir_all(
+                path.parent()
+                    .ok_or_else(|| Error::new(ErrorCode::State, "unit parent"))?,
+            )?;
+            std::fs::write(path, b"unit")?;
+        }
+        let mut calls = Vec::new();
+        let new_running = std::cell::Cell::new(false);
+        let mut control = |args: &[std::ffi::OsString]| -> Result<bool> {
+            let args: Vec<String> = args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let query = args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "print" | "is-active" | "is-enabled"));
+            let old_active = args.iter().any(|arg| arg.ends_with(old))
+                || (new_running.get() && args.iter().any(|arg| arg.ends_with(new)));
+            calls.push(args);
+            Ok(!query || old_active)
+        };
+        let snapshot = MonitoringSnapshot::capture_with(root.path(), &mut control)?;
+        assert_eq!(snapshot.active, [old]);
+        let bytes = serde_json::to_vec(&snapshot)?;
+        let recovered: MonitoringSnapshot = serde_json::from_slice(&bytes)?;
+        new_running.set(true);
+        recovered.stop_with(&mut control)?;
+        recovered.resume_with(&mut control)?;
+        if cfg!(target_os = "macos") {
+            assert!(
+                calls
+                    .iter()
+                    .any(|args| args[0] == "bootout" && args[1].ends_with(old))
+            );
+            assert!(
+                calls
+                    .iter()
+                    .any(|args| args[0] == "bootout" && args[1].ends_with(new))
+            );
+            let starts: Vec<_> = calls.iter().filter(|args| args[0] == "bootstrap").collect();
+            assert_eq!(starts.len(), 1);
+            assert!(starts[0][2].ends_with(&format!("{old}.plist")));
+        } else {
+            assert!(
+                calls
+                    .iter()
+                    .any(|args| args.iter().any(|arg| arg == "disable")
+                        && args.iter().any(|arg| arg == new))
+            );
+            let starts: Vec<_> = calls.iter().filter(|args| args[1] == "start").collect();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(starts[0][2], old);
+        }
+        let mut fail = |_: &[std::ffi::OsString]| Ok(false);
+        assert!(recovered.resume_with(&mut fail).is_err());
+        Ok(())
+    }
 
     #[test]
     fn install_transaction_crash_at_each_step_preserves_hold_and_recovers_backup() -> Result<()> {

@@ -115,18 +115,32 @@ pub(crate) fn publish_file(path: &Path, bytes: &[u8], force: bool) -> Result<boo
 }
 
 pub(crate) fn shared_root() -> Result<PathBuf> {
-    let path = shared_path();
+    shared_root_at(
+        &Path::new("/tmp").join(format!("ix-build-{}", nix::unistd::geteuid())),
+        &legacy_shared_path(),
+    )
+}
+
+fn shared_root_at(new: &Path, legacy: &Path) -> Result<PathBuf> {
+    if new.try_exists()? && legacy.try_exists()? && new.canonicalize()? != legacy.canonicalize()? {
+        return Err(Error::new(
+            ErrorCode::State,
+            "both namespace paths exist; preserving both",
+        ));
+    }
+    let path = existing_root(new.to_owned(), legacy.to_owned());
     // Only the exact, owned legacy-store alias created by install-tools is valid.
-    let legacy = legacy_shared_path();
     if fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
         let metadata = fs::symlink_metadata(&path)?;
-        if metadata.uid() != nix::unistd::geteuid().as_raw() || fs::read_link(&path)? != legacy {
+        if metadata.uid() != nix::unistd::geteuid().as_raw()
+            || path.canonicalize()? != legacy.canonicalize()?
+        {
             return Err(Error::new(
                 ErrorCode::State,
                 "unexpected shared namespace alias",
             ));
         }
-        return private_directory(&legacy);
+        return private_directory(legacy);
     }
     private_directory(&path)
 }
@@ -263,6 +277,7 @@ mod tests {
         let inode = fs::metadata(old.join("state.json"))?.ino();
         migrate_namespace(&new, &old)?;
         migrate_namespace(&new, &old)?;
+        assert_eq!(shared_root_at(&new, &old)?, old);
         assert_eq!(fs::read(new.join("state.json"))?, b"running lease");
         assert_eq!(fs::read(new.join("policy-ledger.json"))?, b"audited policy");
         assert_eq!(fs::metadata(new.join("state.json"))?.ino(), inode);
@@ -276,6 +291,7 @@ mod tests {
         let conflict = private_directory(&root.path().join("conflict"))?;
         fs::write(conflict.join("state.json"), b"other queue")?;
         assert!(migrate_namespace(&conflict, &old).is_err());
+        assert!(shared_root_at(&conflict, &old).is_err());
         assert_eq!(fs::read(conflict.join("state.json"))?, b"other queue");
         Ok(())
     }

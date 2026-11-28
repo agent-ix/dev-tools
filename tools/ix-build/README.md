@@ -31,8 +31,10 @@ aliases to those exact directories. This preserves open lock inodes, queued
 and running lease paths, policy history and the event ledger. Before
 installation, the new binary selects the existing namespace automatically.
 Conflicting old and new stores cause an error; neither is overwritten.
-Fresh hosts create only the new paths. The usual idle/drain install gate still
-applies, so running builds finish before the binary replacement.
+Fresh hosts create only the new paths. The initial rename requires an empty queue and all original callers to exit;
+it refuses retained legacy waiters even with `--drain`, because they cannot
+read new `IB_*` records. No queued request is cancelled. Subsequent ix-build
+upgrades retain the usual idle/drain gate.
 
 Environment variables now use `IX_BUILD_*`. The old lease marker remains
 readable for commands admitted before migration. New diagnostics emit `IB_*`;

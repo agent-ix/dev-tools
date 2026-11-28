@@ -214,6 +214,11 @@ fn install_tools_owned(
         (checked.hold(drain_timeout)?, measured)
     };
     let idle = held.wait_idle()?;
+    if std::fs::symlink_metadata(home.join(".local/bin/locked-build"))
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.is_symlink())
+    {
+        require_legacy_readers_finished(&shared)?;
+    }
     if shared.join("policy-ledger.json").exists() {
         crate::policy::check(&shared, &shared.join("policy.json"))?;
     }
@@ -330,6 +335,31 @@ fn install_tools_owned(
     println!("cargo shim: {}", shim_path.display());
     println!("binary: {}", installed_path.display());
     println!("version record: {}", record_path.display());
+    Ok(())
+}
+
+// The old reader cannot decode IB_* records. A first rename must not hand off
+// retained old waiters; later ix-build installs retain the normal drain route.
+fn require_legacy_readers_finished(shared: &Path) -> Result<()> {
+    let bytes = match std::fs::read(shared.join("state.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let state: crate::model::State = serde_json::from_slice(&bytes)?;
+    let processes = crate::process::Processes::read();
+    if state.requests.iter().any(|request| {
+        !request.phase.terminal()
+            || request
+                .client
+                .as_ref()
+                .is_some_and(|client| !processes.birth_identity_absent(client))
+    }) {
+        return Err(Error::new(
+            ErrorCode::Configuration,
+            "first ix-build migration requires an empty queue and all legacy callers to exit; retry after they finish, without retaining queued clients through --drain",
+        ));
+    }
     Ok(())
 }
 
@@ -951,7 +981,7 @@ mod tests {
             Some(4)
         );
         let profile = std::fs::read_to_string(home.join(".zshrc"))?;
-        assert!(!profile.contains("locked-build"));
+        assert!(!profile.contains(".local/lib/locked-build/shims"));
         assert_eq!(profile.lines().count(), 1);
         assert!(profile.contains(".local/lib/ix-build/shims"));
         Ok(())
@@ -1635,6 +1665,7 @@ fn retire_legacy_monitoring(home: &Path) -> Result<()> {
         for label in [
             "com.agent-ix.locked-build-metrics",
             "com.agent-ix.locked-build-prune",
+            "com.agentix.locked-build-metrics",
         ] {
             let target = format!("{domain}/{label}");
             if Command::new("launchctl")

@@ -9,7 +9,7 @@ Use its counters to compare completed work and its gauges to inspect current que
 Admission holds add three host-only gauges: `ix_build_queue_paused` is 1 in Held
 and 0 in Open; `ix_build_queue_hold_age_seconds` is the persisted hold's UTC age;
 `ix_build_queue_hold_alert_after_seconds` is its configured alert bound. The age
-and bound are zero in Open. LockedBuildQueueHoldOverdue fires after the age
+and bound are zero in Open. IxBuildQueueHoldOverdue fires after the age
 exceeds the bound for one minute. Hold IDs and notes are never metric labels.
 
 ## Fields

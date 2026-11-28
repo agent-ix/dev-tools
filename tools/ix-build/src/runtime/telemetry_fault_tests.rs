@@ -43,7 +43,7 @@ fn assert_fault_alert(text: &str, alert: &str) -> Result<()> {
     }
     let host = "your-build-host";
     inputs.push(json!({"series":format!("up{{host=\"{host}\",job=\"node\"}}"),"values":"1+0x30"}));
-    let labels = if alert == "LockedBuildHostNoMetrics" {
+    let labels = if alert == "IxBuildHostNoMetrics" {
         format!("host=\"{host}\",job=\"node\"")
     } else {
         format!("host=\"{host}\"")
@@ -135,7 +135,7 @@ fn telemetry_fault_killed_scheduler_fires_stuck_queue_alert() -> Result<()> {
     scheduler.0.kill()?;
     scheduler.0.wait()?;
     let text = metrics(&store)?;
-    assert_fault_alert(&text, "LockedBuildQueueStuck")?;
+    assert_fault_alert(&text, "IxBuildQueueStuck")?;
     cancel(&store, &id)?;
     drop(spawn_lock);
     Ok(())
@@ -181,7 +181,7 @@ fn telemetry_fault_orphan_rustc_fires_unleased_process_alert() -> Result<()> {
         );
         std::thread::yield_now();
     }
-    assert_fault_alert(&metrics(&store)?, "LockedBuildUnleasedProcess")?;
+    assert_fault_alert(&metrics(&store)?, "IxBuildUnleasedProcess")?;
     Ok(())
 }
 
@@ -245,7 +245,7 @@ fn telemetry_fault_stopped_timer_and_unavailable_store_keep_previous_samples() -
     }
     let previous = std::fs::read_to_string(&output)?;
     // Stop this fixture's refreshes; replay twenty minutes with the last textfile.
-    assert_fault_alert(&previous, "LockedBuildExportStale")?;
+    assert_fault_alert(&previous, "IxBuildExportStale")?;
     std::fs::rename(&store.path, root.path().join("unavailable-store"))?;
     let fallback = cli_export(&binary, &store, &output)?;
     for line in previous
@@ -258,7 +258,7 @@ fn telemetry_fault_stopped_timer_and_unavailable_store_keep_previous_samples() -
         );
     }
     assert!(fallback.contains("ix_build_export_error{host=\"your-build-host\"} 1"));
-    assert_fault_alert(&fallback, "LockedBuildExportError")?;
+    assert_fault_alert(&fallback, "IxBuildExportError")?;
     Ok(())
 }
 
@@ -275,7 +275,7 @@ fn telemetry_fault_absent_series_fires_while_node_remains_up() -> Result<()> {
     let _ = cli_export(&binary, &store, &output)?;
     std::fs::remove_file(&output)?;
     assert!(!output.exists());
-    assert_fault_alert("", "LockedBuildHostNoMetrics")
+    assert_fault_alert("", "IxBuildHostNoMetrics")
 }
 
 #[cfg(target_os = "macos")]
@@ -366,7 +366,7 @@ fn telemetry_fault_full_state_directory_fires_free_space_alert() -> Result<()> {
     .and_then(|n| n.parse::<f64>().ok())
     .ok_or_else(|| Error::new(ErrorCode::State, "state free metric missing"))?;
     assert!(free < 65536.);
-    assert_fault_alert(&text, "LockedBuildStateDirFreeLow")
+    assert_fault_alert(&text, "IxBuildStateDirFreeLow")
 }
 
 /// Trace: FR-015-AC-5, FR-015-AC-10
