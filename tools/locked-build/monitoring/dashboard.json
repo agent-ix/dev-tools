@@ -2,7 +2,7 @@
   "uid": "locked-build",
   "title": "Build storage and cache",
   "schemaVersion": 39,
-  "version": 7,
+  "version": 8,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -29,50 +29,6 @@
         },
         "allValue": ".*",
         "definition": "label_values(ix_build_info, host)",
-        "refresh": 2,
-        "sort": 1
-      },
-      {
-        "name": "mountpoint",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "label_values(node_filesystem_avail_bytes{host=~\"$host\",fstype!~\"tmpfs|devtmpfs|overlay\"}, mountpoint)",
-          "refId": "mountpoint"
-        },
-        "includeAll": true,
-        "multi": true,
-        "allValue": ".*",
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        },
-        "definition": "label_values(node_filesystem_avail_bytes{host=~\"$host\",fstype!~\"tmpfs|devtmpfs|overlay\"}, mountpoint)",
-        "refresh": 2,
-        "sort": 1
-      },
-      {
-        "name": "device",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "label_values(node_disk_io_time_seconds_total{host=~\"$host\"}, device)",
-          "refId": "device"
-        },
-        "includeAll": true,
-        "multi": true,
-        "allValue": ".*",
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        },
-        "definition": "label_values(node_disk_io_time_seconds_total{host=~\"$host\"}, device)",
         "refresh": 2,
         "sort": 1
       }
@@ -873,7 +829,7 @@
     },
     {
       "id": 14,
-      "title": "Builds per hour by outcome",
+      "title": "Successful builds per hour by host",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -888,8 +844,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:builds_1h{host=~\"$host\"}",
-          "legendFormat": "{{host}} {{outcome}}",
+          "expr": "sum by(host) (ix_build:builds_1h{host=~\"$host\",outcome=\"ok\"})",
+          "legendFormat": "{{host}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -900,23 +856,34 @@
         "defaults": {
           "unit": "short",
           "custom": {
-            "fillOpacity": 10,
-            "lineInterpolation": "smooth",
+            "fillOpacity": 45,
+            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "showPoints": "never"
-          }
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
           "showLegend": true,
-          "placement": "bottom"
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
-          "mode": "multi"
+          "mode": "multi",
+          "sort": "desc"
         }
-      }
+      },
+      "description": "Successful completed builds in the rolling hour, stacked by selected host. The top of the stack is total successes. Non-success outcomes are shown separately by failure type."
     },
     {
       "id": 15,
@@ -968,7 +935,7 @@
     },
     {
       "id": 16,
-      "title": "Failures per hour by code",
+      "title": "Failures per hour by type",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -983,8 +950,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:failures_1h{host=~\"$host\"}",
-          "legendFormat": "{{host}} {{code}}",
+          "expr": "sum by(code) (ix_build:failures_1h{host=~\"$host\"})",
+          "legendFormat": "{{code}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -995,23 +962,34 @@
         "defaults": {
           "unit": "short",
           "custom": {
-            "fillOpacity": 10,
-            "lineInterpolation": "smooth",
+            "fillOpacity": 45,
+            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "showPoints": "never"
-          }
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
           "showLegend": true,
-          "placement": "bottom"
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
-          "mode": "multi"
+          "mode": "multi",
+          "sort": "desc"
         }
-      }
+      },
+      "description": "Abnormal terminal outcomes in the rolling hour, including cancellation and timeout diagnostic codes, summed across selected hosts and stacked by type. Host and outcome are not mixed in one legend."
     },
     {
       "id": 17,
@@ -1028,7 +1006,7 @@
     },
     {
       "id": 18,
-      "title": "Build filesystem free space — select mountpoint",
+      "title": "Build disk used %",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1043,8 +1021,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:storage_free_bytes{host=~\"$host\",mountpoint=~\"$mountpoint\"}",
-          "legendFormat": "{{host}} {{mountpoint}}",
+          "expr": "ix_build:storage_used_ratio{host=~\"$host\"}",
+          "legendFormat": "{{host}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1053,12 +1031,34 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "bytes",
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
           "custom": {
-            "fillOpacity": 10,
-            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "showPoints": "never"
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.85
+              },
+              {
+                "color": "red",
+                "value": 0.95
+              }
+            ]
           }
         },
         "overrides": []
@@ -1066,16 +1066,21 @@
       "options": {
         "legend": {
           "showLegend": true,
-          "placement": "bottom"
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi"
         }
-      }
+      },
+      "description": "Build filesystem fullness (1 − available / size). High values mean low space: warning at 85%, danger at 95%. Only verified build mounts are included: luna /mnt/build, terra /builds, titan /home/peter/dev, draco /System/Volumes/Data. Update monitoring rules if host policy moves storage."
     },
     {
       "id": 19,
-      "title": "Build device IO utilisation — select device",
+      "title": "Build device IO utilisation",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1090,7 +1095,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:storage_io_utilisation_pct{host=~\"$host\",device=~\"$device\"}",
+          "expr": "ix_build:storage_io_utilisation_pct{host=~\"$host\"}",
           "legendFormat": "{{host}} {{device}}",
           "datasource": {
             "type": "prometheus",
@@ -1118,7 +1123,8 @@
         "tooltip": {
           "mode": "multi"
         }
-      }
+      },
+      "description": "IO utilisation only for the devices backing the verified build filesystems. Partition names resolve to their parent NVMe/SATA disk; unrelated disks are excluded. Hosts without node disk IO counters are absent."
     }
   ],
   "timezone": "browser",

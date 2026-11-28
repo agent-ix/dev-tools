@@ -29,8 +29,10 @@ Use a persistent shared state directory and an installed locked-build. Read the 
 
 The checks exit successfully. `ix_build_export_timestamp_seconds` advances and `ix_build_export_error` remains zero.
 The Build storage and cache dashboard has three rows: kache health, builds and queue health, and storage.
-Select the build filesystem mountpoint and device before interpreting the storage panels.
+Storage panels select the verified build mounts in `alerts.yml`; update those selectors when host policy moves storage.
+Disk used percentage rises toward 100% as available space runs out.
 The host selector applies independently of cache policy metadata.
+Keep successful and abnormal outcomes in separate charts. Stack one dimension per chart, such as hosts for successes or diagnostic types for failures, so the top edge shows the total without a mixed host/outcome color key.
 Remote health is unknown until a read-only remote probe is available.
 Build-time trends describe daily performance; one-off marketing comparisons are separate data mining.
 
