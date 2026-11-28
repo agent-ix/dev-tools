@@ -13,6 +13,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const LIMIT: u64 = 1_048_576;
+const EXPLAIN_OUTPUT_LIMIT: u64 = 8 * 1_048_576;
+const FULL_OUTPUT_LIMIT: u64 = 8 * LIMIT;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -163,7 +165,26 @@ fn append_for(
     );
 }
 
+fn output_limit(args: &[&str]) -> u64 {
+    if args.first() == Some(&"explain") && args.contains(&"--all") {
+        EXPLAIN_OUTPUT_LIMIT
+    } else if args.contains(&"--full") {
+        FULL_OUTPUT_LIMIT
+    } else {
+        LIMIT
+    }
+}
+
 fn command(binary: &Path, args: &[&str], deadline: Instant) -> Result<Value> {
+    command_with_limit(binary, args, deadline, output_limit(args))
+}
+
+fn command_with_limit(
+    binary: &Path,
+    args: &[&str],
+    deadline: Instant,
+    limit: u64,
+) -> Result<Value> {
     if Instant::now() >= deadline {
         return Err(unavailable());
     }
@@ -221,14 +242,14 @@ fn command(binary: &Path, args: &[&str], deadline: Instant) -> Result<Value> {
                 }
                 Ok(count) => {
                     bytes.extend_from_slice(&buffer[..count]);
-                    if u64::try_from(bytes.len()).unwrap_or(u64::MAX)
-                        > if args.contains(&"--full") {
-                            8 * LIMIT
-                        } else {
-                            LIMIT
-                        }
-                    {
-                        return Err(unavailable());
+                    let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                    if observed > limit {
+                        return Err(Error::new(
+                            ErrorCode::State,
+                            format!(
+                                "kache output exceeds bound of {limit} bytes; observed {observed} bytes"
+                            ),
+                        ));
                     }
                     continue;
                 }

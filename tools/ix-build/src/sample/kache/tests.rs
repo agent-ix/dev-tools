@@ -16,6 +16,81 @@ fn value(text: &str, name: &str) -> Result<f64> {
         .ok_or_else(unavailable)
 }
 
+/// Provenance: SWM-442; raw explain output can exceed 1 MiB on a healthy daemon.
+#[test]
+fn kache_large_explain_preserves_up_storage_and_passthrough_series() -> Result<()> {
+    let (stats, config, mut explain) = fixtures()?;
+    explain["reasons"][0]["reason"] = format!("not-a-compile|{}", "x".repeat(1_200_000)).into();
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("explain.json");
+    let payload = serde_json::to_vec(&explain)?;
+    assert!(payload.len() > 1_048_576);
+    std::fs::write(&path, payload)?;
+    let limit = output_limit(&["explain", "--all", "--json"]);
+    assert_eq!(limit, 8_388_608);
+    let parsed = command_with_limit(
+        Path::new("/bin/cat"),
+        &[path.to_str().ok_or_else(unavailable)?],
+        Instant::now() + TIMEOUT,
+        limit,
+    )?;
+    let mut text = String::new();
+    let result = render(
+        &stats,
+        &config,
+        &parsed,
+        "terra",
+        &mut Ledger::default(),
+        &mut text,
+    );
+    settle_observation(&mut text, result, "terra", "local");
+    assert_eq!(value(&text, "up")?, 1.);
+    assert_eq!(value(&text, "scrape_error")?, 0.);
+    assert_eq!(value(&text, "store_bytes")?, 76316814781.);
+    assert_eq!(value(&text, "hits_total")?, 473.);
+    assert!(text.contains("reason=\"not_a_compile\"} 12"));
+    assert!(text.contains("reason=\"unsupported\"} 8"));
+    assert_eq!(
+        text.lines().filter(|line| !line.starts_with('#')).count(),
+        24
+    );
+    Ok(())
+}
+
+/// Provenance: SWM-442; excessive raw output is rejected before JSON parsing.
+#[test]
+fn kache_explain_above_eight_mib_fails_closed_with_size_diagnostic() -> Result<()> {
+    let (_, _, explain) = fixtures()?;
+    let mut payload = serde_json::to_vec(&explain)?;
+    payload.resize(8_388_609, b' ');
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("explain.json");
+    std::fs::write(&path, payload)?;
+    let error = command_with_limit(
+        Path::new("/bin/cat"),
+        &[path.to_str().ok_or_else(unavailable)?],
+        Instant::now() + TIMEOUT,
+        output_limit(&["explain", "--all", "--json"]),
+    )
+    .err()
+    .ok_or_else(unavailable)?;
+    assert_eq!(error.code, ErrorCode::State);
+    assert_eq!(
+        error.message.as_ref(),
+        "kache output exceeds bound of 8388608 bytes; observed 8388609 bytes"
+    );
+    let mut text = "partial telemetry\n".to_owned();
+    settle_observation(&mut text, Err(error), "terra", "local");
+    assert_eq!(value(&text, "up")?, 0.);
+    assert_eq!(value(&text, "scrape_error")?, 1.);
+    assert!(!text.contains("partial telemetry"));
+    assert!(!text.contains("store_bytes"));
+    assert_eq!(output_limit(&["stats", "--full", "--json"]), 8_388_608);
+    assert_eq!(output_limit(&["stats", "--json"]), 1_048_576);
+    assert_eq!(output_limit(&["explain", "--json"]), 1_048_576);
+    Ok(())
+}
+
 /// Provenance: SWM-416, real luna 2.4.0 output; independent numeric oracles.
 #[test]
 fn kache_real_local_fixture_has_hand_written_values_and_bounded_series() -> Result<()> {
