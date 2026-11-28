@@ -10,8 +10,6 @@ pub enum ErrorCode {
     Transition,
     /// Store data requires a newer reader protocol.
     StoreVersion,
-    /// Policy bytes differ from the last audited policy write.
-    PolicyModified,
     /// Operating-system or filesystem operation failed.
     Io,
     /// The command's target or temporary directory could not be prepared.

@@ -72,6 +72,42 @@ pub(crate) fn host_root(home: Option<&Path>) -> PathBuf {
     existing_root(root.join("ix-build"), root.join("locked-build"))
 }
 
+/// Keep policy on durable storage, recovering the former temporary-file alias.
+/// Trace: FR-011-AC-7. Provenance: SWM-444.
+pub(crate) fn durable_policy(path: &Path, state: &Path) -> Result<PathBuf> {
+    let temporary = state.join("policy.json");
+    let is_link = fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink());
+    let mut migrated = false;
+    if path.try_exists()? {
+        if is_link {
+            // Resolve relative paths before moving the file's directory.
+            let config = crate::config::Config::read(&path.canonicalize()?)?;
+            publish_file(path, &serde_json::to_vec_pretty(&config)?, true)?;
+            migrated = true;
+        } else {
+            crate::config::Config::read(path)?;
+        }
+    } else if temporary.try_exists()? {
+        let config = crate::config::Config::read(&temporary)?;
+        publish_file(path, &serde_json::to_vec_pretty(&config)?, is_link)?;
+        migrated = true;
+    } else if is_link {
+        // The old /tmp target can disappear at reboot. Allow first-use policy
+        // creation to publish a durable regular file in its place.
+        fs::remove_file(path)?;
+    }
+    if migrated && temporary.exists() && temporary.canonicalize()? != path.canonicalize()? {
+        // Already-running schedulers may retain the old temporary config path.
+        // Keep their next admission read on the same durable policy.
+        let next = state.join(format!(".policy-alias-{}.next", crate::store::random_id()?));
+        std::os::unix::fs::symlink(path.canonicalize()?, &next)?;
+        let result = fs::rename(&next, &temporary);
+        let _ = fs::remove_file(next);
+        result?;
+    }
+    Ok(path.to_owned())
+}
+
 // Until install-tools publishes the new alias, use the existing namespace.
 // Never open a second queue or lose the recorded rollout owner during upgrade.
 fn existing_root(new: PathBuf, old: PathBuf) -> PathBuf {
@@ -257,6 +293,22 @@ pub(crate) fn access_denied(error: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trace: FR-011-AC-7. Provenance: SWM-444.
+    #[test]
+    fn policy_migration_with_state_in_the_config_directory_keeps_a_regular_file() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("old.json");
+        fs::write(&source, br#"{"host":"operator"}"#)?;
+        let directory = root.path().join(".ix/ix-build");
+        fs::create_dir_all(&directory)?;
+        let path = directory.join("policy.json");
+        std::os::unix::fs::symlink(&source, &path)?;
+        durable_policy(&path, &directory)?;
+        assert!(!fs::symlink_metadata(&path)?.is_symlink());
+        assert_eq!(crate::config::Config::read(&path)?.host, "operator");
+        Ok(())
+    }
 
     /// Trace: FR-011-AC-7. Provenance: SWM-431.
     #[test]

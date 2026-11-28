@@ -19,23 +19,6 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-pub(crate) fn check(shared: &Path, policy: &Path) -> Result<()> {
-    let entries = read(shared)?;
-    let observed = hash(&std::fs::read(policy).map_err(|error| {
-        Error::new(
-            ErrorCode::PolicyModified,
-            format!("audited policy is unavailable: {error}"),
-        )
-    })?);
-    if entries.last().is_none_or(|entry| entry.after != observed) {
-        return Err(Error::new(
-            ErrorCode::PolicyModified,
-            "policy hash differs from its audit ledger; restore the audited policy backup before policy set",
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn baseline(shared: &Path, policy: &Path, reason: &str) -> Result<()> {
     let mut entries = read(shared)?;
     let after = hash(&std::fs::read(policy)?);
@@ -54,14 +37,28 @@ pub(crate) fn baseline(shared: &Path, policy: &Path, reason: &str) -> Result<()>
     ledger(shared, &entries)
 }
 
+/// Trace: FR-011-AC-7. Provenance: SWM-444.
 pub(crate) fn set(store: &Store, key: &str, value: &str) -> Result<()> {
     let lock = store
         .try_lock_member("lock")?
         .ok_or_else(|| Error::new(ErrorCode::Transition, "policy writer is busy; retry"))?;
     let before = std::fs::read(&store.config_path)?;
     let mut entries = read(&store.path)?;
-    if !entries.is_empty() {
-        check(&store.path, &store.config_path)?;
+    // Plain edits are normal. Record their hash as the predecessor of this
+    // optional convenience write rather than refusing an operator's edit.
+    let before_hash = hash(&before);
+    if entries
+        .last()
+        .is_some_and(|entry| entry.after != before_hash)
+    {
+        entries.push(Audit {
+            at_ms: crate::runtime::now_ms()?,
+            key: "file-edit".into(),
+            before: entries
+                .last()
+                .map_or(String::new(), |entry| entry.after.clone()),
+            after: before_hash.clone(),
+        });
     }
     let current: Config = serde_json::from_slice(&before)?;
     let mut encoded = serde_json::to_value(current)?;
@@ -74,8 +71,12 @@ pub(crate) fn set(store: &Store, key: &str, value: &str) -> Result<()> {
             "unknown or immutable policy key",
         ));
     }
+    let old_value = fields
+        .get(key)
+        .cloned()
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "unknown policy key"))?;
     let value: serde_json::Value = serde_json::from_str(value).unwrap_or_else(|_| value.into());
-    fields.insert(key.into(), value);
+    fields.insert(key.into(), value.clone());
     let next: Config = serde_json::from_value(encoded)?;
     next.validate()?;
     if next.disk_reserve_bytes < 100_000_000_000 {
@@ -85,7 +86,6 @@ pub(crate) fn set(store: &Store, key: &str, value: &str) -> Result<()> {
         ));
     }
     let after = serde_json::to_vec_pretty(&next)?;
-    let before_hash = hash(&before);
     let backup = store.path.join(format!("policy-backup-{before_hash}.json"));
     crate::writable::publish_file(&backup, &before, false)?;
     std::fs::File::open(&backup)?.sync_all()?;
@@ -101,6 +101,7 @@ pub(crate) fn set(store: &Store, key: &str, value: &str) -> Result<()> {
         return Err(error);
     }
     drop(lock);
+    println!("{key}: {old_value} -> {value}");
     Ok(())
 }
 
@@ -124,7 +125,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn policy_set_validates_backs_up_audits_and_detects_hand_edits() -> Result<()> {
+    /// Trace: FR-011-AC-7. Provenance: SWM-444.
+    fn policy_set_validates_backs_up_audits_and_accepts_file_edits() -> Result<()> {
         let root = tempfile::tempdir()?;
         let path = root.path().join("policy.json");
         let config = Config {
@@ -161,16 +163,68 @@ mod tests {
         let entries = read(&store.path)?;
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].key, "disk_reserve_bytes");
-        check(&store.path, &path)?;
-        std::fs::write(&path, b"{}")?;
-        assert_eq!(
-            check(&store.path, &path).err().map(|e| e.code),
-            Some(ErrorCode::PolicyModified)
-        );
-        assert_eq!(
-            set(&store, "maximum_units", "2").err().map(|e| e.code),
-            Some(ErrorCode::PolicyModified)
-        );
+        let mut edited = Config::read(&path)?;
+        edited.maximum_units = 3;
+        std::fs::write(&path, serde_json::to_vec(&edited)?)?;
+        set(&store, "maximum_units", "2")?;
+        assert_eq!(Config::read(&path)?.maximum_units, 2);
+        let entries = read(&store.path)?;
+        assert_eq!(entries[2].key, "file-edit");
+        assert_eq!(entries[2].after, entries[3].before);
+        assert_eq!(entries[3].after, hash(&std::fs::read(&path)?));
+        Ok(())
+    }
+
+    /// Trace: FR-005-AC-4, FR-011-AC-7. Provenance: SWM-444.
+    #[test]
+    fn memory_policy_set_validates_each_key_without_partial_writes() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("policy.json");
+        let config = Config {
+            memory_budget_bytes: Some(52_000_000_000),
+            disk_reserve_bytes: 100_000_000_000,
+            ..Config::default()
+        };
+        std::fs::write(&path, serde_json::to_vec(&config)?)?;
+        let store = Store::open(&root.path().join("state"), &path)?;
+        for (key, value) in [
+            ("memory_budget_bytes", "0"),
+            ("memory_budget_bytes", "-1"),
+            ("memory_budget_bytes", "null"),
+            ("memory_budget_bytes", "\"bad\""),
+            ("memory_reserve_per_job_by_class", r#"{"point":0}"#),
+            ("memory_reserve_per_job_by_class", r#"{"typo":1}"#),
+            ("memory_reserve_per_job_by_class", r#"{"point":9000000000}"#),
+            ("memory_per_job_by_class", r#"{"point":0}"#),
+            ("memory_per_job_by_class", r#"{"typo":1}"#),
+            ("memory_per_job_by_class", r#"{"point":1}"#),
+            ("memory_per_job_by_class", r#"{"point":"bad"}"#),
+        ] {
+            let before = std::fs::read(&path)?;
+            assert!(set(&store, key, value).is_err(), "accepted {key}={value}");
+            assert_eq!(std::fs::read(&path)?, before);
+            assert!(read(&store.path)?.is_empty());
+        }
+        for (key, value) in [
+            ("memory_budget_bytes", "53000000000"),
+            ("memory_reserve_per_job_by_class", r#"{"point":800000000}"#),
+            ("memory_per_job_by_class", r#"{"point":7000000000}"#),
+        ] {
+            let before = std::fs::read(&path)?;
+            set(&store, key, value)?;
+            assert_eq!(
+                std::fs::read(
+                    store
+                        .path
+                        .join(format!("policy-backup-{}.json", hash(&before)))
+                )?,
+                before
+            );
+        }
+        let config = Config::read(&path)?;
+        assert_eq!(config.memory_budget_bytes, Some(53_000_000_000));
+        assert_eq!(config.memory_reserve_per_job_by_class["point"], 800_000_000);
+        assert_eq!(config.memory_per_job_by_class["point"], 7_000_000_000);
         Ok(())
     }
 }

@@ -58,8 +58,8 @@ Rules:
 6. `policy set KEY VALUE` validates the typed policy and cross-field constraints,
    including `max_bytes` requiring `target_root` and a disk reserve of at least
    100 GB. It backs up the previous bytes and atomically records the policy hash
-   in `policy-ledger.json`. `check-install` reports `IB_POLICY_MODIFIED` for edits
-   outside the audited command.
+   in `policy-ledger.json` and prints the field's before/after values.
+   Plain file edits are supported; this command is an optional convenience.
 7. Store schema 2 declares `min_reader_version: 2`. Readers check compatibility
    before decoding request payloads and return `IB_STORE_VERSION` with upgrade
    guidance. Legacy schema 1 remains readable and is upgraded on a write.
@@ -123,6 +123,28 @@ Relative filesystem paths resolve from the policy file's directory.
 On first use, ix-build measures the host and writes a conservative policy.
 Use `ix-build policy show` to print it or `ix-build policy init --force`
 to regenerate it.
+
+Generated policies and the policy example reserve 1,250,000,000 bytes per job
+for `block` and `must-fix`, and 750,000,000 bytes per job for `point`.
+A four-job lease therefore reserves 5 GB, 5 GB, or 3 GB respectively.
+Other classes use the 3 GB per-job fallback. Hard limits retain the separate
+8 GB per-job default and existing cgroup/RSS enforcement.
+The titan host example sets `memory_budget_bytes` to 52,000,000,000.
+
+Edit the policy JSON directly to change admission. Each admission pass reads
+and validates the file again; queued requests use the new budget and class
+values without restarting workers. Running leases keep their granted reservations
+and hard limits. Invalid policy stops admission until corrected.
+For an atomic write with a backup and before/after output, use:
+
+```sh
+ix-build policy set memory_budget_bytes 52000000000
+ix-build policy set memory_reserve_per_job_by_class '{"block":1250000000,"must-fix":1250000000,"point":750000000}'
+ix-build policy set memory_per_job_by_class '{"block":8000000000,"must-fix":8000000000,"point":8000000000}'
+```
+
+Each command validates the whole policy, writes a temporary file, and renames
+it over the policy. A rejected value leaves the file unchanged.
 
 Measured defaults rank eligible writable local disks NVMe, SSD, HDD, using
 device metadata and a small file-creation probe rather than throughput tests.
@@ -218,14 +240,18 @@ Different slot numbers run concurrently. The Kani replacement is
 `run --class kani -- ...`.
 
 Scheduler commands and the PATH shim read policy from `--config`, then
-`IX_BUILD_CONFIG`, then `/tmp/ix-build-<uid>/policy.json`.
+`IX_BUILD_CONFIG`, then `~/.ix/ix-build/policy.json`.
+An existing legacy `~/.ix/locked-build/policy.json` remains supported.
 State resolves from `--state`, then `IX_BUILD_STATE`, then
 `/tmp/ix-build-<uid>`; the state directory is created mode `0700`.
 Lane `IX_HOME` does not select host state or policy. Host aliases live under
 `~/.ix/ix-build`; generated targets default to its `targets` directory.
-Installation preserves the policy selected by existing host state, adopts the
-old `~/.config/ix-build/policy.json` when applicable, and archives competing
-fallback policy before migration. Policy paths and disk/target directories
+Installation keeps a regular policy file under `~/.ix`, preserving operator
+edits and creating measured defaults only when no policy exists.
+It adopts old `~/.config/ix-build/policy.json` when applicable and recovers
+former temporary policies into durable storage. The shared state's compatibility
+policy link points to this durable file, which survives reboot.
+Policy paths and disk/target directories
 are configuration metadata rather than the random store identity.
 
 The default state path is an owned symlink to `/tmp/ix-build-<uid>`.
@@ -236,7 +262,7 @@ its contents. The shared directory must be owned by the effective user,
 mode `0700`, and a directory rather than a symlink. Unsafe fallback directories
 cause an error; commands never bypass admission after a path failure.
 An existing canonical policy is read without opening it for write. If absent,
-generated policy is published atomically once in the shared state directory.
+generated policy is published atomically once under `~/.ix`.
 This keeps its canonical identity the same for writable and read-only lanes.
 An unwritable target root uses `<fallback>/targets`; explicit `CARGO_TARGET_DIR`
 remains authoritative. `status` includes `state_path`. `policy show` prints

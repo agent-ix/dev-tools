@@ -1211,6 +1211,7 @@ fn store(root: &Path) -> Result<Store> {
     policy.memory_admission = crate::config::MemoryAdmissionMode::LiveAvailable;
     policy.memory_budget_bytes = None;
     policy.memory_cap_by_class.clear();
+    policy.memory_reserve_per_job_by_class.clear();
     let sample_path = root.join("sample.json");
     let sample = crate::config::HostSample {
         host: policy.host.clone(),
@@ -4217,6 +4218,123 @@ fn granted_memory_admits_titan_head_and_status_explains_budget() -> Result<()> {
         Some(3_000_000_000)
     );
     assert_eq!(head.memory_cap_bytes, Some(13_000_000_000));
+    Ok(())
+}
+
+/// Provenance: SWM-444. Trace: FR-005-AC-4, FR-011-AC-7, FR-015-AC-8
+#[test]
+fn plain_policy_edits_admit_the_same_queued_worker_and_preserve_running_leases() -> Result<()> {
+    for change_budget in [true, false] {
+        let root = tempfile::tempdir()?;
+        let store = lease_accounted_store(root.path(), 8, 7_000_000_000, 0)?;
+        let mut policy = Config::read(&store.config_path)?;
+        policy.cargo_build_jobs = Some(4);
+        policy
+            .memory_reserve_per_job_by_class
+            .insert("block".into(), 1_250_000_000);
+        policy.memory_limit_per_job_bytes = 8_000_000_000;
+        let legacy = store.path.join("policy.json");
+        std::fs::write(&legacy, serde_json::to_vec(&policy)?)?;
+        let store = Store::open(&store.path, &legacy)?;
+        let running = enqueue(
+            &store,
+            "running",
+            "SWM-444",
+            1,
+            1,
+            Some("block"),
+            &["cargo".into(), "build".into(), "-j4".into()],
+        )?;
+        let waiting = enqueue(
+            &store,
+            "waiting",
+            "SWM-444",
+            1,
+            1,
+            Some("block"),
+            &["cargo".into(), "build".into(), "-j4".into()],
+        )?;
+        let identity = Processes::self_identity()?;
+        let mut leases = Vec::new();
+        for id in [&running, &waiting] {
+            let (generation, lease) = spawn_worker_with(&store, id, false, |claim, lease| {
+                Ok((claim.generation, lease))
+            })?
+            .ok_or_else(|| Error::new(ErrorCode::State, "missing worker claim"))?;
+            claim_spawned_worker(&store, id, &identity, generation)?;
+            leases.push(lease);
+        }
+        schedule_queue(&store)?;
+        let (before, _) = store.snapshot()?;
+        assert_eq!(before.find(&running)?.phase, Phase::Running);
+        assert_eq!(
+            before.find(&running)?.memory_reservation_bytes,
+            Some(5_000_000_000)
+        );
+        assert_eq!(
+            before.find(&running)?.memory_cap_bytes,
+            Some(32_000_000_000)
+        );
+        assert_eq!(before.find(&waiting)?.phase, Phase::Queued);
+        assert_eq!(
+            before.find(&waiting)?.reason.as_deref(),
+            Some("memory_budget")
+        );
+        let durable = root.path().join(".ix/ix-build/policy.json");
+        crate::writable::durable_policy(&durable, &store.path)?;
+        assert!(!std::fs::symlink_metadata(&durable)?.is_symlink());
+        assert_eq!(store.config_path, legacy);
+        // A plain editor write after migration, using the existing scheduler's
+        // Store and worker claims rather than replacing or restarting either.
+        if change_budget {
+            policy.memory_budget_bytes = Some(10_000_000_000);
+        } else {
+            policy
+                .memory_reserve_per_job_by_class
+                .insert("block".into(), 500_000_000);
+            policy
+                .memory_per_job_by_class
+                .insert("block".into(), 2_000_000_000);
+        }
+        std::fs::write(&durable, serde_json::to_vec(&policy)?)?;
+        schedule_queue(&store)?;
+        let (after, config) = store.snapshot()?;
+        let admitted = after.find(&waiting)?;
+        assert_eq!(admitted.phase, Phase::Running);
+        assert_eq!(admitted.worker, before.find(&waiting)?.worker);
+        assert_eq!(
+            admitted.worker_generation,
+            before.find(&waiting)?.worker_generation
+        );
+        assert_eq!(
+            admitted.memory_reservation_bytes,
+            Some(if change_budget {
+                5_000_000_000
+            } else {
+                2_000_000_000
+            })
+        );
+        assert_eq!(
+            admitted.memory_cap_bytes,
+            Some(if change_budget {
+                32_000_000_000
+            } else {
+                8_000_000_000
+            })
+        );
+        assert_eq!(
+            after.memory_used(&config),
+            if change_budget {
+                10_000_000_000
+            } else {
+                7_000_000_000
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(after.find(&running)?)?,
+            serde_json::to_value(before.find(&running)?)?
+        );
+    }
     Ok(())
 }
 

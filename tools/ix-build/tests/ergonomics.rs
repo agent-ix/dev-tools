@@ -7,6 +7,54 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
+/// Trace: FR-005-AC-4, FR-011-AC-7. Provenance: SWM-444.
+#[test]
+fn policy_set_memory_keys_print_before_after_and_preserve_invalid_inputs()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::MetadataExt;
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    let policy = home.join(".ix/ix-build/policy.json");
+    std::fs::create_dir_all(policy.parent().ok_or("missing policy parent")?)?;
+    std::fs::write(&policy, br#"{"memory_budget_bytes":52000000000,"disk_reserve_bytes":100000000000,"memory_reserve_per_job_by_class":{"point":750000000},"memory_per_job_by_class":{"point":8000000000}}"#)?;
+    for (key, value, expected) in [
+        (
+            "memory_budget_bytes",
+            "53000000000",
+            "memory_budget_bytes: 52000000000 -> 53000000000",
+        ),
+        (
+            "memory_reserve_per_job_by_class",
+            r#"{"point":800000000}"#,
+            r#"memory_reserve_per_job_by_class: {"point":750000000} -> {"point":800000000}"#,
+        ),
+        (
+            "memory_per_job_by_class",
+            r#"{"point":7000000000}"#,
+            r#"memory_per_job_by_class: {"point":8000000000} -> {"point":7000000000}"#,
+        ),
+    ] {
+        let inode = std::fs::metadata(&policy)?.ino();
+        let output = invoke(&home, root.path(), &["policy", "set", key, value])?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8(output.stdout)?.trim(), expected);
+        assert_ne!(std::fs::metadata(&policy)?.ino(), inode);
+    }
+    let before = std::fs::read(&policy)?;
+    let output = invoke(
+        &home,
+        root.path(),
+        &["policy", "set", "memory_budget_bytes", "0"],
+    )?;
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&policy)?, before);
+    Ok(())
+}
+
 /// Trace: FR-011-AC-7. Provenance: SWM-431.
 #[test]
 fn version_reports_the_new_binary_name() -> Result<(), Box<dyn std::error::Error>> {

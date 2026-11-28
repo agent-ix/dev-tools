@@ -8,7 +8,11 @@
   "memory_budget_bytes": 17179869184,
   "memory_reserve_per_job_bytes": 3000000000,
   "memory_limit_per_job_bytes": 8000000000,
-  "memory_reserve_per_job_by_class": {},
+  "memory_reserve_per_job_by_class": {
+    "block": 1250000000,
+    "must-fix": 1250000000,
+    "point": 750000000
+  },
   "memory_per_job_by_class": {},
   "memory_cap_by_class": {},
   "on_missing_cgroup": "rss_watchdog",
