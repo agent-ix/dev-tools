@@ -50,7 +50,7 @@ Claude uses `.claude-plugin/plugin.json`, Codex and Copilot use the root portabl
 
 ## Shared build tool
 
-[locked-build](tools/locked-build/README.md) provides a persistent FIFO and priority
+[ix-build](tools/ix-build/README.md) provides a persistent FIFO and priority
 queue, host resource admission, process supervision, and JSON lease telemetry.
 Install its executable separately from the plugin skills.
 

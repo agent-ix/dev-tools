@@ -11,6 +11,6 @@ None.
 
 ## Review verification
 
-- `cargo test --locked --manifest-path tools/locked-build/Cargo.toml sample::tests::`: 12 passed.
+- `cargo test --locked --manifest-path tools/ix-build/Cargo.toml sample::tests::`: 12 passed.
 
-The review confirmed that busy counts combine controller jobs, `locked-build.sh` lanes, QSL `cargo-slot.sh` lanes, and `arch-test-run.sh` lanes, with observations deduplicated by process group. Titan's configured capacity remains absent because no host-wide count is sourced.
+The review confirmed that busy counts combine controller jobs, `ix-build.sh` lanes, QSL `cargo-slot.sh` lanes, and `arch-test-run.sh` lanes, with observations deduplicated by process group. Titan's configured capacity remains absent because no host-wide count is sourced.
