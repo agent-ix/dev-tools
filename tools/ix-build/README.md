@@ -190,8 +190,10 @@ parallelism times `memory_reserve_per_job_bytes` (default 3 GB) against the
 host budget. Their enforced hard cap uses `memory_limit_per_job_bytes`
 (default 8 GB) independently. Non-Cargo commands use requested units.
 Reservations can be overridden per class with `memory_reserve_per_job_by_class`;
-`memory_per_job_by_class` overrides hard limits. A `-j2` command reserves 6 GB
-and can peak at 8.3 GB under its 16 GB cap. Admission never exceeds the sum of
+`memory_per_job_by_class` overrides hard limits. Generated policies reserve
+1.25 GB per job for `block` and `must-fix`, and 0.75 GB for `point`.
+A `-j2` point command reserves 1.5 GB under its 16 GB hard cap.
+Admission never exceeds the sum of
 reserved memory allowed by the measured budget.
 
 Drain queued and running leases before this upgrade. Old binaries reject the

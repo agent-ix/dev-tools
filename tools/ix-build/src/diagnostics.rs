@@ -343,38 +343,36 @@ pub(crate) fn unscoped(error: &Error, request: String) -> Failure {
     if let Some(failure) = &error.failure {
         return failure.as_ref().clone();
     }
-    let (code, key, limit) = if matches!(
-        error.code,
-        ErrorCode::Transition | ErrorCode::StoreVersion | ErrorCode::PolicyModified
-    ) {
-        (
-            match error.code {
-                ErrorCode::Transition => Code::InvalidTransition,
-                ErrorCode::StoreVersion => Code::StoreVersion,
-                _ => Code::PolicyModified,
-            },
-            "control.transition_valid",
-            Value::Boolean(true),
-        )
-    } else if error.code == ErrorCode::TargetUnavailable {
-        (
-            Code::TargetUnavailable,
-            "command.target_writable",
-            Value::Boolean(true),
-        )
-    } else if error.code == ErrorCode::Request {
-        (
-            Code::InvalidRequest,
-            "policy.valid_request",
-            Value::Boolean(true),
-        )
-    } else {
-        (
-            Code::StateUnavailable,
-            "policy.state_access",
-            Value::from("read_write"),
-        )
-    };
+    let (code, key, limit) =
+        if matches!(error.code, ErrorCode::Transition | ErrorCode::StoreVersion) {
+            (
+                if error.code == ErrorCode::StoreVersion {
+                    Code::StoreVersion
+                } else {
+                    Code::InvalidTransition
+                },
+                "control.transition_valid",
+                Value::Boolean(true),
+            )
+        } else if error.code == ErrorCode::TargetUnavailable {
+            (
+                Code::TargetUnavailable,
+                "command.target_writable",
+                Value::Boolean(true),
+            )
+        } else if error.code == ErrorCode::Request {
+            (
+                Code::InvalidRequest,
+                "policy.valid_request",
+                Value::Boolean(true),
+            )
+        } else {
+            (
+                Code::StateUnavailable,
+                "policy.state_access",
+                Value::from("read_write"),
+            )
+        };
     Failure {
         request_id: request.clone(),
         class: "periodic".to_owned(),

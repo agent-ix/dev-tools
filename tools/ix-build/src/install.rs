@@ -143,6 +143,7 @@ fn install_tools_with_measurement(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Trace: FR-011-AC-7. Provenance: SWM-444.
 fn install_tools_owned(
     home: &Path,
     current_exe: &Path,
@@ -217,9 +218,6 @@ fn install_tools_owned(
         };
         (held.wait_idle()?, measured)
     };
-    if shared.join("policy-ledger.json").exists() {
-        crate::policy::check(&shared, &shared.join("policy.json"))?;
-    }
     let swapped = idle.swap(current_exe, &installed_path)?;
     // Temporary compatibility command; removed once all lanes confirm migration.
     install_symlink(&installed_path, &home.join(".local/bin/locked-build"))?;
@@ -246,15 +244,8 @@ fn install_tools_owned(
     }
     migrate_policy(&home.join(".config/locked-build/policy.json"), &host_policy)?;
     migrate_policy(&home.join(".config/ix-build/policy.json"), &host_policy)?;
-    let policy_path = shared.join("policy.json");
-    let adopt_host = !policy_path.exists()
-        || (host_policy.exists()
-            && host_policy.canonicalize().ok() != policy_path.canonicalize().ok());
-    let mut policy = if adopt_host && host_policy.exists() {
-        Config::read(&host_policy)?
-    } else if policy_path.exists() {
-        Config::read(&policy_path)?
-    } else {
+    let policy_path = crate::writable::durable_policy(&host_policy, &shared)?;
+    if !policy_path.exists() {
         let mut policy = measured_policy.ok_or_else(|| {
             Error::new(
                 ErrorCode::Configuration,
@@ -266,29 +257,23 @@ fn install_tools_owned(
         if policy.target_root.is_none() {
             policy.target_root = Some(config_dir.join("targets"));
         }
-        policy
-    };
-    policy
-        .priority_classes
-        .entry("kani".to_owned())
-        .or_insert(0);
-    policy
-        .priority_classes
-        .entry("arch-test".to_owned())
-        .or_insert(2);
-    let bytes = serde_json::to_vec_pretty(&policy)?;
-    if adopt_host && policy_path.exists() && std::fs::read(&policy_path)? != bytes {
-        crate::writable::publish_file(
-            &shared.join("policy.before-host-migration.json"),
-            &std::fs::read(&policy_path)?,
-            false,
-        )?;
+        crate::writable::publish_file(&policy_path, &serde_json::to_vec_pretty(&policy)?, false)?;
     }
-    write_if_changed(&policy_path, &bytes, 0o600)?;
-    if std::fs::read_link(&host_policy).ok().as_deref() != Some(policy_path.as_path()) {
-        let next = config_dir.join(format!(".policy-alias-{}.next", crate::store::random_id()?));
+    Config::read(&policy_path)?;
+    // Old workers still open the shared path; point it at the durable file.
+    let shared_policy = shared.join("policy.json");
+    if std::fs::read_link(&shared_policy).ok().as_deref() != Some(policy_path.as_path()) {
+        if shared_policy.exists() && std::fs::read(&shared_policy)? != std::fs::read(&policy_path)?
+        {
+            crate::writable::publish_file(
+                &shared.join("policy.before-host-migration.json"),
+                &std::fs::read(&shared_policy)?,
+                false,
+            )?;
+        }
+        let next = shared.join(format!(".policy-alias-{}.next", crate::store::random_id()?));
         symlink(&policy_path, &next)?;
-        std::fs::rename(next, &host_policy)?;
+        std::fs::rename(next, &shared_policy)?;
     }
     crate::writable::shared_state(&config_dir.join("state"), &shared)?;
 
@@ -735,8 +720,7 @@ pub(crate) fn check_install(manifest_path: Option<&Path>) -> Result<i32> {
     if let Some(home) = &home {
         let root = crate::writable::host_root(Some(home));
         if root.join("state").exists() || root.join("policy.json").exists() {
-            let shared = root.join("state").canonicalize()?;
-            crate::policy::check(&shared, &root.join("policy.json"))?;
+            Config::read(&root.join("policy.json"))?;
         }
         match crate::provenance::check(home) {
             Ok((matches, line)) => {
@@ -1050,6 +1034,83 @@ mod tests {
             Config::read(&shared.join("policy.json"))?.target_root,
             Some(target)
         );
+        Ok(())
+    }
+
+    /// Provenance: SWM-444. Trace: FR-005-AC-4, FR-011-AC-7
+    #[test]
+    fn generated_policy_and_example_reserve_real_four_job_class_needs() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let shared = root.path().join("shared");
+        install_tools_with_measurement(&home, &std::env::current_exe()?, None, &shared, || {
+            Ok(Config::default())
+        })?;
+        let path = home.join(".ix/ix-build/policy.json");
+        assert!(!std::fs::symlink_metadata(&path)?.is_symlink());
+        assert_eq!(std::fs::read_link(shared.join("policy.json"))?, path);
+        let installed = Config::read(&path)?;
+        let example: Config = serde_json::from_str(include_str!("../policy.example.json"))?;
+        for config in [&installed, &example] {
+            for (class, expected) in [
+                ("block", 5_000_000_000),
+                ("must-fix", 5_000_000_000),
+                ("point", 3_000_000_000),
+            ] {
+                assert_eq!(config.memory_reserve_per_job_by_class[class] * 4, expected);
+            }
+            assert_eq!(config.memory_limit_per_job_bytes, 8_000_000_000);
+            assert!(config.memory_per_job_by_class.is_empty());
+            assert_eq!(
+                config.on_missing_cgroup,
+                crate::config::OnMissingCgroup::RssWatchdog
+            );
+        }
+        // Preserve the exact bytes of an operator edit, even with an old ledger.
+        let edited = br#"{ "host": "edited", "memory_budget_bytes": 52000000000, "memory_reserve_per_job_by_class": {"point": 600000000} }"#;
+        std::fs::write(&path, edited)?;
+        install_tools_with_measurement(&home, &std::env::current_exe()?, None, &shared, || {
+            Err(Error::new(
+                ErrorCode::State,
+                "must not regenerate edited policy",
+            ))
+        })?;
+        assert_eq!(std::fs::read(&path)?, edited);
+        assert!(!std::fs::symlink_metadata(&path)?.is_symlink());
+        // Simulate the temporary state disappearing at reboot.
+        std::fs::remove_file(shared.join("policy.json"))?;
+        assert_eq!(
+            Config::read(&path)?.memory_budget_bytes,
+            Some(52_000_000_000)
+        );
+        Ok(())
+    }
+
+    /// Provenance: SWM-444. Trace: FR-011-AC-7
+    #[test]
+    fn install_replaces_the_old_temporary_policy_alias_with_a_durable_file() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let shared = crate::writable::private_directory(&root.path().join("shared"))?;
+        let host = home.join(".ix/locked-build");
+        std::fs::create_dir_all(&host)?;
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(shared.join("policy.json"), br#"{"host":"edited","memory_budget_bytes":52000000000,"target_root":"targets","memory_reserve_per_job_by_class":{"point":600000000}}"#)?;
+        symlink(shared.join("policy.json"), host.join("policy.json"))?;
+        install_tools_with_measurement(&home, &std::env::current_exe()?, None, &shared, || {
+            Err(Error::new(
+                ErrorCode::State,
+                "must preserve temporary policy",
+            ))
+        })?;
+        let path = home.join(".ix/ix-build/policy.json");
+        assert!(!std::fs::symlink_metadata(&path)?.is_symlink());
+        let config = Config::read(&path)?;
+        assert_eq!(config.host, "edited");
+        assert_eq!(config.memory_budget_bytes, Some(52_000_000_000));
+        assert_eq!(config.memory_reserve_per_job_by_class["point"], 600_000_000);
+        assert_eq!(config.target_root, Some(shared.join("targets")));
+        assert_eq!(std::fs::read_link(shared.join("policy.json"))?, path);
         Ok(())
     }
 
@@ -1548,6 +1609,7 @@ mod tests {
             host: String,
             capacity_units: u32,
             total_memory_bytes: u64,
+            memory_budget_bytes: Option<u64>,
         }
 
         let examples: CapacityExamples =
@@ -1564,6 +1626,7 @@ mod tests {
             })
             .collect();
         assert_eq!(examples.schema_version, 1);
+        assert_eq!(examples.hosts[2].memory_budget_bytes, Some(52_000_000_000));
         assert_eq!(
             actual,
             [

@@ -252,6 +252,7 @@ pub struct Config {
 }
 
 impl Default for Config {
+    /// Trace: FR-005-AC-4, FR-011-AC-7. Provenance: SWM-444.
     fn default() -> Self {
         let system = memory_system();
         let total_memory = system.total_memory();
@@ -293,7 +294,11 @@ impl Default for Config {
             memory_reserve_per_job_bytes: 3_000_000_000,
             memory_limit_per_job_bytes: 8_000_000_000,
             memory_per_job_by_class: BTreeMap::new(),
-            memory_reserve_per_job_by_class: BTreeMap::new(),
+            memory_reserve_per_job_by_class: BTreeMap::from([
+                ("block".to_owned(), 1_250_000_000),
+                ("must-fix".to_owned(), 1_250_000_000),
+                ("point".to_owned(), 750_000_000),
+            ]),
             memory_cap_by_class: BTreeMap::new(),
             on_missing_cgroup: OnMissingCgroup::RssWatchdog,
         }
@@ -315,6 +320,7 @@ impl Config {
             .or_else(|| self.memory_budget_bytes.map(|budget| budget / 2))
     }
     #[allow(clippy::field_reassign_with_default)]
+    /// Trace: FR-011-AC-7. Provenance: SWM-444.
     pub(crate) fn measured_default() -> Result<Self> {
         let mut config = Self::default();
         config.host = System::host_name().unwrap_or_else(|| "localhost".to_owned());
@@ -361,9 +367,14 @@ impl Config {
     }
 
     pub(crate) fn read(path: &Path) -> Result<Self> {
-        let mut config: Self =
-            serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path)?))
-                .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        Self::from_slice(path, &std::fs::read(path)?)
+    }
+
+    /// Decode and resolve a single policy snapshot, including provenance readers.
+    /// Trace: FR-011-AC-7. Provenance: SWM-444.
+    pub(crate) fn from_slice(path: &Path, bytes: &[u8]) -> Result<Self> {
+        let mut config: Self = serde_json::from_slice(bytes)
+            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
         let directory = path
             .parent()
             .ok_or_else(|| Error::new(ErrorCode::Configuration, "policy path has no directory"))?;
@@ -741,6 +752,15 @@ mod tests {
         let policy = Config::measured_default()?;
         assert_eq!(policy.memory_limit_per_job_bytes, 8_000_000_000);
         assert_eq!(policy.memory_reserve_per_job_bytes, 3_000_000_000);
+        assert_eq!(
+            policy.memory_reserve_per_job_by_class["block"],
+            1_250_000_000
+        );
+        assert_eq!(
+            policy.memory_reserve_per_job_by_class["must-fix"],
+            1_250_000_000
+        );
+        assert_eq!(policy.memory_reserve_per_job_by_class["point"], 750_000_000);
         let budget = policy
             .memory_budget_bytes
             .ok_or_else(|| Error::new(ErrorCode::Configuration, "missing measured budget"))?;

@@ -16,7 +16,7 @@ Use the installed `ix-build` command to submit and inspect builds. Do not write 
 ix-build run -- cargo test -p package-name
 ```
 
-Every lane of a user shares `/tmp/ix-build-<uid>` (owned, mode `0700`) and its `policy.json`, regardless of lane `IX_HOME`. `~/.ix/ix-build/state` and `policy.json` are host aliases. The canonical policy is read if present and created atomically once if absent. Explicit state/config overrides remain available for isolated fixtures. `status` reports `state_path`; `policy show` prints effective paths to stderr. Installation preserves the policy selected by existing host state, moves old `~/.config/ix-build/policy.json` when applicable, and archives a competing fallback policy before host migration. Nested Cargo calls pass directly to real Cargo without state access when `IX_BUILD_LEASE=1`, or when the legacy runner sets a nonempty `CARGO_TARGET_DIR` and equal positive `CARGO_BUILD_JOBS`/`RUST_TEST_THREADS`.
+Every lane of a user shares `/tmp/ix-build-<uid>` (owned, mode `0700`), regardless of lane `IX_HOME`. `~/.ix/ix-build/state` aliases that queue. Policy is a durable editable file at `~/.ix/ix-build/policy.json`; the legacy `~/.ix/locked-build/policy.json` remains supported. Installation preserves existing operator edits and recovers old temporary-policy aliases into durable files. Edit JSON directly: each admission pass rereads and validates it, queued workers use new values, and running leases retain their grants. `policy set KEY VALUE` optionally validates and atomically writes one change with a backup and before/after output. Explicit state/config overrides remain available for isolated fixtures. `status` reports `state_path`; `policy show` prints effective paths to stderr. Nested Cargo calls pass directly to real Cargo without state access when `IX_BUILD_LEASE=1`, or when the legacy runner sets a nonempty `CARGO_TARGET_DIR` and equal positive `CARGO_BUILD_JOBS`/`RUST_TEST_THREADS`.
 
 New policy init ranks eligible writable local disks by device class: NVMe,
 other SSD, HDD. Equal classes prefer HOME; secondary disks need100GB free.
@@ -70,10 +70,9 @@ per effective worker for admission, and enforce
 `memory_per_job_by_class` overrides hard limits. The sum of admitted
 reservations must fit `memory_budget_bytes` (measured host RAM minus the host
 reserve). Hard caps can sum above that budget while each command stays capped.
-For `-j2`, the defaults reserve 6 GB and cap at 16 GB, so an 8.3 GB peak fits.
-At a 49.4 GB budget, five default `-j3` reservations consume 45 GB; six would
-need 54 GB. A 2.5 GB/job class reservation allows six (45 GB), with 24 GB hard
-caps unchanged. This replaces the earlier combined 6 GB/job default.
+Generated class reservations use 1.25 GB/job for `block` and `must-fix`,
+and 0.75 GB/job for `point`. Four jobs reserve 5 GB or 3 GB respectively;
+hard limits keep the 8 GB/job fallback. Existing policies keep their values.
 
 `rss_cap` means memory enforcement killed the command for exceeding its cap, including a cgroup scope whose `memory.events` reports `oom_kill`. Status includes `memory_cap_bytes`; `run` reports the request id, `rss_cap`, and cap in bytes. The observed child signal is retained as diagnostic data. `memory_cap_unavailable` means policy required memory enforcement that the launcher could not establish, so the command was not launched.
 
@@ -142,7 +141,7 @@ repairs a previously published outcome for the same attempt. Use its latest
 snapshot; it does not increment counters a second time. Historical counters
 retain the originally observed classification.
 
-Use `ix-build policy show` to inspect the effective policy. `ix-build policy init --force` regenerates it.
+Use `ix-build policy show` to inspect effective values and their `provenance` (`default` or `configured`, plus the supplying key). Inherited per-class reservation/limit values and the automatic explicit-request ceiling are resolved in the output. `ix-build policy init` writes visible defaults only when absent and preserves existing policies; it has no overwrite flag. Every memory setting can be overridden by a file edit or `policy set` and is reread on admission; running grants remain fixed. Disk reserve accepts any nonnegative byte value through either edit path.
 
 Tool manifest versions are minimums: an installed version at or above the pin passes, with SemVer prerelease ordering and build metadata ignored. Entries without `version` require only an executable on PATH; `check-install` never runs their help/version commands. Missing executables fail.
 

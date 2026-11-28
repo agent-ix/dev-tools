@@ -223,13 +223,10 @@ enum QueueAction {
 enum PolicyAction {
     /// Validate and atomically update one policy key, with backup and audit hash.
     Set { key: String, value: String },
-    /// Print the effective host policy as JSON.
+    /// Print effective values and default/configured provenance as JSON.
     Show,
-    /// Write a measured default policy; use --force to replace an existing file.
-    Init {
-        #[arg(long)]
-        force: bool,
-    },
+    /// Write visible measured defaults only if policy is absent; preserve edits.
+    Init,
 }
 
 fn execute(cli: Cli) -> Result<i32> {
@@ -383,16 +380,13 @@ fn execute(cli: Cli) -> Result<i32> {
     if let Action::Policy { command } = &cli.command {
         match command {
             PolicyAction::Show => {
-                ensure_policy(&config, false)?;
+                ensure_policy(&config)?;
                 eprintln!("state: {}\npolicy: {}", state.display(), config.display());
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&crate::config::Config::read(&config)?)?
-                );
+                println!("{}", serde_json::to_string_pretty(&policy::show(&config)?)?);
                 return Ok(0);
             }
-            PolicyAction::Init { force } => {
-                ensure_policy(&config, *force)?;
+            PolicyAction::Init => {
+                ensure_policy(&config)?;
                 writable::private_directory(&state)?;
                 policy::baseline(&state, &config, "init")?;
                 return Ok(0);
@@ -404,7 +398,7 @@ fn execute(cli: Cli) -> Result<i32> {
             }
         }
     }
-    ensure_policy(&config, false)?;
+    ensure_policy(&config)?;
     let store = runtime::open(&state, &config)?;
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
@@ -614,51 +608,22 @@ fn resolve_paths_with_shared(
     Ok((state, config))
 }
 
+/// Trace: FR-011-AC-7. Provenance: SWM-444.
 fn default_policy_path(path: &std::path::Path, state: &std::path::Path) -> Result<PathBuf> {
-    let policy = state.join("policy.json");
-    if policy.try_exists()? {
-        return Ok(policy);
-    }
-    // Adopt an installed host policy once, through read-only access. Lane
-    // IX_HOME never selects or generates another policy in this shared store.
-    match std::fs::read(path) {
-        Ok(_) => {
-            let installed = config::Config::read(path)?;
-            writable::publish_file(&policy, &serde_json::to_vec_pretty(&installed)?, false)?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    // A missing automatic policy must have the same identity for writable and
-    // read-only lanes, just like the queue. Existing installed policy stays put.
-    if path.try_exists()? {
-        return Ok(policy);
-    }
-    match writable::install_alias(path, &policy) {
-        Ok(()) => {}
-        Err(error) if writable::access_denied(&error) => {}
-        Err(error) => return Err(error.into()),
-    }
-    Ok(policy)
+    writable::durable_policy(path, state)
 }
 
-fn ensure_policy(path: &std::path::Path, force: bool) -> Result<()> {
+fn ensure_policy(path: &std::path::Path) -> Result<()> {
     let current_exe = std::env::current_exe()?;
-    ensure_policy_with_discovery(
-        path,
-        force,
-        std::env::var_os("PATH").as_deref(),
-        &current_exe,
-    )
+    ensure_policy_with_discovery(path, std::env::var_os("PATH").as_deref(), &current_exe)
 }
 
 fn ensure_policy_with_discovery(
     path: &std::path::Path,
-    force: bool,
     search_path: Option<&OsStr>,
     current_exe: &std::path::Path,
 ) -> Result<()> {
-    if path.exists() && !force {
+    if path.exists() {
         crate::config::Config::read(path)?;
         return Ok(());
     }
@@ -687,7 +652,7 @@ fn ensure_policy_with_discovery(
         Err(error) => return Err(error.into()),
     }
     let bytes = serde_json::to_vec_pretty(&policy)?;
-    if writable::publish_file(path, &bytes, force)? {
+    if writable::publish_file(path, &bytes, false)? {
         eprintln!("Wrote default policy to {}", path.display());
     } else {
         config::Config::read(path)?;
@@ -722,7 +687,7 @@ fn read_shim_config_with_discovery(
     search_path: Option<&OsStr>,
     current_exe: &std::path::Path,
 ) -> Result<config::Config> {
-    ensure_policy_with_discovery(path, false, search_path, current_exe)?;
+    ensure_policy_with_discovery(path, search_path, current_exe)?;
     config::Config::read(path)
 }
 
@@ -1086,7 +1051,7 @@ mod tests {
                 &shared,
             )?;
             assert_eq!(state, shared);
-            assert_eq!(config, policy);
+            assert_eq!(config, home.join(".ix/ix-build/policy.json"));
             let store = runtime::open(&state, &config)?;
             let observed = store.transaction(|state, policy| {
                 assert_eq!(policy.rust_test_threads, Some(4));
@@ -1102,7 +1067,7 @@ mod tests {
                 identity = Some(observed);
             }
         }
-        assert_eq!(std::fs::read(policy)?, bytes);
+        assert_eq!(config::Config::read(&policy)?.host, "host-a");
         Ok(())
     }
 
@@ -1133,14 +1098,14 @@ mod tests {
         let (state, config) = first?;
         assert_eq!(second?, (state.clone(), config.clone()));
         assert_eq!(state, shared);
-        assert_eq!(config, state.join("policy.json"));
+        assert_eq!(config, policy);
         assert_eq!(std::fs::read(&policy)?, bytes);
         assert_eq!(config::Config::read(&config)?.cargo_build_jobs, Some(4));
         std::fs::remove_file(&policy)?;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))?;
         let absent = resolve();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-        assert_eq!(absent?, (state.clone(), state.join("policy.json")));
+        assert_eq!(absent?, (state, policy));
         Ok(())
     }
 
@@ -1175,7 +1140,7 @@ mod tests {
         let default_policy = ix.join("policy.json");
         let writable_state = writable::shared_state(&default_state, &shared)?;
         let writable_policy = default_policy_path(&default_policy, &writable_state)?;
-        assert_eq!(writable_policy, shared.join("policy.json"));
+        assert_eq!(writable_policy, default_policy);
         std::fs::write(
             &writable_policy,
             br#"{"host":"fixture","capacity_units":1,"maximum_units":1}"#,
@@ -1193,11 +1158,9 @@ mod tests {
         std::fs::set_permissions(&ix, std::fs::Permissions::from_mode(0o500))?;
         let readonly_state = writable::shared_state(&default_state, &shared);
         let readonly_policy = default_policy_path(&default_policy, &shared);
-        let missing_policy = default_policy_path(&ix.join("absent-policy.json"), &shared);
         std::fs::set_permissions(&ix, std::fs::Permissions::from_mode(0o700))?;
         let readonly_state = readonly_state?;
         assert_eq!(readonly_state, writable_state);
-        assert_eq!(missing_policy?, writable_policy);
         let second_store = runtime::open(&readonly_state, &readonly_policy?)?;
         let second = runtime::enqueue(
             &second_store,
@@ -1213,6 +1176,27 @@ mod tests {
         assert_eq!(first_store.config_path, second_store.config_path);
         let report = runtime::status(&second_store)?;
         assert_eq!(report.requests.len(), 2);
+        Ok(())
+    }
+
+    /// Provenance: SWM-444. Trace: FR-011-AC-7
+    #[test]
+    fn reboot_with_a_dangling_legacy_policy_alias_generates_a_durable_policy() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let host = root.path().join(".ix/locked-build");
+        let shared = root.path().join("shared");
+        std::fs::create_dir_all(&host)?;
+        std::os::unix::fs::symlink(shared.join("policy.json"), host.join("policy.json"))?;
+        let path = default_policy_path(&host.join("policy.json"), &shared)?;
+        writable::publish_file(
+            &path,
+            &serde_json::to_vec(&config::Config::default())?,
+            false,
+        )?;
+        assert_eq!(path, host.join("policy.json"));
+        assert!(!std::fs::symlink_metadata(&path)?.is_symlink());
+        assert!(config::Config::read(&path)?.memory_budget_bytes.is_some());
+        assert!(!shared.exists());
         Ok(())
     }
 
@@ -1415,7 +1399,7 @@ mod tests {
             &shared,
         )?;
         assert_eq!(state, shared);
-        assert_eq!(config, state.join("policy.json"));
+        assert_eq!(config, home.join(".ix/ix-build/policy.json"));
         assert_eq!(std::fs::read_link(home.join(".ix/ix-build/state"))?, state);
         let (home_state, home_config) = resolve_paths_with_shared(
             None,
