@@ -90,24 +90,22 @@ impl Extensions {
             let Some(versions) = self.requests.get(&request.id.0) else {
                 continue;
             };
-            if request.client.is_none() {
-                if let Some(saved) = versions
+            if request.client.is_none()
+                && let Some(saved) = versions
                     .iter()
                     .rev()
                     .find(|saved| same_request(request, saved) && saved.client.is_some())
-                {
-                    request.client = saved.client.clone();
-                    request.client_pid_namespace = saved.client_pid_namespace.clone();
-                }
+            {
+                request.client = saved.client.clone();
+                request.client_pid_namespace = saved.client_pid_namespace.clone();
             }
-            if request.telemetry.repo.is_empty() {
-                if let Some(saved) = versions
+            if request.telemetry.repo.is_empty()
+                && let Some(saved) = versions
                     .iter()
                     .rev()
                     .find(|saved| same_request(request, saved) && !saved.telemetry.repo.is_empty())
-                {
-                    request.telemetry = saved.telemetry.clone();
-                }
+            {
+                request.telemetry = saved.telemetry.clone();
             }
             let Some(saved) = versions
                 .iter()
