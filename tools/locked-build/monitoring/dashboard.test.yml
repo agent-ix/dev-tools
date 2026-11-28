@@ -328,6 +328,16 @@
               "value": 50
             }
           ]
+        },
+        {
+          "expr": "ix_kache:store_fill_ratio{host=\"luna\"} and on(host,store) (ix_kache_store_limit_bytes{host=\"luna\"} > 0)",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:store_fill_ratio\",host=\"luna\",store=\"local\",cache_role=\"client\"}",
+              "value": 0.8
+            }
+          ]
         }
       ]
     },
@@ -442,6 +452,44 @@
             {
               "labels": "{}",
               "value": 120
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "FR-015-AC-3 store ratio preserves over-cap size and omits unknown or zero cap",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_store_bytes{host=\"luna\",store=\"local\"}",
+          "values": "111+0x5"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"luna\",store=\"local\"}",
+          "values": "100+0x5"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"terra\",store=\"local\"}",
+          "values": "50+0x5"
+        },
+        {
+          "series": "ix_kache_store_limit_bytes{host=\"terra\",store=\"local\"}",
+          "values": "0+0x5"
+        },
+        {
+          "series": "ix_kache_store_bytes{host=\"draco\",store=\"local\"}",
+          "values": "50+0x5"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "ix_kache:store_fill_ratio{host=~\".*\"} and on(host,store) (ix_kache_store_limit_bytes{host=~\".*\"} > 0)",
+          "eval_time": "3m",
+          "exp_samples": [
+            {
+              "labels": "{__name__=\"ix_kache:store_fill_ratio\",host=\"luna\",store=\"local\"}",
+              "value": 1.11
             }
           ]
         }

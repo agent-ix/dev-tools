@@ -2,7 +2,7 @@
   "uid": "locked-build",
   "title": "Build storage and cache",
   "schemaVersion": 39,
-  "version": 5,
+  "version": 6,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -407,6 +407,99 @@
             "lineInterpolation": "smooth",
             "lineWidth": 2,
             "showPoints": "never"
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* cap$"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    8,
+                    6
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "description": "Physical local cache size and configured cap from ix_kache_store_bytes / ix_kache_store_limit_bytes. The dashed cap is observed configuration, not a planned value. Kache GC runs per run, so size can exceed the cap between runs; values are not clipped."
+    },
+    {
+      "id": 20,
+      "title": "Local store / cap ratio",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ix_kache:store_fill_ratio{host=~\"$host\"} and on(host,store) (ix_kache_store_limit_bytes{host=~\"$host\"} > 0)",
+          "legendFormat": "{{host}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
           }
         },
         "overrides": []
@@ -414,13 +507,17 @@
       "options": {
         "legend": {
           "showLegend": true,
-          "placement": "bottom"
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi"
         }
       },
-      "description": "Physical local cache bytes and configured cap. Usage may exceed the cap between GC runs."
+      "description": "Observed store size divided by configured positive cap. 100% marks the cap; values above 100% remain visible. Missing or zero caps have no ratio. GC runs per run and can leave the store above its cap between runs."
     },
     {
       "id": 7,
@@ -431,8 +528,8 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 16,
-        "y": 8,
+        "x": 0,
+        "y": 15,
         "w": 8,
         "h": 7
       },
@@ -478,7 +575,7 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
+        "x": 8,
         "y": 15,
         "w": 8,
         "h": 7
@@ -525,7 +622,7 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 8,
+        "x": 16,
         "y": 15,
         "w": 8,
         "h": 7
@@ -581,8 +678,8 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 16,
-        "y": 15,
+        "x": 0,
+        "y": 22,
         "w": 8,
         "h": 7
       },
@@ -653,7 +750,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 29,
         "w": 24,
         "h": 1
       },
@@ -669,7 +766,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 30,
         "w": 8,
         "h": 7
       },
@@ -726,7 +823,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 23,
+        "y": 30,
         "w": 8,
         "h": 7
       },
@@ -774,7 +871,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 23,
+        "y": 30,
         "w": 8,
         "h": 7
       },
@@ -821,7 +918,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 37,
         "w": 8,
         "h": 7
       },
@@ -869,7 +966,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 30,
+        "y": 37,
         "w": 8,
         "h": 7
       },
@@ -913,7 +1010,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 44,
         "w": 24,
         "h": 1
       },
@@ -929,7 +1026,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 38,
+        "y": 45,
         "w": 8,
         "h": 7
       },
@@ -976,7 +1073,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 38,
+        "y": 45,
         "w": 8,
         "h": 7
       },
