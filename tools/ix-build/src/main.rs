@@ -20,6 +20,8 @@ mod recovery;
 mod runtime;
 mod sample;
 mod scheduler;
+mod scope_command;
+mod scope_properties;
 mod store;
 mod telemetry;
 mod transition_env;
@@ -78,6 +80,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    #[command(hide = true)]
+    ScopeCommand {
+        #[arg(long)]
+        evidence: PathBuf,
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
     /// List stable error codes, or validate one code spelling.
     ErrorCodes { code: Option<String> },
     /// Enqueue once, supervise the command, and return its exact outcome.
@@ -289,6 +298,9 @@ fn execute(cli: Cli) -> Result<i32> {
         std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;
         return Ok(0);
     }
+    if let Action::ScopeCommand { evidence, command } = &cli.command {
+        return scope_command::run(evidence, command);
+    }
     if let Action::ErrorCodes { code } = &cli.command {
         let codes = match code {
             Some(code) => vec![
@@ -397,6 +409,7 @@ fn execute(cli: Cli) -> Result<i32> {
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
         Action::Parking => Ok(0),
+        Action::ScopeCommand { .. } => Ok(0),
         Action::Run {
             owner,
             ticket,

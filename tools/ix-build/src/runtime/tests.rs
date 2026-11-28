@@ -9,7 +9,13 @@ use super::*;
 /// Provenance: SWM-421. Trace: FR-005-AC-4
 #[test]
 fn scope_probe_and_launch_require_the_same_oom_policy() {
-    let spec = lease_command_spec(LauncherPlatform::Linux, "/usr/bin/true", &[], Some(64));
+    let spec = lease_command_spec(
+        LauncherPlatform::Linux,
+        "/usr/bin/true",
+        &[],
+        Some(64),
+        Some(ScopeProperties::Full),
+    );
     let args: Vec<_> = spec
         .arguments
         .iter()
@@ -34,6 +40,39 @@ fn scope_probe_and_launch_require_the_same_oom_policy() {
 }
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
+
+/// Provenance: SWM-435. Trace: FR-005-AC-4
+#[test]
+fn memory_only_capability_keeps_both_limits_in_the_actual_launch() {
+    let (enforcement, spec) = select_lease_launch(
+        LauncherPlatform::Linux,
+        "/usr/bin/cargo",
+        &["check".into(), "-j".into(), "4".into()],
+        Some(8_000_000_000),
+        crate::config::OnMissingCgroup::Refuse,
+        |_| Some(ScopeProperties::MemoryOnly),
+    );
+    assert_eq!(enforcement, MemoryEnforcement::SystemdScope);
+    assert_eq!(spec.program, "systemd-run");
+    assert_eq!(spec.scope_properties, Some(ScopeProperties::MemoryOnly));
+    assert_eq!(
+        spec.arguments,
+        [
+            "--user",
+            "--scope",
+            "--quiet",
+            "-p",
+            "MemoryMax=8000000000",
+            "-p",
+            "MemorySwapMax=0",
+            "--",
+            "/usr/bin/cargo",
+            "check",
+            "-j",
+            "4",
+        ]
+    );
+}
 
 /// Provenance: SWM-429. Trace: FR-005-AC-4, FR-011-AC-7
 #[test]
@@ -834,6 +873,7 @@ fn titan_eight_point_three_gb_peak_survives_a_two_job_sixteen_gb_limit() -> Resu
         &["build".into()],
         Some(cap),
         MemoryEnforcement::SystemdScope,
+        Some(ScopeProperties::Full),
     );
     assert!(
         launch
@@ -2241,6 +2281,7 @@ fn lease_accounting_charges_effective_jobs_and_rejects_a_lease_larger_than_budge
         &[],
         eight_job_lease,
         MemoryEnforcement::SystemdScope,
+        Some(ScopeProperties::Full),
     );
     assert!(
         launch
@@ -2550,6 +2591,7 @@ fn lease_launcher_builds_systemd_argv_without_spawning_a_cgroup() {
         "/usr/bin/cargo",
         &["test".to_owned(), "-p".to_owned(), "ix-build".to_owned()],
         Some(4_294_967_296),
+        Some(ScopeProperties::Full),
     );
     let actual: Vec<_> = spec
         .arguments
@@ -2585,6 +2627,7 @@ fn non_linux_lease_launcher_uses_direct_command_for_watchdog_fallback() {
         "/usr/bin/cargo",
         &["check".to_owned()],
         Some(1_024),
+        None,
     );
     assert_eq!(spec.program, "/usr/bin/cargo");
     assert_eq!(spec.arguments, ["check"]);
@@ -2606,7 +2649,7 @@ fn failed_systemd_launcher_obeys_missing_cgroup_policy_and_records_choice() -> R
         &[],
         Some(4_096),
         crate::config::OnMissingCgroup::RssWatchdog,
-        |_| false,
+        |_| None,
     );
     assert_eq!(fallback, MemoryEnforcement::RssWatchdog);
     assert_eq!(fallback_spec.program, "/usr/bin/true");
@@ -2676,6 +2719,7 @@ fn supervise_scope_exit(
     events_at_completion: &str,
     expected_reason: &str,
     expected_stop: Option<StopReason>,
+    scope_collected: bool,
 ) -> Result<()> {
     let root = tempfile::tempdir()?;
     let store = store(root.path())?;
@@ -2716,12 +2760,18 @@ fn supervise_scope_exit(
         request.measured_memory_bytes = Some(123_456);
         request.lease_record = Some(LeaseRecord {
             memory_enforcement: MemoryEnforcement::SystemdScope,
+            memory_scope: Some("owned.scope".into()),
             ..LeaseRecord::default()
         });
         Ok(())
     })?;
     assert!(stale_request.lease_record.is_none());
-    let events = root.path().join("memory.events");
+    let events = root.path().join("owned.scope/memory.events");
+    std::fs::create_dir(
+        events
+            .parent()
+            .ok_or_else(|| Error::new(ErrorCode::State, "events parent missing"))?,
+    )?;
     std::fs::write(&events, "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n")?;
     let mut observations = 0;
     supervise_started_command(
@@ -2740,6 +2790,16 @@ fn supervise_scope_exit(
                 // The scope counter changes only at completion; production's
                 // final read must find it even without another process sample.
                 assert!(std::fs::write(&events, events_at_completion).is_ok());
+                if scope_collected {
+                    assert!(
+                        std::fs::write(
+                            store.path.join(format!("{}.scope-oom.json", id.0)),
+                        br#"{"outcome":{"code":null,"signal":15},"oom_kill_count":1,"memory_peak_bytes":null}"#,
+                        )
+                        .is_ok()
+                    );
+                    assert!(std::fs::remove_file(&events).is_ok());
+                }
             }
         },
     )?;
@@ -2755,8 +2815,8 @@ fn supervise_scope_exit(
         assert_eq!(
             report.requests[0].trace.diagnostic.message,
             Some(format!(
-                "ix-build: IB_OOM_KILLED request={} limit=policy.memory_limit_per_job_bytes*parallelism=1000000 measured=123456 (rss_bytes; cgroup_oom_kill=1; cgroup_memory_peak_bytes=unavailable) killed=pgid:{}/true",
-                id.0, watchdog.pid
+                "ix-build: IB_OOM_KILLED request={} limit=policy.memory_limit_per_job_bytes*parallelism=1000000 measured=123456 (rss_bytes; cgroup_oom_kill=1; cgroup_memory_peak_bytes=unavailable) killed=scope:owned.scope/true",
+                id.0
             ))
         );
     } else {
@@ -2775,6 +2835,7 @@ fn supervise_loop_uses_persisted_scope_and_injected_scope_kill() -> Result<()> {
         "low 0\nhigh 0\nmax 1\noom 1\noom_kill 1\n",
         "rss_cap",
         Some(StopReason::MemoryCap),
+        false,
     )
 }
 
@@ -2785,6 +2846,18 @@ fn scope_without_oom_kill_retains_command_signal() -> Result<()> {
         "low 0\nhigh 0\nmax 1\noom 1\noom_kill 0\n",
         "command_signaled",
         None,
+        false,
+    )
+}
+
+/// Provenance: SWM-435. Trace: FR-005-AC-4
+#[test]
+fn scope_helper_final_counter_survives_cgroup_collection_after_exit() -> Result<()> {
+    supervise_scope_exit(
+        "oom 1\noom_kill 1\n",
+        "rss_cap",
+        Some(StopReason::MemoryCap),
+        true,
     )
 }
 

@@ -27,6 +27,9 @@ pub enum Code {
     /// Supervision was lost or degraded.
     #[serde(rename = "IB_SUPERVISION_LOST", alias = "LB_SUPERVISION_LOST")]
     SupervisionLost,
+    /// Command target preparation failed before the command started.
+    #[serde(rename = "IB_TARGET_UNAVAILABLE", alias = "LB_TARGET_UNAVAILABLE")]
+    TargetUnavailable,
     /// Requested memory exceeds the host budget.
     #[serde(
         rename = "IB_REFUSED_MEMORY_BUDGET",
@@ -64,7 +67,7 @@ pub enum Code {
 
 impl Code {
     /// Every supported code, for bounded metrics and exhaustive validation.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::InvalidTransition,
         Self::StoreVersion,
         Self::PolicyModified,
@@ -72,6 +75,7 @@ impl Code {
         Self::OomKilled,
         Self::HoldTimeout,
         Self::SupervisionLost,
+        Self::TargetUnavailable,
         Self::RefusedMemoryBudget,
         Self::RefusedClassCap,
         Self::RefusedQueue,
@@ -92,6 +96,7 @@ impl Code {
             Self::OomKilled => "IB_OOM_KILLED",
             Self::HoldTimeout => "IB_HOLD_TIMEOUT",
             Self::SupervisionLost => "IB_SUPERVISION_LOST",
+            Self::TargetUnavailable => "IB_TARGET_UNAVAILABLE",
             Self::RefusedMemoryBudget => "IB_REFUSED_MEMORY_BUDGET",
             Self::RefusedClassCap => "IB_REFUSED_CLASS_CAP",
             Self::RefusedQueue => "IB_REFUSED_QUEUE",
@@ -420,6 +425,14 @@ mod tests {
                 "false",
                 "watchdog absent",
                 "ix-build: IB_SUPERVISION_LOST request=host:r7 limit=supervision_required=true measured=false (watchdog absent) killed=pgid:42/cargo",
+            ),
+            (
+                Code::TargetUnavailable,
+                "command.target_writable",
+                "true",
+                "false",
+                "ReadOnlyFilesystem",
+                "ix-build: IB_TARGET_UNAVAILABLE request=host:r7 limit=command.target_writable=true measured=false (ReadOnlyFilesystem) killed=pgid:42/cargo",
             ),
             (
                 Code::RefusedMemoryBudget,

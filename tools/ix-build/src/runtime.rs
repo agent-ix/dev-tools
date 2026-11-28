@@ -21,6 +21,7 @@ use crate::model::{
     StopReason,
 };
 use crate::process::{IdentityState, Processes, group_absent};
+use crate::scope_properties::ScopeProperties;
 use crate::store::Store;
 
 pub(crate) fn now_ms() -> Result<u64> {
@@ -1861,10 +1862,12 @@ fn supervise(
                 .map(|policy| policy.termination_grace_ms)
                 .unwrap_or(10_000);
             terminate_supervision_group(watchdog_child, None, watchdog.pid, grace_ms)?;
-            eprintln!(
-                "request={} reason=supervision_lost detail={error}",
-                request.id.0
-            );
+            let reason = if error.code == ErrorCode::TargetUnavailable {
+                "target_unavailable"
+            } else {
+                "supervision_lost"
+            };
+            eprintln!("request={} reason={reason} detail={error}", request.id.0);
             store.transaction(|state, config| {
                 if fence.owns(state.find(&request.id)?) {
                     state.find_mut(&request.id)?.supervision_detail =
@@ -1872,7 +1875,7 @@ fn supervise(
                     state.finish(
                         &request.id,
                         Completion {
-                            reason: Some("supervision_lost"),
+                            reason: Some(reason),
                             ..Completion::default()
                         },
                         config,
@@ -2161,6 +2164,19 @@ fn supervise_command_loop(
         if status.is_some() && enforcement == Some(MemoryEnforcement::SystemdScope) {
             observe_oom(&mut cgroup_oom_evidence, &Processes::read(), watchdog.pid);
             cgroup_oom_evidence.read_known_files();
+            let evidence_path = store.path.join(format!("{}.scope-oom.json", request.id.0));
+            if let Ok(bytes) = std::fs::read(evidence_path) {
+                let evidence: crate::scope_command::OomEvidence = serde_json::from_slice(&bytes)?;
+                status = Some(evidence.command_status()?);
+                cgroup_oom_evidence.oom_kill_count = cgroup_oom_evidence
+                    .oom_kill_count
+                    .max(evidence.oom_kill_count);
+                cgroup_oom_evidence.detected |= evidence.oom_kill_count > 0;
+                if let Some(peak) = evidence.memory_peak_bytes {
+                    cgroup_oom_evidence.peak_bytes =
+                        Some(cgroup_oom_evidence.peak_bytes.unwrap_or(0).max(peak));
+                }
+            }
             if let Some(scope) = &scope {
                 cgroup_oom_evidence.observe_scope_result(scope);
             }
@@ -2376,7 +2392,7 @@ fn start_command(
         Ok((config.clone(), request.memory_cap_bytes))
     })?;
     let prepared_cache = crate::kache_wrapper::Prepared::discover(&config_snapshot.cache);
-    let (mut enforcement, _probe_launch_spec) = select_lease_launch(
+    let (mut enforcement, probe_launch_spec) = select_lease_launch(
         LauncherPlatform::current(),
         request
             .command
@@ -2385,7 +2401,7 @@ fn start_command(
         request.command.get(1..).unwrap_or_default(),
         memory_cap,
         config_snapshot.on_missing_cgroup,
-        |cap| systemd_scope_available(cap, Duration::from_secs(2)),
+        |cap| systemd_scope_properties(cap, Duration::from_secs(2)),
     );
     if enforcement == MemoryEnforcement::RssWatchdog && !Processes::read().can_sample_memory() {
         enforcement = MemoryEnforcement::Refused;
@@ -2426,12 +2442,42 @@ fn start_command(
             state.find_mut(&request.id)?.lease_record = Some(lease_record);
             return Ok(CommandStart::Refused);
         }
+        let scope_helper;
+        let scope_arguments;
+        let (launch_program, launch_arguments) = if enforcement == MemoryEnforcement::SystemdScope
+            && probe_launch_spec.scope_properties == Some(ScopeProperties::MemoryOnly)
+        {
+            scope_helper = std::env::current_exe()?;
+            scope_arguments = vec![
+                "scope-command".into(),
+                "--evidence".into(),
+                store
+                    .path
+                    .join(format!("{}.scope-oom.json", request.id.0))
+                    .to_string_lossy()
+                    .into_owned(),
+                "--".into(),
+                program.clone(),
+            ]
+            .into_iter()
+            .chain(arguments.iter().cloned())
+            .collect::<Vec<_>>();
+            (
+                scope_helper.to_str().ok_or_else(|| {
+                    Error::new(ErrorCode::State, "scope helper path is not UTF-8")
+                })?,
+                scope_arguments.as_slice(),
+            )
+        } else {
+            (program.as_str(), arguments.as_slice())
+        };
         let launch_spec = lease_command_spec_for_enforcement(
             LauncherPlatform::current(),
-            program,
-            &arguments,
+            launch_program,
+            launch_arguments,
             memory_cap,
             enforcement,
+            probe_launch_spec.scope_properties,
         );
         let mut command = Command::new(launch_spec.program);
         if enforcement == MemoryEnforcement::SystemdScope {
@@ -2459,7 +2505,8 @@ fn start_command(
             request.caller_cargo_incremental.as_deref(),
         );
         let (target_dir, target_overwrote_caller) =
-            apply_target_environment(&mut command, config, request)?;
+            apply_target_environment(&mut command, config, request)
+                .map_err(|error| Error::new(ErrorCode::TargetUnavailable, error.message))?;
         lease_record.cargo_incremental = incremental;
         lease_record.cargo_incremental_overwrote_caller = incremental_overwrote_caller;
         lease_record.cargo_target_dir = target_dir;
@@ -2512,6 +2559,7 @@ impl LauncherPlatform {
 struct LaunchSpec {
     program: std::ffi::OsString,
     arguments: Vec<std::ffi::OsString>,
+    scope_properties: Option<ScopeProperties>,
 }
 
 fn lease_command_spec(
@@ -2519,6 +2567,7 @@ fn lease_command_spec(
     program: &str,
     arguments: &[String],
     memory_cap_bytes: Option<u64>,
+    scope_properties: Option<ScopeProperties>,
 ) -> LaunchSpec {
     if platform == LauncherPlatform::Linux
         && let Some(memory_cap_bytes) = memory_cap_bytes
@@ -2531,20 +2580,22 @@ fn lease_command_spec(
             format!("MemoryMax={memory_cap_bytes}").into(),
             "-p".into(),
             "MemorySwapMax=0".into(),
-            "-p".into(),
-            "OOMPolicy=stop".into(),
-            "--".into(),
-            program.into(),
         ];
+        if scope_properties == Some(ScopeProperties::Full) {
+            command_arguments.extend(["-p".into(), "OOMPolicy=stop".into()]);
+        }
+        command_arguments.extend(["--".into(), program.into()]);
         command_arguments.extend(arguments.iter().map(Into::into));
         LaunchSpec {
             program: "systemd-run".into(),
             arguments: command_arguments,
+            scope_properties,
         }
     } else {
         LaunchSpec {
             program: program.into(),
             arguments: arguments.iter().map(Into::into).collect(),
+            scope_properties: None,
         }
     }
 }
@@ -2555,25 +2606,38 @@ fn lease_command_spec_for_enforcement(
     arguments: &[String],
     memory_cap_bytes: Option<u64>,
     enforcement: MemoryEnforcement,
+    scope_properties: Option<ScopeProperties>,
 ) -> LaunchSpec {
     let scope_cap = (enforcement == MemoryEnforcement::SystemdScope)
         .then_some(memory_cap_bytes)
         .flatten();
-    lease_command_spec(platform, program, arguments, scope_cap)
+    lease_command_spec(platform, program, arguments, scope_cap, scope_properties)
 }
 
-fn systemd_scope_available(memory_cap_bytes: u64, timeout: Duration) -> bool {
+fn systemd_scope_properties(memory_cap_bytes: u64, timeout: Duration) -> Option<ScopeProperties> {
     if !memory_controller_delegated() {
-        return false;
+        return None;
     }
-    let spec = lease_command_spec(
-        LauncherPlatform::Linux,
-        "/usr/bin/true",
-        &[],
-        Some(memory_cap_bytes),
-    );
-    run_probe_with_timeout(timeout, || {
-        Command::new(spec.program).args(spec.arguments).spawn()
+    crate::scope_properties::cached(|properties| {
+        let spec = lease_command_spec(
+            LauncherPlatform::Linux,
+            "/usr/bin/true",
+            &[],
+            Some(memory_cap_bytes),
+            Some(properties),
+        );
+        run_probe_with_timeout(timeout, || {
+            Command::new(spec.program)
+                .args(spec.arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        })
+    })
+    .unwrap_or_else(|error| {
+        eprintln!("scope capability cache unavailable: {error}");
+        None
     })
 }
 
@@ -2658,15 +2722,20 @@ fn select_lease_launch(
     arguments: &[String],
     memory_cap_bytes: Option<u64>,
     on_missing: crate::config::OnMissingCgroup,
-    probe: impl FnMut(u64) -> bool,
+    mut probe: impl FnMut(u64) -> Option<ScopeProperties>,
 ) -> (MemoryEnforcement, LaunchSpec) {
-    let enforcement = select_memory_enforcement(platform, memory_cap_bytes, on_missing, probe);
+    let mut properties = None;
+    let enforcement = select_memory_enforcement(platform, memory_cap_bytes, on_missing, |cap| {
+        properties = probe(cap);
+        properties.is_some()
+    });
     let launch = lease_command_spec_for_enforcement(
         platform,
         program,
         arguments,
         memory_cap_bytes,
         enforcement,
+        properties,
     );
     (enforcement, launch)
 }
@@ -3338,6 +3407,7 @@ pub(crate) fn prune_exported(store: &Store, exported_only: bool) -> Result<usize
             "notice.json",
             "launch.json",
             "spawn.lock",
+            "scope-oom.json",
         ] {
             match std::fs::remove_file(store.path.join(format!("{}.{extension}", id.0))) {
                 Ok(()) => {}

@@ -104,6 +104,20 @@ pub(crate) fn for_request(request: &Request, config: &Config, clock: u64) -> Dia
             "not-signalled/operator-release",
         );
     }
+    if request.reason.as_deref() == Some("target_unavailable") {
+        return Diagnostic::failure(
+            Code::TargetUnavailable,
+            id,
+            "command.target_writable",
+            true.into(),
+            false.into(),
+            request
+                .supervision_detail
+                .as_deref()
+                .unwrap_or("target preparation failed"),
+            &process(request, true),
+        );
+    }
     let memory_key = request.memory_limit_key.clone().unwrap_or_else(|| {
         if config.memory_per_job_by_class.contains_key(&request.class) {
             format!(
@@ -340,6 +354,12 @@ pub(crate) fn unscoped(error: &Error, request: String) -> Failure {
                 _ => Code::PolicyModified,
             },
             "control.transition_valid",
+            Value::Boolean(true),
+        )
+    } else if error.code == ErrorCode::TargetUnavailable {
+        (
+            Code::TargetUnavailable,
+            "command.target_writable",
             Value::Boolean(true),
         )
     } else if error.code == ErrorCode::Request {
