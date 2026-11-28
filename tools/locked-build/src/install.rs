@@ -68,6 +68,7 @@ pub(crate) fn install_tools(
             "install-tools refuses a dirty or unverifiable source tree; commit the build inputs and rebuild from clean source",
         ));
     }
+    let textfile_directory = std::cell::RefCell::new(None);
     install_tools_owned(
         home,
         current_exe,
@@ -78,7 +79,11 @@ pub(crate) fn install_tools(
         crate::build_info::COMMIT,
         drain_timeout,
         Config::measured_default,
-        || install_npm_packages(&read_manifest(TOOL_MANIFEST)?),
+        || {
+            install_npm_packages(&read_manifest(TOOL_MANIFEST)?)?;
+            textfile_directory.replace(Some(detect_textfile_directory()?));
+            Ok(())
+        },
         || {
             let shared = crate::writable::shared_root()?;
             install_monitoring(
@@ -86,7 +91,9 @@ pub(crate) fn install_tools(
                 &home.join(".local/bin/locked-build"),
                 &shared,
                 &shared.join("policy.json"),
-                &detect_textfile_directory()?,
+                textfile_directory.borrow().as_deref().ok_or_else(|| {
+                    Error::new(ErrorCode::State, "monitoring preflight result missing")
+                })?,
             )?;
             activate_monitoring(home)
         },
@@ -164,12 +171,34 @@ fn install_tools_owned(
     std::fs::create_dir_all(installed_bin_dir)?;
     let config_dir = crate::writable::host_root(Some(home));
     let shared = crate::writable::private_directory(shared)?;
-    let held = transaction::Checked::new(home, &shared)?.hold(drain_timeout)?;
+    let checked = transaction::Checked::new(home, &shared)?;
+    let preflight = || -> Result<Option<Config>> {
+        prepare()?;
+        if !shared.join("policy.json").exists()
+            && !config_dir.join("policy.json").exists()
+            && !home.join(".config/locked-build/policy.json").exists()
+        {
+            Ok(Some(measure_policy()?))
+        } else {
+            Ok(None)
+        }
+    };
+    // Ordinary installs do all slow preparation before observing idle capacity.
+    // Drain holds admission first, but leaves the state lock free throughout
+    // preflight so running leases can finish. Neither path performs network
+    // work between the idle check and publishing the installed replacement.
+    let (held, measured_policy) = if drain_timeout.is_some() {
+        let held = checked.hold(drain_timeout)?;
+        let measured = preflight()?;
+        (held, measured)
+    } else {
+        let measured = preflight()?;
+        (checked.hold(drain_timeout)?, measured)
+    };
     let idle = held.wait_idle()?;
     if shared.join("policy-ledger.json").exists() {
         crate::policy::check(&shared, &shared.join("policy.json"))?;
     }
-    prepare()?;
     let swapped = idle.swap(current_exe, &installed_path)?;
     crate::store::Store {
         path: shared.clone(),
@@ -201,7 +230,12 @@ fn install_tools_owned(
     } else if policy_path.exists() {
         Config::read(&policy_path)?
     } else {
-        let mut policy = measure_policy()?;
+        let mut policy = measured_policy.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Configuration,
+                "host policy disappeared after preflight; retry installation",
+            )
+        })?;
         policy.host = policy.host.to_ascii_lowercase();
         policy.real_cargo = discover_executable(search_path, "cargo", current_exe);
         if policy.target_root.is_none() {
@@ -919,17 +953,16 @@ mod tests {
         std::fs::create_dir_all(home.join(".local/bin"))?;
         let binary = home.join(".local/bin/locked-build");
         std::fs::write(&binary, b"old installed bytes")?;
-        let result = install_tools_with_measurement(
-            &home,
-            &std::env::current_exe()?,
-            None,
-            &shared,
-            Config::measured_default,
-        );
+        let result =
+            install_tools_with_measurement(&home, &std::env::current_exe()?, None, &shared, || {
+                Ok(Config::default())
+            });
+        let error = result
+            .err()
+            .ok_or_else(|| Error::new(ErrorCode::State, "live queue was not refused"))?;
         assert!(
-            result
-                .err()
-                .is_some_and(|error| error.message.contains("drain queued and running leases"))
+            error.message.contains("drain queued and running leases"),
+            "{error}"
         );
         assert_eq!(std::fs::read(binary)?, b"old installed bytes");
         assert_eq!(std::fs::read(shared.join("state.json"))?, before);

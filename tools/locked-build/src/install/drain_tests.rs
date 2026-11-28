@@ -54,6 +54,15 @@ impl Fixture {
         prepare: impl FnOnce() -> Result<()>,
         finish: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        self.install_mode(Some(timeout), prepare, finish)
+    }
+
+    fn install_mode(
+        &self,
+        timeout: Option<Duration>,
+        prepare: impl FnOnce() -> Result<()>,
+        finish: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         install_tools_owned(
             &self.home,
             &self.artifact,
@@ -62,7 +71,7 @@ impl Fixture {
             "fixture-rollout",
             None,
             "1111111111111111111111111111111111111111",
-            Some(timeout),
+            timeout,
             || Ok(Config::default()),
             prepare,
             finish,
@@ -75,6 +84,89 @@ impl Fixture {
             },
         )
     }
+}
+
+#[test]
+fn install_preflight_precedes_normal_hold_and_drain_idle_check() -> Result<()> {
+    for drain in [false, true] {
+        let fixture = Fixture::new()?;
+        let running = fixture.enqueue()?;
+        fixture.store.transaction(|state, _| {
+            let request = state.find_mut(&running)?;
+            request.phase = Phase::Running;
+            request.worker = Some(crate::process::Processes::self_identity()?);
+            request.worker_generation = 1;
+            request.started_at_ms = Some(crate::runtime::now_ms()?);
+            request.started_clock_ms = Some(crate::runtime::clock_ms()?);
+            Ok(())
+        })?;
+        let prepared = std::cell::Cell::new(false);
+        fixture.install_mode(
+            drain.then_some(Duration::from_millis(500)),
+            || {
+                assert_eq!(fixture.store.queue_hold()?.is_some(), drain);
+                assert_eq!(fixture.store.try_admission_lock()?.is_none(), drain);
+                assert!(
+                    fixture.store.try_lock_member("lock")?.is_some(),
+                    "preflight blocked running completion"
+                );
+                assert!(!fixture.store.path.join("install-transaction.json").exists());
+                fixture.store.transaction(|state, config| {
+                    assert_eq!(state.find(&running)?.phase, Phase::Running);
+                    state.finish(
+                        &running,
+                        Completion {
+                            code: Some(0),
+                            ..Completion::default()
+                        },
+                        config,
+                        crate::runtime::now_ms()?,
+                        crate::runtime::clock_ms()?,
+                    )
+                })?;
+                prepared.set(true);
+                Ok(())
+            },
+            || {
+                assert!(prepared.get());
+                assert!(fixture.store.try_lock_member("lock")?.is_none());
+                assert_eq!(
+                    std::fs::read(fixture.home.join(".local/bin/locked-build"))?,
+                    b"new artifact"
+                );
+                Ok(())
+            },
+        )?;
+        assert!(prepared.get());
+        assert!(fixture.store.queue_hold()?.is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn install_preflight_failure_does_not_hold_ordinary_admission_and_resumes_drain() -> Result<()> {
+    for drain in [false, true] {
+        let fixture = Fixture::new()?;
+        let result = fixture.install_mode(
+            drain.then_some(Duration::from_secs(1)),
+            || {
+                assert_eq!(fixture.store.queue_hold()?.is_some(), drain);
+                assert!(fixture.store.try_lock_member("lock")?.is_some());
+                Err(Error::new(ErrorCode::Io, "preflight failed"))
+            },
+            || panic!("preflight failure must prevent swap"),
+        );
+        assert!(result.is_err_and(|error| error.message.as_ref() == "preflight failed"));
+        assert!(fixture.store.queue_hold()?.is_none());
+        assert!(fixture.store.try_admission_lock()?.is_some());
+        assert_eq!(
+            std::fs::read(fixture.home.join(".local/bin/locked-build"))?,
+            b"old artifact"
+        );
+        assert!(!fixture.store.path.join("install-transaction.json").exists());
+        assert_eq!(fixture.store.path.join("queue-hold.json").exists(), drain);
+    }
+    Ok(())
 }
 
 /// Provenance: SWM-429. Trace: FR-011-AC-7, FR-005-AC-4
@@ -174,12 +266,18 @@ fn install_drain_timeout_releases_hold_and_keeps_running_and_queued_records() ->
     })?;
     let before = std::fs::read(fixture.store.path.join("state.json"))?;
     let started = Instant::now();
+    let prepared = std::cell::Cell::new(false);
     let result = fixture.install(
         Duration::from_millis(40),
-        || panic!("must not prepare before drain"),
+        || {
+            assert!(fixture.store.queue_hold()?.is_some());
+            prepared.set(true);
+            Ok(())
+        },
         || Ok(()),
     );
     assert!(result.is_err_and(|error| error.message.contains("drain timed out")));
+    assert!(prepared.get());
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(
         std::fs::read(fixture.store.path.join("state.json"))?,
@@ -230,22 +328,14 @@ fn install_drain_bounds_state_lock_wait_and_fails_closed_on_corrupt_state() -> R
     let fixture = Fixture::new()?;
     fixture.enqueue()?;
     let writer = fixture.store.try_lock_member("lock")?;
-    let result = fixture.install(
-        Duration::from_millis(40),
-        || panic!("state lock unavailable"),
-        || Ok(()),
-    );
+    let result = fixture.install(Duration::from_millis(40), || Ok(()), || Ok(()));
     assert!(result.is_err_and(|error| error.message.contains("drain timed out")));
     assert!(fixture.store.try_admission_lock()?.is_some());
     drop(writer);
     std::fs::write(fixture.store.path.join("state.json"), b"invalid state")?;
     assert!(
         fixture
-            .install(
-                Duration::from_secs(1),
-                || panic!("corrupt state"),
-                || Ok(())
-            )
+            .install(Duration::from_secs(1), || Ok(()), || Ok(()))
             .is_err()
     );
     assert!(fixture.store.try_admission_lock()?.is_some());
@@ -285,11 +375,7 @@ fn install_drain_refuses_unsupported_scheduler_and_queued_worker_without_swappin
                 .try_lock_member(&format!("{}.spawn.lock", id.0))?
         };
         let before = std::fs::read(fixture.store.path.join("state.json"))?;
-        let result = fixture.install(
-            Duration::from_secs(1),
-            || panic!("unsupported participant"),
-            || Ok(()),
-        );
+        let result = fixture.install(Duration::from_secs(1), || Ok(()), || Ok(()));
         assert!(
             result.is_err_and(|error| error.message.contains("does not support install drain"))
         );

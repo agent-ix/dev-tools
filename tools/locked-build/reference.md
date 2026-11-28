@@ -39,6 +39,9 @@ Rules:
 2. `install-tools --owner OWNER --drain --drain-timeout-ms 300000` waits at most
    the configured bound for active leases. Timeout rolls back and resumes;
    nothing is cancelled. Ordinary installs still require an empty queue.
+   Ordinary preflight (npm, discovery and host measurement) runs before the hold
+   and idle check. Drain takes the hold before preflight, leaving the state lock
+   free for running completion. Neither path does network work during the swap.
 3. Rust stage types enforce Check → Hold → WaitIdle → Swap → Verify → Resume.
    Files are backed up before replacement. A returned failure restores them
    before reopening admission. An unreadable backup fails closed with the hold
