@@ -231,7 +231,10 @@ pub(crate) fn install_alias(default: &Path, shared: &Path) -> std::io::Result<()
             let metadata = fs::symlink_metadata(default)?;
             if metadata.uid() == nix::unistd::geteuid().as_raw()
                 && metadata.is_symlink()
-                && default.canonicalize()? == shared.canonicalize()?
+                // Policy aliases may precede first policy creation. Keep an
+                // exact dangling target idempotent; canonicalize migrated ones.
+                && (fs::read_link(default)? == shared
+                    || default.canonicalize()? == shared.canonicalize()?)
             {
                 Ok(())
             } else {
