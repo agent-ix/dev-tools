@@ -115,41 +115,73 @@ pub(crate) fn publish_file(path: &Path, bytes: &[u8], force: bool) -> Result<boo
 }
 
 pub(crate) fn shared_root() -> Result<PathBuf> {
-    shared_root_at(
+    private_directory(&shared_path()?)
+}
+
+/// Resolve only the two owned migration namespaces; never create state for a read.
+pub(crate) fn shared_path() -> Result<PathBuf> {
+    shared_path_at(
         &Path::new("/tmp").join(format!("ix-build-{}", nix::unistd::geteuid())),
         &legacy_shared_path(),
     )
 }
 
-fn shared_root_at(new: &Path, legacy: &Path) -> Result<PathBuf> {
-    if new.try_exists()? && legacy.try_exists()? && new.canonicalize()? != legacy.canonicalize()? {
-        return Err(Error::new(
+pub(crate) fn shared_path_at(new: &Path, legacy: &Path) -> Result<PathBuf> {
+    let invalid = || {
+        Error::new(
             ErrorCode::State,
-            "both namespace paths exist; preserving both",
-        ));
-    }
-    let path = existing_root(new.to_owned(), legacy.to_owned());
-    // Only the exact, owned legacy-store alias created by install-tools is valid.
-    if fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.uid() != nix::unistd::geteuid().as_raw()
-            || path.canonicalize()? != legacy.canonicalize()?
-        {
-            return Err(Error::new(
-                ErrorCode::State,
-                "unexpected shared namespace alias",
-            ));
+            "unexpected or non-private shared namespace alias",
+        )
+    };
+    let mut directory = None;
+    let mut aliases = Vec::new();
+    for path in [new, legacy] {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.uid() != nix::unistd::geteuid().as_raw() {
+            return Err(invalid());
         }
-        return private_directory(legacy);
+        if metadata.is_symlink() {
+            aliases.push(path);
+        } else if metadata.is_dir() && metadata.permissions().mode() & 0o777 == 0o700 {
+            let canonical = path.canonicalize()?;
+            if directory.as_ref().is_some_and(|prior| prior != &canonical) {
+                return Err(Error::new(
+                    ErrorCode::State,
+                    "both namespace paths exist; preserving both",
+                ));
+            }
+            directory = Some(canonical);
+        } else {
+            return Err(invalid());
+        }
     }
-    private_directory(&path)
-}
-
-pub(crate) fn shared_path() -> PathBuf {
-    existing_root(
-        Path::new("/tmp").join(format!("ix-build-{}", nix::unistd::geteuid())),
-        legacy_shared_path(),
-    )
+    if let Some(directory) = directory {
+        for alias in aliases {
+            let target = fs::read_link(alias)?;
+            let target = if target.is_absolute() {
+                target
+            } else {
+                alias.parent().ok_or_else(invalid)?.join(target)
+            };
+            // The final target itself must be the expected real directory, not
+            // another alias that could redirect both namespace names elsewhere.
+            if !fs::symlink_metadata(&target)?.is_dir() || target.canonicalize()? != directory {
+                return Err(invalid());
+            }
+        }
+        return Ok(directory);
+    }
+    if !aliases.is_empty() {
+        return Err(invalid());
+    }
+    // Fresh hosts retain a canonical spelling without creating a queue during
+    // metrics/recover reads. Writable callers create the private directory.
+    let parent = new.parent().ok_or_else(invalid)?.canonicalize()?;
+    Ok(parent.join(new.file_name().ok_or_else(invalid)?))
 }
 
 pub(crate) fn legacy_shared_path() -> PathBuf {
@@ -199,7 +231,7 @@ pub(crate) fn install_alias(default: &Path, shared: &Path) -> std::io::Result<()
             let metadata = fs::symlink_metadata(default)?;
             if metadata.uid() == nix::unistd::geteuid().as_raw()
                 && metadata.is_symlink()
-                && fs::read_link(default)? == shared
+                && default.canonicalize()? == shared.canonicalize()?
             {
                 Ok(())
             } else {
@@ -258,6 +290,91 @@ pub(crate) fn access_denied(error: &std::io::Error) -> bool {
 mod tests {
     use super::*;
 
+    /// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-436.
+    #[test]
+    fn default_state_alias_resolves_both_migration_directions_without_replacing_the_store()
+    -> Result<()> {
+        for reverse in [false, true] {
+            let root = tempfile::Builder::new().tempdir_in("/tmp")?;
+            let new = root.path().join("ix-build");
+            let legacy = root.path().join("locked-build");
+            let (real, alias) = if reverse {
+                (&new, &legacy)
+            } else {
+                (&legacy, &new)
+            };
+            let expected = private_directory(real)?;
+            fs::write(real.join("state.json"), b"preserved queue")?;
+            fs::write(real.join("policy-ledger.json"), b"preserved ledger")?;
+            fs::write(
+                real.join("policy.json"),
+                b"{\"host\":\"fixture\",\"capacity_units\":1}",
+            )?;
+            std::os::unix::fs::symlink(real, alias)?;
+            let inode = fs::metadata(real)?.ino();
+            let resolved = shared_path_at(&new, &legacy)?;
+            assert_eq!(resolved, expected);
+            assert!(!fs::symlink_metadata(&resolved)?.is_symlink());
+            assert_eq!(fs::metadata(&resolved)?.ino(), inode);
+            let store =
+                crate::store::Store::open_existing(&resolved, &resolved.join("policy.json"))?;
+            assert_eq!(store.path, expected);
+            assert!(
+                crate::store::Store::open_existing(alias, &resolved.join("policy.json")).is_err()
+            );
+            assert_eq!(fs::read(resolved.join("state.json"))?, b"preserved queue");
+            assert_eq!(
+                fs::read(resolved.join("policy-ledger.json"))?,
+                b"preserved ledger"
+            );
+            let home_alias = root.path().join("home-state");
+            std::os::unix::fs::symlink(&legacy, &home_alias)?;
+            assert_eq!(shared_state(&home_alias, &resolved)?, resolved);
+            #[cfg(target_os = "macos")]
+            assert!(resolved.starts_with("/private/tmp"));
+        }
+        Ok(())
+    }
+
+    /// Trace: FR-011-AC-7. Provenance: SWM-436.
+    #[test]
+    fn default_state_fresh_resolution_is_read_only_and_writable_creation_is_private() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let new = root.path().join("ix-build");
+        let legacy = root.path().join("locked-build");
+        let path = shared_path_at(&new, &legacy)?;
+        assert_eq!(path, root.path().canonicalize()?.join("ix-build"));
+        assert!(!new.exists());
+        assert!(!legacy.exists());
+        assert_eq!(private_directory(&path)?, path);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(shared_path_at(&new, &legacy)?, path);
+        Ok(())
+    }
+
+    /// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-436.
+    #[test]
+    fn default_state_alias_refuses_escapes_chains_and_conflicting_directories() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let new = root.path().join("ix-build");
+        let legacy = root.path().join("locked-build");
+        let outside = private_directory(&root.path().join("outside"))?;
+        fs::write(outside.join("state.json"), b"outside queue")?;
+        std::os::unix::fs::symlink(&outside, &new)?;
+        assert!(shared_path_at(&new, &legacy).is_err());
+        std::os::unix::fs::symlink(&outside, &legacy)?;
+        assert!(shared_path_at(&new, &legacy).is_err());
+        fs::remove_file(&legacy)?;
+        private_directory(&legacy)?;
+        assert!(shared_path_at(&new, &legacy).is_err());
+        fs::remove_file(&new)?;
+        private_directory(&new)?;
+        assert!(shared_path_at(&new, &legacy).is_err());
+        assert_eq!(fs::read(outside.join("state.json"))?, b"outside queue");
+        Ok(())
+    }
+
     /// Trace: FR-011-AC-7. Provenance: SWM-431.
     #[test]
     fn private_directory_returns_canonical_tmp_path() -> Result<()> {
@@ -291,7 +408,7 @@ mod tests {
         let inode = fs::metadata(old.join("state.json"))?.ino();
         migrate_namespace(&new, &old)?;
         migrate_namespace(&new, &old)?;
-        assert_eq!(shared_root_at(&new, &old)?, old);
+        assert_eq!(shared_path_at(&new, &old)?, old);
         assert_eq!(fs::read(new.join("state.json"))?, b"running lease");
         assert_eq!(fs::read(new.join("policy-ledger.json"))?, b"audited policy");
         assert_eq!(fs::metadata(new.join("state.json"))?.ino(), inode);
@@ -305,7 +422,7 @@ mod tests {
         let conflict = private_directory(&root.path().join("conflict"))?;
         fs::write(conflict.join("state.json"), b"other queue")?;
         assert!(migrate_namespace(&conflict, &old).is_err());
-        assert!(shared_root_at(&conflict, &old).is_err());
+        assert!(shared_path_at(&conflict, &old).is_err());
         assert_eq!(fs::read(conflict.join("state.json"))?, b"other queue");
         Ok(())
     }
