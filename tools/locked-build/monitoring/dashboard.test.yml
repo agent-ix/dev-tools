@@ -378,6 +378,74 @@
           ]
         }
       ]
+    },
+    {
+      "name": "FR-015-AC-3 stacked totals and host misses preserve multi-host counts",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_kache_hits_total{host=\"luna\",store=\"local\"}",
+          "values": "0+8x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"luna\",store=\"local\"}",
+          "values": "0+2x120"
+        },
+        {
+          "series": "ix_kache_hits_total{host=\"draco\",store=\"local\"}",
+          "values": "0+4x120"
+        },
+        {
+          "series": "ix_kache_misses_total{host=\"draco\",store=\"local\"}",
+          "values": "0+6x120"
+        }
+      ],
+      "promql_expr_test": [
+        {
+          "expr": "sum(ix_kache:hits_1h{host=~\"luna|draco\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 720
+            }
+          ]
+        },
+        {
+          "expr": "sum(ix_kache:misses_1h{host=~\"luna|draco\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 480
+            }
+          ]
+        },
+        {
+          "expr": "sum by(host) (ix_kache:misses_1h{host=~\"luna|draco\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{host=\"luna\"}",
+              "value": 120
+            },
+            {
+              "labels": "{host=\"draco\"}",
+              "value": 360
+            }
+          ]
+        },
+        {
+          "expr": "sum(ix_kache:misses_1h{host=\"luna\"})",
+          "eval_time": "90m",
+          "exp_samples": [
+            {
+              "labels": "{}",
+              "value": 120
+            }
+          ]
+        }
+      ]
     }
   ]
 }

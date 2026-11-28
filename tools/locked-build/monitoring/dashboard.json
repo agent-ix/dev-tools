@@ -2,7 +2,7 @@
   "uid": "locked-build",
   "title": "Build storage and cache",
   "schemaVersion": 39,
-  "version": 4,
+  "version": 5,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -163,7 +163,7 @@
     },
     {
       "id": 3,
-      "title": "Hit / miss ratio",
+      "title": "Total hits / misses per hour",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -178,8 +178,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache:hit_ratio{host=~\"$host\"}",
-          "legendFormat": "{{host}} hit",
+          "expr": "sum(ix_kache:hits_1h{host=~\"$host\"})",
+          "legendFormat": "Hits",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -187,8 +187,8 @@
         },
         {
           "refId": "B",
-          "expr": "ix_kache:miss_ratio{host=~\"$host\"}",
-          "legendFormat": "{{host}} miss",
+          "expr": "sum(ix_kache:misses_1h{host=~\"$host\"})",
+          "legendFormat": "Misses",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -197,32 +197,71 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
+          "unit": "short",
           "custom": {
-            "fillOpacity": 10,
-            "lineInterpolation": "smooth",
+            "fillOpacity": 45,
+            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "showPoints": "never"
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
           },
-          "min": 0,
-          "max": 1
+          "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Hits"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Misses"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
           "showLegend": true,
-          "placement": "bottom"
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
-          "mode": "multi"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
-      "description": "Rolling one-hour compile results. Idle hosts with no results show zero for both ratios."
+      "description": "Rolling one-hour cache results summed across selected hosts. The stacked areas show Hits and Misses explicitly; more hits means more compiler work reused. Counts depend on build volume."
     },
     {
       "id": 4,
-      "title": "Hits / misses per hour",
+      "title": "Misses per hour by host",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -237,17 +276,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_kache:hits_1h{host=~\"$host\"}",
-          "legendFormat": "{{host}} hits",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        },
-        {
-          "refId": "B",
-          "expr": "ix_kache:misses_1h{host=~\"$host\"}",
-          "legendFormat": "{{host}} misses",
+          "expr": "sum by(host) (ix_kache:misses_1h{host=~\"$host\"})",
+          "legendFormat": "Misses — {{host}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -258,23 +288,34 @@
         "defaults": {
           "unit": "short",
           "custom": {
-            "fillOpacity": 10,
-            "lineInterpolation": "smooth",
+            "fillOpacity": 45,
+            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "showPoints": "never"
-          }
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
           "showLegend": true,
-          "placement": "bottom"
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
-          "mode": "multi"
+          "mode": "multi",
+          "sort": "desc"
         }
-      }
+      },
+      "description": "Rolling one-hour misses, stacked by selected host. Each layer shows that host’s contribution to total misses."
     },
     {
       "id": 5,
