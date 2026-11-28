@@ -2,7 +2,7 @@
   "uid": "locked-build",
   "title": "Build storage and cache",
   "schemaVersion": 39,
-  "version": 6,
+  "version": 7,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -319,7 +319,7 @@
     },
     {
       "id": 5,
-      "title": "Compile time saved per hour",
+      "title": "Compile time saved per hour — stacked total",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -346,24 +346,34 @@
         "defaults": {
           "unit": "s",
           "custom": {
-            "fillOpacity": 10,
-            "lineInterpolation": "smooth",
+            "fillOpacity": 45,
+            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "showPoints": "never"
-          }
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
         },
         "overrides": []
       },
       "options": {
         "legend": {
           "showLegend": true,
-          "placement": "bottom"
+          "placement": "bottom",
+          "displayMode": "table",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
-          "mode": "multi"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
-      "description": "Compile time saved on cache hits in the rolling hour, as reported by kache. Host-wide activity; not attributed to an individual build."
+      "description": "Rolling one-hour compile time saved on cache hits, stacked by selected host. The top of the stack is total reported time saved across those hosts; each layer shows one host’s contribution. Host-wide kache activity, not attributed to an individual build."
     },
     {
       "id": 6,
