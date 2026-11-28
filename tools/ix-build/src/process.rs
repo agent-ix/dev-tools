@@ -577,7 +577,7 @@ fn parse_anonymous_memory(contents: &str) -> Option<u64> {
     kib.checked_mul(1024)
 }
 
-fn cgroup_memory_events_file(pid: u32) -> Option<PathBuf> {
+pub(crate) fn cgroup_memory_events_file(pid: u32) -> Option<PathBuf> {
     let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
     let relative = membership
         .lines()

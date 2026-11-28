@@ -21,6 +21,171 @@ use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+fn smoke_binary() -> PathBuf {
+    std::env::var_os("IX_BUILD_SMOKE_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ix-build")))
+}
+
+/// Provenance: SWM-435. Trace: FR-005-AC-4, FR-011-AC-7
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "native Linux user-systemd-bus cargo shim and enforced MemoryMax proof"]
+fn cargo_shim_check_succeeds_under_enforced_scope_memory_limit() -> TestResult {
+    let harness = Harness::new(4, 120000)?;
+    let real_cargo = std::env::var_os("IX_BUILD_SMOKE_REAL_CARGO")
+        .map(PathBuf::from)
+        .ok_or("set IX_BUILD_SMOKE_REAL_CARGO to real cargo")?;
+    let mut policy: Value = serde_json::from_slice(&fs::read(&harness.config)?)?;
+    policy["memory_admission"] = json!("lease_accounted");
+    policy["memory_budget_bytes"] = json!(4_294_967_296_u64);
+    policy["memory_reserve_per_job_bytes"] = json!(250_000_000);
+    policy["memory_limit_per_job_bytes"] = json!(536_870_912);
+    policy["cargo_build_jobs"] = json!(4);
+    policy["rust_test_threads"] = json!(4);
+    policy["real_cargo"] = json!(real_cargo);
+    policy["on_missing_cgroup"] = json!("refuse");
+    fs::write(&harness.config, serde_json::to_vec(&policy)?)?;
+    let project = harness.root.path().join("cargo-smoke");
+    fs::create_dir_all(project.join("src"))?;
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"scope-smoke\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    )?;
+    fs::write(project.join("src/lib.rs"), "pub fn smoke() {}\n")?;
+    // This runs inside the real compiler command's scope, so a recorded backend
+    // alone cannot make the check pass without the kernel's enforced limits.
+    fs::write(
+        project.join("build.rs"),
+        r#"
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let membership = std::fs::read_to_string("/proc/self/cgroup")?;
+    let relative = membership.lines().find_map(|line| line.strip_prefix("0::")).ok_or("no cgroup v2")?;
+    let group = std::path::Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+    let maximum = std::fs::read_to_string(group.join("memory.max"))?;
+    let swap = std::fs::read_to_string(group.join("memory.swap.max"))?;
+    assert_eq!(maximum.trim(), "2147483648");
+    assert_eq!(swap.trim(), "0");
+    std::fs::write(std::env::var_os("SCOPE_SMOKE_EVIDENCE").ok_or("evidence path missing")?, format!("MemoryMax={} MemorySwapMax={} cgroup={}\n", maximum.trim(), swap.trim(), relative))?;
+    Ok(())
+}
+"#,
+    )?;
+    let shim = harness.root.path().join("shim");
+    fs::create_dir(&shim)?;
+    std::os::unix::fs::symlink(smoke_binary(), shim.join("cargo"))?;
+    let evidence = harness.root.path().join("enforcement.txt");
+    let output = Command::new(shim.join("cargo"))
+        .args(["check", "--offline", "-j", "4"])
+        .current_dir(project)
+        .env_remove("IX_BUILD_LEASE")
+        .env_remove("LOCKED_BUILD_LEASE")
+        .env_remove("CARGO_BUILD_JOBS")
+        .env_remove("RUST_TEST_THREADS")
+        .env("IX_BUILD_STATE", &harness.state)
+        .env("IX_BUILD_CONFIG", &harness.config)
+        .env("IX_BUILD_OWNER", "swm-435-native-smoke")
+        .env("IX_BUILD_TICKET", "SWM-435")
+        .env("CARGO_TARGET_DIR", harness.root.path().join("target"))
+        .env("SCOPE_SMOKE_EVIDENCE", &evidence)
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let persisted = harness.persisted()?;
+        for row in persisted["requests"].as_array().into_iter().flatten() {
+            let id = row["id"].as_str().ok_or("missing request id")?;
+            eprintln!(
+                "{row}\nWORKER: {}",
+                fs::read_to_string(harness.state.join(format!("{id}.stderr")))?
+            );
+        }
+    }
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("SUPERVISION_LOST"), "{stderr}");
+    let row = harness.request(0)?;
+    assert_eq!(row["state"], "succeeded", "{row}");
+    assert_eq!(row["exit_code"], 0, "{row}");
+    assert!(row["code"].is_null(), "{row}");
+    assert_eq!(
+        row["lease_record"]["memory_enforcement"], "systemd_scope",
+        "{row}"
+    );
+    assert_eq!(row["memory_cap_bytes"], 2_147_483_648_u64);
+    eprintln!(
+        "SWM-435 real cargo check: exit=0 supervision_required=true {}",
+        fs::read_to_string(evidence)?.trim()
+    );
+    Ok(())
+}
+
+/// Provenance: SWM-435. Trace: FR-005-AC-4, FR-011-AC-7
+#[test]
+fn target_start_failure_has_its_own_diagnostic_and_never_starts_the_command() -> TestResult {
+    let harness = Harness::new(4, 120000)?;
+    let target = harness.root.path().join("target-is-a-file");
+    fs::write(&target, "not a directory")?;
+    let marker = harness.root.path().join("must-not-start");
+    let output = harness
+        .cli()
+        .args([
+            "run",
+            "--owner",
+            "target-failure",
+            "--ticket",
+            "SWM-435",
+            "--",
+        ])
+        .args(["touch"])
+        .arg(&marker)
+        .env("CARGO_TARGET_DIR", &target)
+        .output()?;
+    assert!(!output.status.success());
+    assert!(!marker.exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("IB_TARGET_UNAVAILABLE"), "{stderr}");
+    assert!(!stderr.contains("IB_SUPERVISION_LOST"), "{stderr}");
+    let request = harness.request(0)?;
+    assert_eq!(request["code"], "IB_TARGET_UNAVAILABLE");
+    assert_eq!(request["reason"], "target_unavailable");
+    assert!(request["running_at_ms"].is_null());
+    Ok(())
+}
+
+/// Provenance: SWM-435. Trace: FR-005-AC-4, FR-011-AC-7
+#[cfg(target_os = "linux")]
+#[test]
+fn read_only_target_is_not_reported_as_supervision_loss() -> TestResult {
+    let harness = Harness::new(4, 120000)?;
+    let output = harness
+        .cli()
+        .args([
+            "run",
+            "--owner",
+            "readonly-target",
+            "--ticket",
+            "SWM-435",
+            "--",
+            "/usr/bin/true",
+        ])
+        .env("CARGO_TARGET_DIR", "/sys")
+        .output()?;
+    assert!(!output.status.success());
+    let request = harness.request(0)?;
+    assert_eq!(request["code"], "IB_TARGET_UNAVAILABLE");
+    assert_eq!(request["reason"], "target_unavailable");
+    let detail = request["measured_what"]
+        .as_str()
+        .ok_or("missing failure detail")?;
+    // Some kernels check sysfs directory permissions before the read-only
+    // superblock. Either start failure must keep the same target diagnosis.
+    assert!(
+        detail.contains("ReadOnlyFilesystem") || detail.contains("PermissionDenied"),
+        "{detail}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("IB_SUPERVISION_LOST"));
+    Ok(())
+}
+
 /// Provenance: SWM-429. Trace: FR-011-AC-7, FR-005-AC-4
 #[test]
 fn install_drain_handoff_preserves_foreground_waiters_across_binary_replacement() -> TestResult {
@@ -882,7 +1047,7 @@ impl Harness {
     }
 
     fn cli(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ix-build"));
+        let mut command = Command::new(smoke_binary());
         command
             .arg("--state")
             .arg(&self.state)

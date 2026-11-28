@@ -14,6 +14,8 @@ pub enum ErrorCode {
     PolicyModified,
     /// Operating-system or filesystem operation failed.
     Io,
+    /// The command's target or temporary directory could not be prepared.
+    TargetUnavailable,
     /// A configuration field is invalid.
     Configuration,
     /// Persisted data is malformed or unsupported.
