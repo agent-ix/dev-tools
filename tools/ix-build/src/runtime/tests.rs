@@ -41,6 +41,132 @@ fn scope_probe_and_launch_require_the_same_oom_policy() {
 use crate::config::{Config, HostSample};
 use crate::model::ProcessIdentity;
 
+/// Provenance: SWM-444. Trace: FR-005-AC-4, FR-011-AC-7, FR-015-AC-8
+#[test]
+fn all_memory_policy_keys_are_live_from_file_and_policy_set() -> Result<()> {
+    let settings = [
+        ("memory_budget_bytes", "60000000000"),
+        ("memory_reserve_per_job_bytes", "2000000000"),
+        ("memory_limit_per_job_bytes", "6000000000"),
+        ("memory_reserve_per_job_by_class", r#"{"point":1500000000}"#),
+        ("memory_per_job_by_class", r#"{"point":4000000000}"#),
+        ("memory_cap_by_class", r#"{"point":24000000000}"#),
+        ("max_request_memory", "42000000000"),
+        ("memory_per_unit_bytes", "700000000"),
+        ("memory_reserve_bytes", "3000000000"),
+        ("on_missing_cgroup", r#""refuse""#),
+        ("memory_admission", r#""live_available""#),
+    ];
+    for use_set in [false, true] {
+        let root = tempfile::tempdir()?;
+        let store = lease_accounted_store(root.path(), 8, 52_000_000_000, 0)?;
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&store.config_path)?)?;
+        raw["disk_reserve_bytes"] = 100_000_000_000_u64.into();
+        std::fs::write(&store.config_path, serde_json::to_vec(&raw)?)?;
+        // This inventory assertion forces new memory settings into this test.
+        let keys: std::collections::BTreeSet<_> = raw
+            .as_object()
+            .ok_or_else(|| Error::new(ErrorCode::State, "policy object"))?
+            .keys()
+            .filter(|key| {
+                key.starts_with("memory_")
+                    || matches!(key.as_str(), "max_request_memory" | "on_missing_cgroup")
+            })
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, settings.iter().map(|(key, _)| *key).collect());
+        for (key, value) in settings {
+            let expected: serde_json::Value = serde_json::from_str(value)?;
+            if use_set {
+                crate::policy::set(&store, key, value)?;
+            } else {
+                raw[key] = expected.clone();
+                std::fs::write(&store.config_path, serde_json::to_vec(&raw)?)?;
+            }
+            store.transaction(|_, config| {
+                assert_eq!(
+                    serde_json::to_value(config)?[key],
+                    expected,
+                    "live {key}, policy set={use_set}"
+                );
+                Ok(())
+            })?;
+        }
+        store.transaction(|_, config| {
+            assert_eq!(
+                estimate_memory_reservation(config, "periodic", 4)?,
+                8_000_000_000
+            );
+            assert_eq!(
+                estimate_memory_lease(config, "periodic", 4)?,
+                24_000_000_000
+            );
+            assert_eq!(
+                estimate_memory_reservation(config, "point", 4)?,
+                6_000_000_000
+            );
+            assert_eq!(estimate_memory_lease(config, "point", 4)?, 16_000_000_000);
+            assert!(estimate_memory_lease(config, "point", 7).is_err());
+            assert_eq!(config.request_memory_cap(), Some(42_000_000_000));
+            let sample = HostSample {
+                host: config.host.clone(),
+                observed_at_ms: 100,
+                memory_available_bytes: 4_000_000_000,
+                disk_available_bytes: 200_000_000_000,
+                load_one: 0.0,
+            };
+            assert_eq!(
+                sample.block_reason(config, 100, 0, 2),
+                Some("memory_reserve")
+            );
+            assert_eq!(sample.block_reason(config, 100, 0, 1), None);
+            assert_eq!(
+                config.on_missing_cgroup,
+                crate::config::OnMissingCgroup::Refuse
+            );
+            Ok(())
+        })?;
+        if use_set {
+            crate::policy::set(&store, "memory_admission", r#""lease_accounted""#)?;
+        } else {
+            raw["memory_admission"] = "lease_accounted".into();
+            std::fs::write(&store.config_path, serde_json::to_vec(&raw)?)?;
+        }
+        // The override permits more than the automatic half-budget ceiling
+        // (30 GB), but still refuses values above the configured 42 GB cap.
+        let command = ["true".into()];
+        let id = enqueue_with_memory(
+            &store,
+            "override",
+            "SWM-444",
+            1,
+            0,
+            Some("periodic"),
+            &command,
+            Some(40_000_000_000),
+        )?;
+        assert_eq!(
+            store.snapshot()?.0.find(&id)?.memory_cap_bytes,
+            Some(40_000_000_000)
+        );
+        assert!(
+            enqueue_with_memory(
+                &store,
+                "refused",
+                "SWM-444",
+                1,
+                0,
+                Some("periodic"),
+                &command,
+                Some(43_000_000_000)
+            )
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
 /// Provenance: SWM-435. Trace: FR-005-AC-4
 #[test]
 fn memory_only_capability_keeps_both_limits_in_the_actual_launch() {

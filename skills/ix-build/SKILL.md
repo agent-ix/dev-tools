@@ -141,7 +141,7 @@ repairs a previously published outcome for the same attempt. Use its latest
 snapshot; it does not increment counters a second time. Historical counters
 retain the originally observed classification.
 
-Use `ix-build policy show` to inspect the effective policy. `ix-build policy init --force` regenerates it.
+Use `ix-build policy show` to inspect effective values and their `provenance` (`default` or `configured`, plus the supplying key). Inherited per-class reservation/limit values and the automatic explicit-request ceiling are resolved in the output. `ix-build policy init` writes visible defaults only when absent; an existing policy is preserved even with the compatibility `--force` flag. Every memory setting can be overridden by a file edit or `policy set` and is reread on admission; running grants remain fixed.
 
 Tool manifest versions are minimums: an installed version at or above the pin passes, with SemVer prerelease ordering and build metadata ignored. Entries without `version` require only an executable on PATH; `check-install` never runs their help/version commands. Missing executables fail.
 

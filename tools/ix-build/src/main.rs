@@ -223,10 +223,11 @@ enum QueueAction {
 enum PolicyAction {
     /// Validate and atomically update one policy key, with backup and audit hash.
     Set { key: String, value: String },
-    /// Print the effective host policy as JSON.
+    /// Print effective values and default/configured provenance as JSON.
     Show,
-    /// Write a measured default policy; use --force to replace an existing file.
+    /// Write visible measured defaults only if policy is absent; preserve edits.
     Init {
+        /// Accepted for compatibility; existing policy is always preserved.
         #[arg(long)]
         force: bool,
     },
@@ -383,16 +384,13 @@ fn execute(cli: Cli) -> Result<i32> {
     if let Action::Policy { command } = &cli.command {
         match command {
             PolicyAction::Show => {
-                ensure_policy(&config, false)?;
+                ensure_policy(&config)?;
                 eprintln!("state: {}\npolicy: {}", state.display(), config.display());
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&crate::config::Config::read(&config)?)?
-                );
+                println!("{}", serde_json::to_string_pretty(&policy::show(&config)?)?);
                 return Ok(0);
             }
-            PolicyAction::Init { force } => {
-                ensure_policy(&config, *force)?;
+            PolicyAction::Init { force: _ } => {
+                ensure_policy(&config)?;
                 writable::private_directory(&state)?;
                 policy::baseline(&state, &config, "init")?;
                 return Ok(0);
@@ -404,7 +402,7 @@ fn execute(cli: Cli) -> Result<i32> {
             }
         }
     }
-    ensure_policy(&config, false)?;
+    ensure_policy(&config)?;
     let store = runtime::open(&state, &config)?;
     match cli.command {
         Action::ErrorCodes { .. } => Ok(0),
@@ -619,23 +617,17 @@ fn default_policy_path(path: &std::path::Path, state: &std::path::Path) -> Resul
     writable::durable_policy(path, state)
 }
 
-fn ensure_policy(path: &std::path::Path, force: bool) -> Result<()> {
+fn ensure_policy(path: &std::path::Path) -> Result<()> {
     let current_exe = std::env::current_exe()?;
-    ensure_policy_with_discovery(
-        path,
-        force,
-        std::env::var_os("PATH").as_deref(),
-        &current_exe,
-    )
+    ensure_policy_with_discovery(path, std::env::var_os("PATH").as_deref(), &current_exe)
 }
 
 fn ensure_policy_with_discovery(
     path: &std::path::Path,
-    force: bool,
     search_path: Option<&OsStr>,
     current_exe: &std::path::Path,
 ) -> Result<()> {
-    if path.exists() && !force {
+    if path.exists() {
         crate::config::Config::read(path)?;
         return Ok(());
     }
@@ -664,7 +656,7 @@ fn ensure_policy_with_discovery(
         Err(error) => return Err(error.into()),
     }
     let bytes = serde_json::to_vec_pretty(&policy)?;
-    if writable::publish_file(path, &bytes, force)? {
+    if writable::publish_file(path, &bytes, false)? {
         eprintln!("Wrote default policy to {}", path.display());
     } else {
         config::Config::read(path)?;
@@ -699,7 +691,7 @@ fn read_shim_config_with_discovery(
     search_path: Option<&OsStr>,
     current_exe: &std::path::Path,
 ) -> Result<config::Config> {
-    ensure_policy_with_discovery(path, false, search_path, current_exe)?;
+    ensure_policy_with_discovery(path, search_path, current_exe)?;
     config::Config::read(path)
 }
 

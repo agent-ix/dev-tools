@@ -121,8 +121,16 @@ non-Cargo commands use requested units. `memory_per_unit_bytes` and
 `memory_reserve_bytes` are required only in `live_available` mode.
 Relative filesystem paths resolve from the policy file's directory.
 On first use, ix-build measures the host and writes a conservative policy.
-Use `ix-build policy show` to print it or `ix-build policy init --force`
-to regenerate it.
+Use `ix-build policy show` to print effective values with a `provenance` map.
+Each provenance entry names its supplying key and source: `configured` for
+values present in the file, or `default` for omitted settings.
+Class reservations and limits include inherited per-job values. The automatic
+`max_request_memory` ceiling is printed as its resolved budget fraction.
+Generated defaults become configured values once written into the file.
+
+`ix-build policy init` writes all defaults visibly into a new durable file.
+An existing file is validated and preserved byte for byte, including operator
+edits. The compatibility `--force` flag also preserves existing files.
 
 Generated policies and the policy example reserve 1,250,000,000 bytes per job
 for `block` and `must-fix`, and 750,000,000 bytes per job for `point`.
@@ -145,6 +153,12 @@ ix-build policy set memory_per_job_by_class '{"block":8000000000,"must-fix":8000
 
 Each command validates the whole policy, writes a temporary file, and renames
 it over the policy. A rejected value leaves the file unchanged.
+
+All memory settings accept live JSON edits and `policy set`: admission mode,
+budget, host reserve, per-unit charge, per-job reservation and limit, both
+class override maps, class caps, explicit-request ceiling, and missing-cgroup action.
+Fallbacks apply only when an override is absent; no separate byte ceiling is
+hard-coded in admission or memory enforcement. Existing running grants stay fixed.
 
 Measured defaults rank eligible writable local disks NVMe, SSD, HDD, using
 device metadata and a small file-creation probe rather than throughput tests.

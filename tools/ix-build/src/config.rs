@@ -367,9 +367,14 @@ impl Config {
     }
 
     pub(crate) fn read(path: &Path) -> Result<Self> {
-        let mut config: Self =
-            serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path)?))
-                .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        Self::from_slice(path, &std::fs::read(path)?)
+    }
+
+    /// Decode and resolve a single policy snapshot, including provenance readers.
+    /// Trace: FR-011-AC-7. Provenance: SWM-444.
+    pub(crate) fn from_slice(path: &Path, bytes: &[u8]) -> Result<Self> {
+        let mut config: Self = serde_json::from_slice(bytes)
+            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
         let directory = path
             .parent()
             .ok_or_else(|| Error::new(ErrorCode::Configuration, "policy path has no directory"))?;

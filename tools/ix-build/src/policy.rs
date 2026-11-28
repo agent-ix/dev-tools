@@ -5,7 +5,120 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Source {
+    Default,
+    Configured,
+}
+
+#[derive(Serialize)]
+struct Provenance {
+    source: Source,
+    key: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PolicyReport {
+    #[serde(flatten)]
+    effective: Config,
+    provenance: BTreeMap<String, Provenance>,
+}
+
+/// Report effective settings and the policy keys supplying their values.
+/// Trace: FR-011-AC-7. Provenance: SWM-444.
+pub(crate) fn show(path: &Path) -> Result<PolicyReport> {
+    let bytes = std::fs::read(path)?;
+    let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let mut effective = Config::from_slice(path, &bytes)?;
+    let mut provenance = BTreeMap::new();
+    collect_provenance(
+        "",
+        &serde_json::to_value(&effective)?,
+        Some(&raw),
+        &mut provenance,
+    );
+    if raw
+        .get("max_request_memory")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        provenance.insert(
+            "max_request_memory".into(),
+            Provenance {
+                source: Source::Default,
+                key: "memory_budget_bytes/2".into(),
+            },
+        );
+    }
+    effective.max_request_memory = effective.request_memory_cap();
+    for class in effective.priority_classes.keys() {
+        for (key, fallback, fallback_value, values) in [
+            (
+                "memory_reserve_per_job_by_class",
+                "memory_reserve_per_job_bytes",
+                effective.memory_reserve_per_job_bytes,
+                &mut effective.memory_reserve_per_job_by_class,
+            ),
+            (
+                "memory_per_job_by_class",
+                "memory_limit_per_job_bytes",
+                effective.memory_limit_per_job_bytes,
+                &mut effective.memory_per_job_by_class,
+            ),
+        ] {
+            if !values.contains_key(class) {
+                values.insert(class.clone(), fallback_value);
+                let mut origin = provenance_for(fallback, raw.get(fallback));
+                origin.key = fallback.into();
+                provenance.insert(format!("{key}.{class}"), origin);
+            }
+        }
+    }
+    Ok(PolicyReport {
+        effective,
+        provenance,
+    })
+}
+
+fn provenance_for(key: &str, configured: Option<&serde_json::Value>) -> Provenance {
+    Provenance {
+        source: if configured.is_some() {
+            Source::Configured
+        } else {
+            Source::Default
+        },
+        key: key.into(),
+    }
+}
+
+fn collect_provenance(
+    key: &str,
+    effective: &serde_json::Value,
+    configured: Option<&serde_json::Value>,
+    provenance: &mut BTreeMap<String, Provenance>,
+) {
+    if !key.is_empty() {
+        provenance.insert(key.into(), provenance_for(key, configured));
+    }
+    if let Some(fields) = effective.as_object() {
+        for (name, value) in fields {
+            let child = if key.is_empty() {
+                name.clone()
+            } else {
+                format!("{key}.{name}")
+            };
+            collect_provenance(
+                &child,
+                value,
+                configured.and_then(|value| value.get(name)),
+                provenance,
+            );
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

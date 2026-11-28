@@ -9,6 +9,133 @@ use serde_json::Value;
 
 /// Trace: FR-005-AC-4, FR-011-AC-7. Provenance: SWM-444.
 #[test]
+fn policy_show_reports_effective_values_with_default_and_configured_provenance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    let path = home.join(".ix/ix-build/policy.json");
+    std::fs::create_dir_all(path.parent().ok_or("policy parent")?)?;
+    let bytes = br#"{"host":"manual","memory_budget_bytes":52000000000,"memory_limit_per_job_bytes":6000000000,"memory_reserve_per_job_by_class":{"point":1000000000},"cache":{"enabled":false}}"#;
+    std::fs::write(&path, bytes)?;
+    let output = invoke(&home, root.path(), &["policy", "show"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(shown["memory_budget_bytes"], 52_000_000_000_u64);
+    assert_eq!(shown["max_request_memory"], 26_000_000_000_u64);
+    assert_eq!(
+        shown["memory_reserve_per_job_by_class"]["point"],
+        1_000_000_000_u64
+    );
+    assert_eq!(
+        shown["memory_reserve_per_job_by_class"]["block"],
+        3_000_000_000_u64
+    );
+    assert_eq!(shown["memory_per_job_by_class"]["block"], 6_000_000_000_u64);
+    for (key, source, origin) in [
+        ("memory_budget_bytes", "configured", "memory_budget_bytes"),
+        ("max_request_memory", "default", "memory_budget_bytes/2"),
+        (
+            "memory_reserve_per_job_by_class.point",
+            "configured",
+            "memory_reserve_per_job_by_class.point",
+        ),
+        (
+            "memory_reserve_per_job_by_class.block",
+            "default",
+            "memory_reserve_per_job_bytes",
+        ),
+        (
+            "memory_per_job_by_class.block",
+            "configured",
+            "memory_limit_per_job_bytes",
+        ),
+        ("cache.enabled", "configured", "cache.enabled"),
+        ("cache.mode", "default", "cache.mode"),
+    ] {
+        assert_eq!(shown["provenance"][key]["source"], source, "{key}");
+        assert_eq!(shown["provenance"][key]["key"], origin, "{key}");
+    }
+    for key in shown
+        .as_object()
+        .ok_or("report object")?
+        .keys()
+        .filter(|key| *key != "provenance")
+    {
+        assert!(
+            shown["provenance"].get(key).is_some(),
+            "no provenance for {key}"
+        );
+    }
+    assert_eq!(std::fs::read(&path)?, bytes);
+    Ok(())
+}
+
+/// Trace: FR-005-AC-4, FR-011-AC-7. Provenance: SWM-444.
+#[test]
+fn policy_init_writes_visible_defaults_once_and_never_overwrites_edits()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let output = invoke(&home, root.path(), &["policy", "init"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = home.join(".ix/ix-build/policy.json");
+    assert!(!std::fs::symlink_metadata(&path)?.is_symlink());
+    let defaults: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    assert_eq!(defaults["memory_reserve_per_job_bytes"], 3_000_000_000_u64);
+    assert_eq!(defaults["memory_limit_per_job_bytes"], 8_000_000_000_u64);
+    assert_eq!(
+        defaults["memory_reserve_per_job_by_class"]["block"],
+        1_250_000_000_u64
+    );
+    assert_eq!(
+        defaults["memory_reserve_per_job_by_class"]["must-fix"],
+        1_250_000_000_u64
+    );
+    assert_eq!(
+        defaults["memory_reserve_per_job_by_class"]["point"],
+        750_000_000_u64
+    );
+    assert!(
+        defaults["memory_budget_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0)
+    );
+    for key in [
+        "memory_admission",
+        "max_request_memory",
+        "memory_per_unit_bytes",
+        "memory_reserve_bytes",
+        "memory_per_job_by_class",
+        "memory_cap_by_class",
+        "on_missing_cgroup",
+    ] {
+        assert!(defaults.get(key).is_some(), "missing visible default {key}");
+    }
+    let edited = br#"{ "host": "operator", "memory_budget_bytes": 41000000000 }"#;
+    std::fs::write(&path, edited)?;
+    for args in [vec!["policy", "init"], vec!["policy", "init", "--force"]] {
+        let output = invoke(&home, root.path(), &args)?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(&path)?, edited);
+    }
+    Ok(())
+}
+
+/// Trace: FR-005-AC-4, FR-011-AC-7. Provenance: SWM-444.
+#[test]
 fn policy_set_memory_keys_print_before_after_and_preserve_invalid_inputs()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::MetadataExt;
@@ -183,7 +310,7 @@ fn first_run_generates_policy_runs_command_and_reuses_it_without_flags()
         String::from_utf8_lossy(&regenerated.stderr)
     );
     let regenerated_policy: Value = serde_json::from_slice(&std::fs::read(&policy_path)?)?;
-    assert_ne!(regenerated_policy["host"], "manual");
+    assert_eq!(regenerated_policy["host"], "manual");
     Ok(())
 }
 
