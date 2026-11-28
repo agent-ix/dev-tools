@@ -534,6 +534,27 @@ impl Ledger {
             }
         };
         let mut active_memory = BTreeMap::<(&str, &str), (u64, u64)>::new();
+        if let Some(head) = state.next(config, clock) {
+            let reservation = crate::runtime::admission_reservation(
+                head,
+                config,
+                state.used().saturating_add(head.units),
+            )?;
+            for (name, value) in [
+                (
+                    "ix_build_head_queued_seconds",
+                    clock.saturating_sub(head.enqueued_clock_ms) as f64 / 1000.,
+                ),
+                ("ix_build_head_memory_reservation_bytes", reservation as f64),
+            ] {
+                gauge(
+                    name,
+                    "Current queue head age or effective memory reservation.",
+                    Labels::new(),
+                    value,
+                );
+            }
+        }
         for request in state
             .requests
             .iter()

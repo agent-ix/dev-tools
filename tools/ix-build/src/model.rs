@@ -272,7 +272,7 @@ pub(crate) struct Request {
     /// Rust test thread count paired with the reserved memory lease.
     #[serde(default)]
     pub memory_rust_test_threads: Option<u32>,
-    /// Maximum parallel workers charged to this memory lease.
+    /// Effective Cargo jobs (or non-Cargo resource units) charged to this lease.
     #[serde(default)]
     pub memory_parallelism: Option<u32>,
     /// Caller-supplied build env values captured when the lease was queued.
@@ -725,6 +725,7 @@ impl State {
         })
     }
 
+    /// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
     pub(crate) fn admission_reason(
         &self,
         id: &RequestId,
@@ -741,21 +742,7 @@ impl State {
             return Ok(Some("no_eligible_request"));
         };
         if next.id != *id {
-            // Backfill only memory-blocked heads before their bounded reservation.
-            // Capacity remains charged to every admitted lease; never overcommit.
-            let reservation_ms =
-                (u64::from(config.max_priority()) + 1).saturating_mul(config.aging_ms);
-            let free = config
-                .memory_budget_bytes
-                .unwrap_or(0)
-                .saturating_sub(self.memory_used(config));
-            let backfill = config.memory_admission == MemoryAdmissionMode::LeaseAccounted
-                && next.reservation_bytes() > free
-                && clock.saturating_sub(next.enqueued_clock_ms) < reservation_ms
-                && request.reservation_bytes() <= free;
-            if !backfill {
-                return Ok(Some("fifo_or_priority_reservation"));
-            }
+            return Ok(Some("fifo_or_priority_reservation"));
         }
         let used = self.used();
         if u64::from(used) + u64::from(request.units) > u64::from(config.capacity_units) {
@@ -769,7 +756,11 @@ impl State {
         }
         if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
             let budget = config.memory_budget_bytes.unwrap_or(0);
-            let cap = request.reservation_bytes();
+            let cap = crate::runtime::admission_reservation(
+                request,
+                config,
+                used.saturating_add(request.units),
+            )?;
             if self.memory_used(config).saturating_add(cap) > budget {
                 return Ok(Some("memory_budget"));
             }
@@ -824,6 +815,7 @@ impl State {
             .collect()
     }
 
+    /// Provenance: SWM-437. Trace: FR-005-AC-4, FR-015-AC-8
     pub(crate) fn block_observations(
         &self,
         id: &RequestId,
@@ -847,9 +839,13 @@ impl State {
             add("units", units as f64, f64::from(config.capacity_units));
         }
         if config.memory_admission == MemoryAdmissionMode::LeaseAccounted {
-            let value = self
-                .memory_used(config)
-                .saturating_add(request.reservation_bytes());
+            let value =
+                self.memory_used(config)
+                    .saturating_add(crate::runtime::admission_reservation(
+                        request,
+                        config,
+                        self.used().saturating_add(request.units),
+                    )?);
             let limit = config.memory_budget_bytes.unwrap_or(0);
             if value > limit {
                 add("memory_budget", value as f64, limit as f64);

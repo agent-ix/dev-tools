@@ -4,6 +4,17 @@
       "name": "ix-build",
       "rules": [
         {
+          "alert": "IxBuildHeadWaitWithAvailableMemory",
+          "expr": "(ix_build_head_queued_seconds > 600) and on(host) (max by(host) (node_memory_MemAvailable_bytes) > on(host) ix_build_head_memory_reservation_bytes)",
+          "labels": {
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "Build queue head stalled with available memory on {{ $labels.host }}",
+            "description": "Head waited over ten minutes while MemAvailable exceeds its effective reservation. Compare status memory_reserved_bytes plus head memory_needed_bytes against memory_budget_bytes."
+          }
+        },
+        {
           "alert": "IxBuildQueueHoldOverdue",
           "expr": "(ix_build_queue_paused == 1) and on(host) (ix_build_queue_hold_age_seconds > on(host) ix_build_queue_hold_alert_after_seconds)",
           "for": "1m",

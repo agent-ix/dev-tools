@@ -5,6 +5,52 @@
   "evaluation_interval": "1m",
   "tests": [
     {
+      "name": "head stall requires over ten minutes and available memory above reservation",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "ix_build_head_queued_seconds{host=\"titan\"}",
+          "values": "0+60x12"
+        },
+        {
+          "series": "ix_build_head_memory_reservation_bytes{host=\"titan\"}",
+          "values": "3000000000+0x12"
+        },
+        {
+          "series": "node_memory_MemAvailable_bytes{host=\"titan\",instance=\"node\"}",
+          "values": "51800000000+0x11 3000000000"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "10m",
+          "alertname": "IxBuildHeadWaitWithAvailableMemory",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "11m",
+          "alertname": "IxBuildHeadWaitWithAvailableMemory",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "host": "titan",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Build queue head stalled with available memory on titan",
+                "description": "Head waited over ten minutes while MemAvailable exceeds its effective reservation. Compare status memory_reserved_bytes plus head memory_needed_bytes against memory_budget_bytes."
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "12m",
+          "alertname": "IxBuildHeadWaitWithAvailableMemory",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
       "name": "durable queue hold alerts only after its bound",
       "interval": "1m",
       "input_series": [
