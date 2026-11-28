@@ -320,11 +320,11 @@
           ]
         },
         {
-          "expr": "ix_build:storage_io_utilisation_pct{host=\"luna\"}",
+          "expr": "ix_build:build_device_io_utilisation_pct{host=\"luna\"}",
           "eval_time": "90m",
           "exp_samples": [
             {
-              "labels": "{__name__=\"ix_build:storage_io_utilisation_pct\",host=\"luna\",device=\"nvme0n1\"}",
+              "labels": "{__name__=\"ix_build:build_device_io_utilisation_pct\",host=\"luna\",device=\"nvme0n1\"}",
               "value": 50
             }
           ]
@@ -556,15 +556,15 @@
           ]
         },
         {
-          "expr": "ix_build:storage_io_utilisation_pct",
+          "expr": "ix_build:build_device_io_utilisation_pct",
           "eval_time": "90m",
           "exp_samples": [
             {
-              "labels": "{__name__=\"ix_build:storage_io_utilisation_pct\",host=\"luna\",device=\"nvme0n1\"}",
+              "labels": "{__name__=\"ix_build:build_device_io_utilisation_pct\",host=\"luna\",device=\"nvme0n1\"}",
               "value": 50
             },
             {
-              "labels": "{__name__=\"ix_build:storage_io_utilisation_pct\",host=\"terra\",device=\"sdf\"}",
+              "labels": "{__name__=\"ix_build:build_device_io_utilisation_pct\",host=\"terra\",device=\"sdf\"}",
               "value": 25
             }
           ]

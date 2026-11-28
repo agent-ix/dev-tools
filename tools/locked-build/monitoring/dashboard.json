@@ -1095,7 +1095,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ix_build:storage_io_utilisation_pct{host=~\"$host\"}",
+          "expr": "ix_build:build_device_io_utilisation_pct{host=~\"$host\"}",
           "legendFormat": "{{host}} {{device}}",
           "datasource": {
             "type": "prometheus",
