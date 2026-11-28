@@ -226,11 +226,7 @@ enum PolicyAction {
     /// Print effective values and default/configured provenance as JSON.
     Show,
     /// Write visible measured defaults only if policy is absent; preserve edits.
-    Init {
-        /// Accepted for compatibility; existing policy is always preserved.
-        #[arg(long)]
-        force: bool,
-    },
+    Init,
 }
 
 fn execute(cli: Cli) -> Result<i32> {
@@ -389,7 +385,7 @@ fn execute(cli: Cli) -> Result<i32> {
                 println!("{}", serde_json::to_string_pretty(&policy::show(&config)?)?);
                 return Ok(0);
             }
-            PolicyAction::Init { force: _ } => {
+            PolicyAction::Init => {
                 ensure_policy(&config)?;
                 writable::private_directory(&state)?;
                 policy::baseline(&state, &config, "init")?;

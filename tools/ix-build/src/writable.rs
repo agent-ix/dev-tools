@@ -120,6 +120,14 @@ fn existing_root(new: PathBuf, old: PathBuf) -> PathBuf {
 
 pub(crate) fn publish_file(path: &Path, bytes: &[u8], force: bool) -> Result<bool> {
     use std::io::Write;
+    publish_file_with(path, force, |file| file.write_all(bytes))
+}
+
+fn publish_file_with(
+    path: &Path,
+    force: bool,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<bool> {
     let parent = path
         .parent()
         .ok_or_else(|| Error::new(ErrorCode::Configuration, "policy path has no parent"))?;
@@ -134,7 +142,7 @@ pub(crate) fn publish_file(path: &Path, bytes: &[u8], force: bool) -> Result<boo
             .create_new(true)
             .mode(0o600)
             .open(&next)?;
-        file.write_all(bytes)?;
+        write(&mut file)?;
         file.sync_all()?;
         if force {
             fs::rename(&next, path)?;
@@ -293,6 +301,58 @@ pub(crate) fn access_denied(error: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trace: FR-011-AC-7. Provenance: SWM-444.
+    #[test]
+    fn policy_publication_keeps_complete_old_or_new_bytes_after_write_failure() -> Result<()> {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::MetadataExt;
+        for existing in [false, true] {
+            let root = tempfile::tempdir()?;
+            let path = root.path().join("policy.json");
+            let mut previous = if existing {
+                fs::write(&path, b"complete old policy")?;
+                Some(std::fs::File::open(&path)?)
+            } else {
+                None
+            };
+            let result = publish_file_with(&path, true, |file| {
+                file.write_all(b"partial new")?;
+                Err(std::io::Error::other("injected write failure"))
+            });
+            assert!(result.is_err());
+            if existing {
+                assert_eq!(fs::read(&path)?, b"complete old policy");
+            } else {
+                assert!(!path.exists());
+            }
+            assert_eq!(fs::read_dir(root.path())?.count(), usize::from(existing));
+            publish_file(&path, b"complete new policy", true)?;
+            assert_eq!(fs::read(&path)?, b"complete new policy");
+            if let Some(file) = &mut previous {
+                assert_ne!(file.metadata()?.ino(), fs::metadata(&path)?.ino());
+                let mut old_bytes = Vec::new();
+                file.read_to_end(&mut old_bytes)?;
+                assert_eq!(old_bytes, b"complete old policy");
+            }
+            assert_eq!(fs::read_dir(root.path())?.count(), 1);
+        }
+        Ok(())
+    }
+
+    /// Trace: FR-011-AC-7. Provenance: SWM-444.
+    #[test]
+    fn policy_publication_rename_failure_preserves_destination_and_removes_staging() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("policy.json");
+        fs::create_dir(&path)?;
+        fs::write(path.join("sentinel"), b"preserved")?;
+        assert!(publish_file(&path, b"complete policy", true).is_err());
+        assert_eq!(fs::read(path.join("sentinel"))?, b"preserved");
+        assert_eq!(fs::read_dir(root.path())?.count(), 1);
+        assert_eq!(fs::read_dir(&path)?.count(), 1);
+        Ok(())
+    }
 
     /// Trace: FR-011-AC-7. Provenance: SWM-444.
     #[test]

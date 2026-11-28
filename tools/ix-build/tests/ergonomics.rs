@@ -74,6 +74,46 @@ fn policy_show_reports_effective_values_with_default_and_configured_provenance()
     Ok(())
 }
 
+/// Trace: FR-011-AC-7. Provenance: SWM-444.
+#[test]
+fn handwritten_partial_policy_reports_every_missing_key_as_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("home");
+    let path = home.join(".ix/ix-build/policy.json");
+    std::fs::create_dir_all(path.parent().ok_or("policy parent")?)?;
+    let partial = br#"{ "host": "operator", "memory_budget_bytes": 41000000000 }"#;
+    std::fs::write(&path, partial)?;
+    let output = invoke(&home, root.path(), &["policy", "show"])?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown: Value = serde_json::from_slice(&output.stdout)?;
+    let configured: Value = serde_json::from_slice(partial)?;
+    for key in shown
+        .as_object()
+        .ok_or("report object")?
+        .keys()
+        .filter(|key| *key != "provenance")
+    {
+        let expected = if configured.get(key).is_some() {
+            "configured"
+        } else {
+            "default"
+        };
+        assert_eq!(shown["provenance"][key]["source"], expected, "{key}");
+    }
+    assert_eq!(shown["memory_limit_per_job_bytes"], 8_000_000_000_u64);
+    assert_eq!(shown["memory_reserve_per_job_bytes"], 3_000_000_000_u64);
+    assert_eq!(shown["max_request_memory"], 20_500_000_000_u64);
+    assert_eq!(shown["disk_reserve_bytes"], 0);
+    assert_eq!(shown["capacity_units"], 1);
+    assert_eq!(std::fs::read(&path)?, partial);
+    Ok(())
+}
+
 /// Trace: FR-005-AC-4, FR-011-AC-7. Provenance: SWM-444.
 #[test]
 fn policy_init_writes_visible_defaults_once_and_never_overwrites_edits()
@@ -122,10 +162,13 @@ fn policy_init_writes_visible_defaults_once_and_never_overwrites_edits()
     }
     let edited = br#"{ "host": "operator", "memory_budget_bytes": 41000000000 }"#;
     std::fs::write(&path, edited)?;
-    for args in [vec!["policy", "init"], vec!["policy", "init", "--force"]] {
+    for (args, success) in [
+        (vec!["policy", "init"], true),
+        (vec!["policy", "init", "--force"], false),
+    ] {
         let output = invoke(&home, root.path(), &args)?;
         assert!(
-            output.status.success(),
+            output.status.success() == success,
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -303,7 +346,7 @@ fn first_run_generates_policy_runs_command_and_reuses_it_without_flags()
     let mut edited = policy;
     edited["host"] = Value::String("manual".to_owned());
     std::fs::write(&policy_path, serde_json::to_vec(&edited)?)?;
-    let regenerated = invoke(&home, &cwd, &["policy", "init", "--force"])?;
+    let regenerated = invoke(&home, &cwd, &["policy", "init"])?;
     assert!(
         regenerated.status.success(),
         "{}",

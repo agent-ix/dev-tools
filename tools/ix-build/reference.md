@@ -56,8 +56,8 @@ Rules:
    old participants refuse drain before swap; the initial rollout needs an
    ordinary empty-queue install.
 6. `policy set KEY VALUE` validates the typed policy and cross-field constraints,
-   including `max_bytes` requiring `target_root` and a disk reserve of at least
-   100 GB. It backs up the previous bytes and atomically records the policy hash
+   including `max_bytes` requiring `target_root`. Disk reserve accepts any
+   nonnegative byte value. It backs up the previous bytes and records the policy hash
    in `policy-ledger.json` and prints the field's before/after values.
    Plain file edits are supported; this command is an optional convenience.
 7. Store schema 2 declares `min_reader_version: 2`. Readers check compatibility
@@ -130,7 +130,7 @@ Generated defaults become configured values once written into the file.
 
 `ix-build policy init` writes all defaults visibly into a new durable file.
 An existing file is validated and preserved byte for byte, including operator
-edits. The compatibility `--force` flag also preserves existing files.
+edits. Initialization has no overwrite flag.
 
 Generated policies and the policy example reserve 1,250,000,000 bytes per job
 for `block` and `must-fix`, and 750,000,000 bytes per job for `point`.

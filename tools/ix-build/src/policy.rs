@@ -192,12 +192,6 @@ pub(crate) fn set(store: &Store, key: &str, value: &str) -> Result<()> {
     fields.insert(key.into(), value.clone());
     let next: Config = serde_json::from_value(encoded)?;
     next.validate()?;
-    if next.disk_reserve_bytes < 100_000_000_000 {
-        return Err(Error::new(
-            ErrorCode::Configuration,
-            "disk_reserve_bytes must be at least 100000000000 (host disk floor)",
-        ));
-    }
     let after = serde_json::to_vec_pretty(&next)?;
     let backup = store.path.join(format!("policy-backup-{before_hash}.json"));
     crate::writable::publish_file(&backup, &before, false)?;
@@ -243,7 +237,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let path = root.path().join("policy.json");
         let config = Config {
-            disk_reserve_bytes: 100_000_000_000,
+            disk_reserve_bytes: 123,
             ..Config::default()
         };
         std::fs::write(&path, serde_json::to_vec(&config)?)?;
@@ -253,7 +247,7 @@ mod tests {
         for (key, value) in [
             ("unknown", "1"),
             ("max_bytes", "1"),
-            ("disk_reserve_bytes", "99999999999"),
+            ("disk_reserve_bytes", "-1"),
             ("maximum_units", "0"),
             ("capacity_units", "\"bad\""),
         ] {
@@ -263,8 +257,8 @@ mod tests {
             );
             assert_eq!(std::fs::read(&path)?, before);
         }
-        set(&store, "disk_reserve_bytes", "120000000000")?;
-        assert_eq!(Config::read(&path)?.disk_reserve_bytes, 120_000_000_000);
+        set(&store, "disk_reserve_bytes", "42")?;
+        assert_eq!(Config::read(&path)?.disk_reserve_bytes, 42);
         assert_eq!(
             std::fs::read(
                 store
@@ -285,6 +279,8 @@ mod tests {
         assert_eq!(entries[2].key, "file-edit");
         assert_eq!(entries[2].after, entries[3].before);
         assert_eq!(entries[3].after, hash(&std::fs::read(&path)?));
+        set(&store, "disk_reserve_bytes", "0")?;
+        assert_eq!(Config::read(&path)?.disk_reserve_bytes, 0);
         Ok(())
     }
 
@@ -295,7 +291,6 @@ mod tests {
         let path = root.path().join("policy.json");
         let config = Config {
             memory_budget_bytes: Some(52_000_000_000),
-            disk_reserve_bytes: 100_000_000_000,
             ..Config::default()
         };
         std::fs::write(&path, serde_json::to_vec(&config)?)?;
