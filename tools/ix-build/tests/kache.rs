@@ -20,10 +20,15 @@ fn kache_luna_exporter_latency() -> Result<(), Box<dyn std::error::Error>> {
             .arg(&config)
             .args(args)
             .env_remove("IX_BUILD_LEASE")
+            .env_remove("LOCKED_BUILD_LEASE")
             .env_remove("IX_BUILD_STATE")
+            .env_remove("LOCKED_BUILD_STATE")
             .env_remove("IX_BUILD_CONFIG")
+            .env_remove("LOCKED_BUILD_CONFIG")
             .env_remove("IX_BUILD_OWNER")
+            .env_remove("LOCKED_BUILD_OWNER")
             .env_remove("IX_BUILD_TICKET")
+            .env_remove("LOCKED_BUILD_TICKET")
             .output()
     };
     let initialized = invoke(&[
@@ -138,8 +143,11 @@ fn kache_sequential_slow_calls_fail_open_inside_publisher_deadline()
             .env("IX_BUILD_KACHE", &fixture)
             .env("IX_BUILD_KACHE_EXPECT_DAEMON", "0")
             .env_remove("IX_BUILD_LEASE")
+            .env_remove("LOCKED_BUILD_LEASE")
             .env_remove("IX_BUILD_STATE")
+            .env_remove("LOCKED_BUILD_STATE")
             .env_remove("IX_BUILD_CONFIG")
+            .env_remove("LOCKED_BUILD_CONFIG")
             .output()
     };
     assert!(

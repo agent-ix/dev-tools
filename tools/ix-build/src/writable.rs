@@ -258,6 +258,20 @@ pub(crate) fn access_denied(error: &std::io::Error) -> bool {
 mod tests {
     use super::*;
 
+    /// Trace: FR-011-AC-7. Provenance: SWM-431.
+    #[test]
+    fn private_directory_returns_canonical_tmp_path() -> Result<()> {
+        let root = tempfile::Builder::new()
+            .prefix("ix-build-canonical-")
+            .tempdir_in("/tmp")?;
+        let path = root.path().join("state");
+        let resolved = private_directory(&path)?;
+        assert_eq!(resolved, std::fs::canonicalize(&path)?);
+        #[cfg(target_os = "macos")]
+        assert!(resolved.starts_with("/private/tmp"));
+        Ok(())
+    }
+
     /// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-431.
     #[test]
     fn namespace_migration_preserves_live_lock_state_and_ledger() -> Result<()> {

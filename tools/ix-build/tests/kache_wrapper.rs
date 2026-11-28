@@ -62,8 +62,11 @@ fn kache_wrapper_admitted_commands_default_on_off_unhealthy_and_remote_fallback(
             ])
             .arg(&build)
             .env_remove("IX_BUILD_LEASE")
+            .env_remove("LOCKED_BUILD_LEASE")
             .env_remove("IX_BUILD_STATE")
+            .env_remove("LOCKED_BUILD_STATE")
             .env_remove("IX_BUILD_CONFIG")
+            .env_remove("LOCKED_BUILD_CONFIG")
             .env("KACHE_LOCAL_ONLY", "1")
             .env("RUSTC_WRAPPER", "/missing/inherited-wrapper")
             .output()?;

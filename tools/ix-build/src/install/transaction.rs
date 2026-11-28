@@ -290,6 +290,7 @@ impl Transaction<Idle> {
             inner.shared.join("install-committed.json"),
             inner.shared.join("host-namespace.json"),
             inner.shared.join("policy-ledger.json"),
+            inner.shared.join("rename-ix-build"),
             inner.home.join(".ix/ix-build/install.json"),
             inner.home.join(".ix/ix-build/policy.json"),
             inner.home.join(".config/ix-build/policy.json"),

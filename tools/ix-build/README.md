@@ -31,13 +31,17 @@ aliases to those exact directories. This preserves open lock inodes, queued
 and running lease paths, policy history and the event ledger. Before
 installation, the new binary selects the existing namespace automatically.
 Conflicting old and new stores cause an error; neither is overwritten.
-Fresh hosts create only the new paths. The initial rename requires an empty queue and all original callers to exit;
-it refuses retained legacy waiters even with `--drain`, because they cannot
-read new `IB_*` records. No queued request is cancelled. Subsequent ix-build
-upgrades retain the usual idle/drain gate.
+Fresh hosts create only the new paths. The initial rename needs an idle queue
+and exited original callers because old readers cannot decode `IB_*` records.
+On a busy host, `--drain` waits with admission open so existing queued work
+and callers can finish, then takes the install hold and rechecks idle before
+migrating. A race retries with the hold released; timeout or any returned
+refusal retains no installer hold and cancels no requests. A durable migration
+marker identifies later ix-build upgrades, which retain live-queue drain.
 
-Environment variables now use `IX_BUILD_*`. The old lease marker remains
-readable for commands admitted before migration. New diagnostics emit `IB_*`;
+Environment variables use `IX_BUILD_*`; every legacy `LOCKED_BUILD_*` runtime
+setting remains a fallback during transition. The new spelling wins, and each
+legacy spelling used emits one warning line on stderr (without its value). New diagnostics emit `IB_*`;
 legacy `LB_*` codes remain readable in existing status and ledger data.
 Prometheus metric families keep the `ix_build_*` prefix. Installation retires
 the previous monitoring units and renames their collector file, preventing

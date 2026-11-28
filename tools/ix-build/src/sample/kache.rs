@@ -34,7 +34,7 @@ fn unavailable() -> Error {
 
 /// Optional override is an absolute executable path; absence on PATH emits nothing.
 pub(crate) fn executable() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("IX_BUILD_KACHE") {
+    if let Some(path) = crate::transition_env::os("IX_BUILD_KACHE") {
         return Some(PathBuf::from(path));
     }
     std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
@@ -86,7 +86,7 @@ pub(super) fn append_with_binary(
 }
 
 fn expectation_override() -> Option<bool> {
-    match std::env::var_os("IX_BUILD_KACHE_EXPECT_DAEMON").as_deref() {
+    match crate::transition_env::os("IX_BUILD_KACHE_EXPECT_DAEMON").as_deref() {
         Some(v) if v == "1" => Some(true),
         Some(v) if v == "0" => Some(false),
         _ => None,

@@ -188,6 +188,7 @@ fn install_tools_owned(
     std::fs::create_dir_all(installed_bin_dir)?;
     let config_dir = crate::writable::host_root(Some(home));
     let shared = crate::writable::private_directory(shared)?;
+    let first_rename = first_rename_required(home, &shared)?;
     let checked = transaction::Checked::new(home, &shared)?;
     let preflight = || -> Result<Option<Config>> {
         prepare()?;
@@ -201,24 +202,21 @@ fn install_tools_owned(
             Ok(None)
         }
     };
-    // Ordinary installs do all slow preparation before observing idle capacity.
-    // Drain holds admission first, but leaves the state lock free throughout
-    // preflight so running leases can finish. Neither path performs network
-    // work between the idle check and publishing the installed replacement.
-    let (held, measured_policy) = if drain_timeout.is_some() {
-        let held = checked.hold(drain_timeout)?;
+    // Initial rename waits with admission open: old queued clients must finish
+    // before any new IB_* writer is installed. Recheck under the idle lock.
+    let (idle, measured_policy) = if first_rename {
         let measured = preflight()?;
-        (held, measured)
+        (initial_rename_idle(home, &shared, drain_timeout)?, measured)
     } else {
-        let measured = preflight()?;
-        (checked.hold(drain_timeout)?, measured)
+        let (held, measured) = if drain_timeout.is_some() {
+            let held = checked.hold(drain_timeout)?;
+            (held, preflight()?)
+        } else {
+            let measured = preflight()?;
+            (checked.hold(drain_timeout)?, measured)
+        };
+        (held.wait_idle()?, measured)
     };
-    let idle = held.wait_idle()?;
-    if std::fs::symlink_metadata(home.join(".local/bin/locked-build"))
-        .is_ok_and(|metadata| metadata.is_file() && !metadata.is_symlink())
-    {
-        require_legacy_readers_finished(&shared)?;
-    }
     if shared.join("policy-ledger.json").exists() {
         crate::policy::check(&shared, &shared.join("policy.json"))?;
     }
@@ -326,6 +324,11 @@ fn install_tools_owned(
         }
         finish()?;
         crate::policy::baseline(&shared, &shared.join("policy.json"), "install")?;
+        crate::store::Store {
+            path: shared.clone(),
+            config_path: shared.join("policy.json"),
+        }
+        .write_atomic("rename-ix-build", b"1\n")?;
         provenance.publish()
     })?;
     verified.resume(resume)?;
@@ -340,27 +343,69 @@ fn install_tools_owned(
 
 // The old reader cannot decode IB_* records. A first rename must not hand off
 // retained old waiters; later ix-build installs retain the normal drain route.
-fn require_legacy_readers_finished(shared: &Path) -> Result<()> {
+fn legacy_readers_finished(shared: &Path) -> Result<bool> {
     let bytes = match std::fs::read(shared.join("state.json")) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(error) => return Err(error.into()),
     };
     let state: crate::model::State = serde_json::from_slice(&bytes)?;
     let processes = crate::process::Processes::read();
-    if state.requests.iter().any(|request| {
+    Ok(!state.requests.iter().any(|request| {
         !request.phase.terminal()
             || request
                 .client
                 .as_ref()
                 .is_some_and(|client| !processes.birth_identity_absent(client))
-    }) {
-        return Err(Error::new(
-            ErrorCode::Configuration,
-            "first ix-build migration requires an empty queue and all legacy callers to exit; retry after they finish, without retaining queued clients through --drain",
-        ));
+    }))
+}
+
+fn first_rename_required(home: &Path, shared: &Path) -> Result<bool> {
+    match std::fs::read(shared.join("rename-ix-build")) {
+        Ok(bytes) if bytes == b"1\n" => Ok(false),
+        Ok(_) => Err(Error::new(
+            ErrorCode::State,
+            "unknown rename migration marker; preserving installation",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(home
+            .join(".local/bin/locked-build")
+            .symlink_metadata()
+            .is_ok()
+            || home.join(".ix/locked-build").exists()
+            || shared
+                == crate::writable::legacy_shared_path()
+                    .canonicalize()
+                    .unwrap_or_default()),
+        Err(error) => Err(error.into()),
     }
-    Ok(())
+}
+
+fn initial_rename_idle(
+    home: &Path,
+    shared: &Path,
+    timeout: Option<Duration>,
+) -> Result<transaction::Transaction<transaction::Idle>> {
+    let started = Instant::now();
+    loop {
+        if legacy_readers_finished(shared)? {
+            let attempt = transaction::Checked::new(home, shared)?
+                .hold(None)?
+                .wait_idle();
+            match attempt {
+                Ok(idle) if legacy_readers_finished(shared)? => return Ok(idle),
+                Ok(idle) => drop(idle),
+                Err(error) if error.code == ErrorCode::Configuration => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if timeout.is_none_or(|limit| started.elapsed() >= limit) {
+            return Err(Error::new(
+                ErrorCode::Configuration,
+                "first ix-build migration is waiting for an idle queue and exited legacy callers; no admission hold retained",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Admission is held independently of state writes, so workers can finish and

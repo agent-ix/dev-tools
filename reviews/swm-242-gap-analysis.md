@@ -1,9 +1,9 @@
 ---
 id: SR-004
-title: "Gap analysis of ix-build metrics export (SWM-242)"
+title: "Gap analysis of locked-build metrics export (SWM-242)"
 type: SpecReview
 analysis: gap-analysis
-scope: "agent-ix/dev-tools; tools/ix-build/src/metrics.rs, runtime.rs, model.rs and their tests; PR dev-tools#25; dev-team FR-015"
+scope: "agent-ix/dev-tools; tools/locked-build/src/metrics.rs, runtime.rs, model.rs and their tests; PR dev-tools#25; dev-team FR-015"
 review_set: subset
 ---
 
@@ -19,13 +19,13 @@ Ticket: SWM-242. Checked head 97ba21775eaaa6c794fb1acfa3c69fff3c7a450c against d
 
 | ID      | Severity | Summary | Refs |
 | ------- | -------- | ------- | ---- |
-| FND-001 | medium | The test tagged FR-015-AC-8 does not iterate any termination reason and only checks that selected lines read 1; it never asserts that no other outcome series changed, so a double increment elsewhere passes. | tools/ix-build/src/metrics.rs:391-509 |
-| FND-002 | medium | The test tagged FR-015-AC-1 checks only blocked-seconds arithmetic through direct observe_block calls; it covers no scripted request sequence, no other series and no promtool check. | tools/ix-build/src/metrics.rs:511-524 |
-| FND-003 | medium | The FR-015-AC-10 test never captures values before restart, so equality across restart, second recover and prune is not asserted; it checks three series after the fact. | tools/ix-build/src/runtime/tests.rs:201-240 |
-| FND-004 | medium | Runtime wiring is untested: with the record_queue_wait and observe_block calls removed from admit_worker, all 31 tests still pass. No test asserts queue_depth, slots_busy, histogram bucket values, multiple waiters through the runtime, or the textfile mode. | tools/ix-build/src/runtime.rs:528-544 |
-| FND-005 | medium | ix_build_slots_configured has no owning requirement: FR-015 lists slots_busy, slots_sustainable and slots_max, no dev-team or ix-board branch names the new series, and ix-board FR-041 reads slots_sustainable. The required spec amendment is missing. | tools/ix-build/src/metrics.rs:237-246 |
-| FND-006 | low | The test tagged FR-015-AC-9 asserts the all-zero start but never ends a check request aborted_thermal, which the finish path can be scripted to do, so the second half of the criterion is unverified. | tools/ix-build/src/metrics.rs:391-496 |
-| FND-007 | low | No test is tagged to or asserts the FR-015-AC-4 exclusion of ticket ids, request ids, command text and environment from the new exposition. | tools/ix-build/src/metrics.rs:176-282 |
+| FND-001 | medium | The test tagged FR-015-AC-8 does not iterate any termination reason and only checks that selected lines read 1; it never asserts that no other outcome series changed, so a double increment elsewhere passes. | tools/locked-build/src/metrics.rs:391-509 |
+| FND-002 | medium | The test tagged FR-015-AC-1 checks only blocked-seconds arithmetic through direct observe_block calls; it covers no scripted request sequence, no other series and no promtool check. | tools/locked-build/src/metrics.rs:511-524 |
+| FND-003 | medium | The FR-015-AC-10 test never captures values before restart, so equality across restart, second recover and prune is not asserted; it checks three series after the fact. | tools/locked-build/src/runtime/tests.rs:201-240 |
+| FND-004 | medium | Runtime wiring is untested: with the record_queue_wait and observe_block calls removed from admit_worker, all 31 tests still pass. No test asserts queue_depth, slots_busy, histogram bucket values, multiple waiters through the runtime, or the textfile mode. | tools/locked-build/src/runtime.rs:528-544 |
+| FND-005 | medium | ix_build_slots_configured has no owning requirement: FR-015 lists slots_busy, slots_sustainable and slots_max, no dev-team or ix-board branch names the new series, and ix-board FR-041 reads slots_sustainable. The required spec amendment is missing. | tools/locked-build/src/metrics.rs:237-246 |
+| FND-006 | low | The test tagged FR-015-AC-9 asserts the all-zero start but never ends a check request aborted_thermal, which the finish path can be scripted to do, so the second half of the criterion is unverified. | tools/locked-build/src/metrics.rs:391-496 |
+| FND-007 | low | No test is tagged to or asserts the FR-015-AC-4 exclusion of ticket ids, request ids, command text and environment from the new exposition. | tools/locked-build/src/metrics.rs:176-282 |
 
 ## Coverage
 

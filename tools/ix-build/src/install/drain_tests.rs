@@ -118,12 +118,98 @@ fn first_rename_refuses_retained_legacy_waiters_without_changing_the_queue() -> 
         Ok(())
     })?;
     // A terminal record still has an original waiter (this test process).
-    assert!(require_legacy_readers_finished(&fixture.store.path).is_err());
+    assert!(!legacy_readers_finished(&fixture.store.path)?);
     fixture.store.transaction(|state, _| {
         state.find_mut(&queued)?.client = None;
         Ok(())
     })?;
-    require_legacy_readers_finished(&fixture.store.path)?;
+    assert!(legacy_readers_finished(&fixture.store.path)?);
+    Ok(())
+}
+
+/// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-431.
+#[test]
+fn first_rename_drain_waits_with_admission_open_then_migrates_when_idle() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let queued = fixture.enqueue()?;
+    std::fs::write(
+        fixture.home.join(".local/bin/locked-build"),
+        b"legacy artifact",
+    )?;
+    std::thread::scope(|scope| -> Result<()> {
+        let (ready, wait) = std::sync::mpsc::channel();
+        let fixture_ref = &fixture;
+        let installer = scope.spawn(move || {
+            fixture_ref.install(
+                Duration::from_secs(3),
+                || {
+                    ready
+                        .send(())
+                        .map_err(|_| Error::new(ErrorCode::State, "installer receiver"))
+                },
+                || Ok(()),
+            )
+        });
+        wait.recv_timeout(Duration::from_secs(2))
+            .map_err(|_| Error::new(ErrorCode::State, "installer preflight"))?;
+        assert!(fixture.store.queue_hold()?.is_none());
+        assert!(fixture.store.try_admission_lock()?.is_some());
+        assert_eq!(
+            fixture.store.snapshot()?.0.find(&queued)?.phase,
+            Phase::Queued
+        );
+        fixture.store.transaction(|state, _| {
+            let request = state.find_mut(&queued)?;
+            request.phase = Phase::Succeeded;
+            request.ended_at_ms = Some(crate::runtime::now_ms()?);
+            request.ended_clock_ms = Some(crate::runtime::clock_ms()?);
+            request.client = None;
+            Ok(())
+        })?;
+        installer
+            .join()
+            .map_err(|_| Error::new(ErrorCode::State, "installer panic"))??;
+        Ok(())
+    })?;
+    assert!(fixture.store.queue_hold()?.is_none());
+    assert_eq!(
+        std::fs::read(fixture.home.join(".local/bin/ix-build"))?,
+        b"new artifact"
+    );
+    assert_eq!(
+        std::fs::read(fixture.store.path.join("rename-ix-build"))?,
+        b"1\n"
+    );
+    // Recognition is durable, independent of the compatibility command's shape.
+    std::fs::remove_file(fixture.home.join(".local/bin/locked-build"))?;
+    std::fs::write(
+        fixture.home.join(".local/bin/locked-build"),
+        b"new artifact",
+    )?;
+    assert!(!first_rename_required(&fixture.home, &fixture.store.path)?);
+    Ok(())
+}
+
+/// Trace: FR-011-AC-7, FR-005-AC-4. Provenance: SWM-431.
+#[test]
+fn failed_compatibility_symlink_rolls_back_the_binary_and_releases_the_hold() -> Result<()> {
+    let fixture = Fixture::new()?;
+    std::fs::create_dir(fixture.home.join(".local/bin/locked-build"))?;
+    assert!(fixture.install_mode(None, || Ok(()), || Ok(())).is_err());
+    assert_eq!(
+        std::fs::read(fixture.home.join(".local/bin/ix-build"))?,
+        b"old artifact"
+    );
+    assert!(fixture.home.join(".local/bin/locked-build").is_dir());
+    assert!(!fixture.store.path.join("rename-ix-build").exists());
+    assert!(fixture.store.queue_hold()?.is_none());
+    assert!(fixture.store.try_admission_lock()?.is_some());
+    std::fs::remove_dir(fixture.home.join(".local/bin/locked-build"))?;
+    fixture.install_mode(None, || Ok(()), || Ok(()))?;
+    assert_eq!(
+        std::fs::read(fixture.home.join(".local/bin/ix-build"))?,
+        b"new artifact"
+    );
     Ok(())
 }
 
@@ -429,6 +515,7 @@ fn install_drain_refuses_unsupported_scheduler_and_queued_worker_without_swappin
             b"old artifact"
         );
         assert!(fixture.store.try_admission_lock()?.is_some());
+        assert!(fixture.store.queue_hold()?.is_none());
         drop(guard);
     }
     Ok(())

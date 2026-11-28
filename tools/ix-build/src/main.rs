@@ -22,6 +22,7 @@ mod sample;
 mod scheduler;
 mod store;
 mod telemetry;
+mod transition_env;
 mod watchdog;
 mod writable;
 
@@ -315,12 +316,12 @@ fn execute(cli: Cli) -> Result<i32> {
         let state = cli
             .state
             .clone()
-            .or_else(|| std::env::var_os("IX_BUILD_STATE").map(PathBuf::from))
+            .or_else(|| transition_env::os("IX_BUILD_STATE").map(PathBuf::from))
             .unwrap_or_else(writable::shared_path);
         let config = cli
             .config
             .clone()
-            .or_else(|| std::env::var_os("IX_BUILD_CONFIG").map(PathBuf::from))
+            .or_else(|| transition_env::os("IX_BUILD_CONFIG").map(PathBuf::from))
             .unwrap_or_else(|| state.join("policy.json"));
         if let Action::Metrics { output } = &cli.command {
             let text = exporter::collect(&state, &config, output.as_deref())?;
@@ -352,12 +353,12 @@ fn execute(cli: Cli) -> Result<i32> {
         let state = cli
             .state
             .clone()
-            .or_else(|| std::env::var_os("IX_BUILD_STATE").map(PathBuf::from))
+            .or_else(|| transition_env::os("IX_BUILD_STATE").map(PathBuf::from))
             .unwrap_or_else(writable::shared_path);
         let config = cli
             .config
             .clone()
-            .or_else(|| std::env::var_os("IX_BUILD_CONFIG").map(PathBuf::from))
+            .or_else(|| transition_env::os("IX_BUILD_CONFIG").map(PathBuf::from))
             .unwrap_or_else(|| state.join("policy.json"));
         let store = store::Store::open_existing(&state, &config)?;
         let report = recovery::run(&store, release.as_deref(), reason.as_deref(), *dry_run)?;
@@ -554,10 +555,10 @@ fn resolve_paths(
 ) -> Result<(PathBuf, PathBuf)> {
     let state = state_flag
         .map(PathBuf::from)
-        .or_else(|| env("IX_BUILD_STATE"));
+        .or_else(|| transition_env::read("IX_BUILD_STATE", &mut env));
     let config = config_flag
         .map(PathBuf::from)
-        .or_else(|| env("IX_BUILD_CONFIG"));
+        .or_else(|| transition_env::read("IX_BUILD_CONFIG", &mut env));
     if let (Some(state), Some(config)) = (&state, &config) {
         return Ok((state.clone(), config.clone()));
     }
@@ -577,10 +578,10 @@ fn resolve_paths_with_shared(
 ) -> Result<(PathBuf, PathBuf)> {
     let state = state_flag
         .map(PathBuf::from)
-        .or_else(|| env("IX_BUILD_STATE"));
+        .or_else(|| transition_env::read("IX_BUILD_STATE", &mut env));
     let config = config_flag
         .map(PathBuf::from)
-        .or_else(|| env("IX_BUILD_CONFIG"));
+        .or_else(|| transition_env::read("IX_BUILD_CONFIG", &mut env));
     if let (Some(state), Some(config)) = (&state, &config) {
         return Ok((state.clone(), config.clone()));
     }
@@ -591,11 +592,12 @@ fn resolve_paths_with_shared(
         None => writable::shared_state(&root.join("state"), shared)?,
     };
     let config = config.unwrap_or_else(|| root.join("policy.json"));
-    let config = if config_flag.is_none() && env("IX_BUILD_CONFIG").is_none() {
-        default_policy_path(&config, &state)?
-    } else {
-        config
-    };
+    let config =
+        if config_flag.is_none() && transition_env::read("IX_BUILD_CONFIG", &mut env).is_none() {
+            default_policy_path(&config, &state)?
+        } else {
+            config
+        };
     Ok((state, config))
 }
 
@@ -712,7 +714,7 @@ fn read_shim_config_with_discovery(
 }
 
 fn default_owner() -> String {
-    if let Some(owner) = std::env::var_os("IX_BUILD_OWNER") {
+    if let Some(owner) = transition_env::os("IX_BUILD_OWNER") {
         return owner.to_string_lossy().into_owned();
     }
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned());
@@ -730,14 +732,14 @@ fn derive_owner(user: &str, host: &str, cwd: Option<&std::path::Path>) -> String
 }
 
 fn cargo_shim_owner(
-    read_env: impl FnOnce(&str) -> Option<String>,
+    mut read_env: impl FnMut(&str) -> Option<String>,
     fallback: impl FnOnce() -> String,
 ) -> String {
-    read_env("IX_BUILD_OWNER").unwrap_or_else(fallback)
+    transition_env::read("IX_BUILD_OWNER", &mut read_env).unwrap_or_else(fallback)
 }
 
 fn default_ticket() -> String {
-    if let Some(ticket) = std::env::var_os("IX_BUILD_TICKET") {
+    if let Some(ticket) = transition_env::os("IX_BUILD_TICKET") {
         return ticket.to_string_lossy().into_owned();
     }
     let branch = Command::new("git")
@@ -870,7 +872,8 @@ fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
     })?;
     let class = cargo_shim_class(|name| std::env::var(name).ok());
     let owner = cargo_shim_owner(|name| std::env::var(name).ok(), default_owner);
-    let ticket = std::env::var("IX_BUILD_TICKET").unwrap_or_else(|_| DEFAULT_CARGO_TICKET.into());
+    let ticket =
+        transition_env::string("IX_BUILD_TICKET").unwrap_or_else(|| DEFAULT_CARGO_TICKET.into());
     let mut command = cargo_shim_command(CargoShimInvocation {
         arguments,
         real_cargo,
@@ -886,10 +889,7 @@ fn cargo_shim(arguments: &[OsString]) -> Result<i32> {
 }
 
 fn inside_admitted_run(mut env: impl FnMut(&str) -> Option<String>) -> bool {
-    env("IX_BUILD_LEASE")
-        .or_else(|| env("LOCKED_BUILD_LEASE"))
-        .as_deref()
-        == Some("1")
+    transition_env::read("IX_BUILD_LEASE", &mut env).as_deref() == Some("1")
         || (env("CARGO_TARGET_DIR").is_some_and(|value| !value.is_empty())
             && env("CARGO_BUILD_JOBS").is_some_and(|value| {
                 value.parse::<u32>().is_ok_and(|jobs| jobs > 0)
@@ -898,7 +898,7 @@ fn inside_admitted_run(mut env: impl FnMut(&str) -> Option<String>) -> bool {
 }
 
 fn nested_real_cargo() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("IX_BUILD_REAL_CARGO") {
+    if let Some(path) = transition_env::os("IX_BUILD_REAL_CARGO") {
         return Ok(PathBuf::from(path));
     }
     std::env::var_os("PATH")
@@ -907,8 +907,9 @@ fn nested_real_cargo() -> Result<PathBuf> {
         .ok_or_else(|| error::Error::new(error::ErrorCode::Configuration, "real cargo not found"))
 }
 
-fn cargo_shim_class(read_env: impl FnOnce(&str) -> Option<String>) -> String {
-    read_env("IX_BUILD_CLASS").unwrap_or_else(|| DEFAULT_CARGO_CLASS.to_owned())
+fn cargo_shim_class(mut read_env: impl FnMut(&str) -> Option<String>) -> String {
+    transition_env::read("IX_BUILD_CLASS", &mut read_env)
+        .unwrap_or_else(|| DEFAULT_CARGO_CLASS.to_owned())
 }
 
 fn main() {

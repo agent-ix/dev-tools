@@ -1873,7 +1873,8 @@ fn lease_environment_uses_policy_values_and_scales_jobs_by_active_units() -> Res
         .env_remove("CARGO_BUILD_JOBS")
         .env_remove("RUST_TEST_THREADS")
         .env_remove("CARGO_INCREMENTAL")
-        .env_remove("IX_BUILD_LEASE");
+        .env_remove("IX_BUILD_LEASE")
+        .env_remove("LOCKED_BUILD_LEASE");
     let mut arguments = Vec::new();
     let prepared = prepare_build_environment(&policy, &mut arguments, None, None, 2);
     if let Some(value) = prepared.cargo_build_jobs_env {
