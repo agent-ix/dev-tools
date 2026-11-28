@@ -189,6 +189,22 @@ fn install_tools_owned(
     let config_dir = crate::writable::host_root(Some(home));
     let shared = crate::writable::private_directory(shared)?;
     let first_rename = first_rename_required(home, &shared)?;
+    let existing = crate::store::Store {
+        path: shared.clone(),
+        config_path: shared.join("policy.json"),
+    };
+    if shared.join("state.json").exists() && (first_rename || existing.coexisting()?) {
+        prepare()?;
+        return install_live_rename(
+            home,
+            current_exe,
+            &shared,
+            provenance,
+            manifest,
+            drain_timeout,
+            finish,
+        );
+    }
     let checked = transaction::Checked::new(home, &shared)?;
     let preflight = || -> Result<Option<Config>> {
         prepare()?;
@@ -202,12 +218,7 @@ fn install_tools_owned(
             Ok(None)
         }
     };
-    // Initial rename waits with admission open: old queued clients must finish
-    // before any new IB_* writer is installed. Recheck under the idle lock.
-    let (idle, measured_policy) = if first_rename {
-        let measured = preflight()?;
-        (initial_rename_idle(home, &shared, drain_timeout)?, measured)
-    } else {
+    let (idle, measured_policy) = {
         let (held, measured) = if drain_timeout.is_some() {
             let held = checked.hold(drain_timeout)?;
             (held, preflight()?)
@@ -341,25 +352,6 @@ fn install_tools_owned(
     Ok(())
 }
 
-// The old reader cannot decode IB_* records. A first rename must not hand off
-// retained old waiters; later ix-build installs retain the normal drain route.
-fn legacy_readers_finished(shared: &Path) -> Result<bool> {
-    let bytes = match std::fs::read(shared.join("state.json")) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(error) => return Err(error.into()),
-    };
-    let state: crate::model::State = serde_json::from_slice(&bytes)?;
-    let processes = crate::process::Processes::read();
-    Ok(!state.requests.iter().any(|request| {
-        !request.phase.terminal()
-            || request
-                .client
-                .as_ref()
-                .is_some_and(|client| !processes.birth_identity_absent(client))
-    }))
-}
-
 fn first_rename_required(home: &Path, shared: &Path) -> Result<bool> {
     match std::fs::read(shared.join("rename-ix-build")) {
         Ok(bytes) if bytes == b"1\n" => Ok(false),
@@ -380,32 +372,92 @@ fn first_rename_required(home: &Path, shared: &Path) -> Result<bool> {
     }
 }
 
-fn initial_rename_idle(
+fn install_live_rename(
     home: &Path,
+    source: &Path,
     shared: &Path,
+    provenance: crate::provenance::InstallGuard,
+    manifest: ToolManifest,
     timeout: Option<Duration>,
-) -> Result<transaction::Transaction<transaction::Idle>> {
-    let started = Instant::now();
-    loop {
-        if legacy_readers_finished(shared)? {
-            let attempt = transaction::Checked::new(home, shared)?
-                .hold(None)?
-                .wait_idle();
-            match attempt {
-                Ok(idle) if legacy_readers_finished(shared)? => return Ok(idle),
-                Ok(idle) => drop(idle),
-                Err(error) if error.code == ErrorCode::Configuration => {}
-                Err(error) => return Err(error),
-            }
-        }
-        if timeout.is_none_or(|limit| started.elapsed() >= limit) {
+    finish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    // Alias publication neither moves the store nor hands off its scheduler.
+    // Only exclude short state writers while publishing the compatible view.
+    let ready = transaction::Checked::new(home, shared)?.share(timeout)?;
+    let state: crate::model::State =
+        serde_json::from_slice(&std::fs::read(shared.join("state.json"))?)?;
+    let policy = state.config_path.canonicalize()?;
+    Config::read(&policy)?;
+    if shared.join("policy-ledger.json").exists() {
+        crate::policy::check(shared, &policy)?;
+    }
+    let installed = home.join(".local/bin/ix-build");
+    let store = crate::store::Store {
+        path: shared.to_owned(),
+        config_path: policy.clone(),
+    };
+    // This additive store capability must survive installer rollback/crash:
+    // a caller can observe the replacement as soon as its name is published.
+    store.begin_coexistence()?;
+    let swapped = ready.swap(source, &installed)?;
+    if !shared.join("policy.json").try_exists()? {
+        crate::writable::install_alias(&shared.join("policy.json"), &policy)?;
+    }
+    install_symlink(&installed, &home.join(".local/bin/locked-build"))?;
+    store.publish_service_binary(&installed)?;
+    crate::writable::install_host_namespace(shared)?;
+    let config_dir = crate::writable::host_root(Some(home));
+    create_private_dir(&config_dir)?;
+    if !config_dir.join("policy.json").try_exists()? {
+        crate::writable::install_alias(&config_dir.join("policy.json"), &policy)?;
+    }
+    crate::writable::shared_state(&config_dir.join("state"), shared)?;
+    let shim_dir = home.join(".local/lib/ix-build/shims");
+    create_private_dir(&shim_dir)?;
+    let shim = shim_dir.join("cargo");
+    install_symlink(&installed, &shim)?;
+    let data = home.join(".local/share/dev-tools");
+    create_private_dir(&data)?;
+    write_if_changed(
+        &data.join("installed.json"),
+        &serde_json::to_vec_pretty(&InstalledRecord {
+            schema_version: MANIFEST_VERSION,
+            ix_build_version: env!("CARGO_PKG_VERSION").into(),
+            policy_path: policy,
+            cargo_shim: shim,
+            pinned_tools: manifest.tools,
+        })?,
+        0o600,
+    )?;
+    let path_line = format!(
+        "export PATH=\"{}:$HOME/.local/bin:$PATH\"",
+        shell_quote_path(&shim_dir)
+    );
+    for profile in [".profile", ".bashrc", ".zshrc"] {
+        ensure_profile_line(&home.join(profile), &path_line)?;
+    }
+    let verified = swapped.verify(|| {
+        if crate::provenance::artifact_hash(&installed)? != provenance.record.artifact_sha256 {
             return Err(Error::new(
                 ErrorCode::Configuration,
-                "first ix-build migration is waiting for an idle queue and exited legacy callers; no admission hold retained",
+                "installed artifact changed",
             ));
         }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+        finish()?;
+        store.write_atomic("rename-ix-build", b"1\n")?;
+        provenance.publish()
+    })?;
+    verified.resume(|_, _| {
+        Err(Error::new(
+            ErrorCode::State,
+            "live rename must retain the scheduler",
+        ))
+    })?;
+    println!(
+        "installed ix-build {}; shared legacy store retained",
+        env!("CARGO_PKG_VERSION")
+    );
+    Ok(())
 }
 
 /// Admission is held independently of state writes, so workers can finish and
@@ -628,45 +680,8 @@ fn migrate_memory_fields(path: &Path) -> Result<()> {
     let path = path.canonicalize()?;
     let before = std::fs::read(&path)?;
     let mut policy: serde_json::Value = serde_json::from_slice(&before)?;
-    let fields = policy
-        .as_object_mut()
-        .ok_or_else(|| Error::new(ErrorCode::Configuration, "host policy must be an object"))?;
-    if fields.remove("memory_per_job_bytes").is_none() {
+    if !crate::config::normalize_memory_fields(&mut policy)? {
         return Ok(());
-    }
-    fields
-        .entry("memory_reserve_per_job_bytes")
-        .or_insert(3_000_000_000_u64.into());
-    fields
-        .entry("memory_limit_per_job_bytes")
-        .or_insert(8_000_000_000_u64.into());
-    // Preserve a deliberately smaller per-class cap without reserving more
-    // than it can enforce after the split.
-    let reserve = fields
-        .get("memory_reserve_per_job_bytes")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(3_000_000_000);
-    let overrides: Vec<_> = fields
-        .get("memory_per_job_by_class")
-        .and_then(serde_json::Value::as_object)
-        .into_iter()
-        .flatten()
-        .filter_map(|(class, limit)| {
-            limit
-                .as_u64()
-                .filter(|limit| *limit < reserve)
-                .map(|limit| (class.clone(), limit))
-        })
-        .collect();
-    if !overrides.is_empty() {
-        let reservations = fields
-            .entry("memory_reserve_per_job_by_class")
-            .or_insert_with(|| serde_json::json!({}));
-        if let Some(reservations) = reservations.as_object_mut() {
-            for (class, bytes) in overrides {
-                reservations.entry(class).or_insert(bytes.into());
-            }
-        }
     }
     let validated: Config = serde_json::from_value(policy.clone())?;
     validated.validate()?;
@@ -1120,6 +1135,13 @@ mod tests {
         let path = root.path().join("policy.json");
         let before = br#"{"host":"titan","cargo_build_jobs":4,"rust_test_threads":4,"disk_reserve_bytes":100000000000,"hold_ms":5400000,"memory_per_job_bytes":6000000000,"memory_per_job_by_class":{"point":2500000000}}"#;
         std::fs::write(&path, before)?;
+        let interpreted = Config::read(&path)?;
+        assert_eq!(interpreted.memory_limit_per_job_bytes, 8_000_000_000);
+        assert_eq!(
+            std::fs::read(&path)?,
+            before,
+            "reading legacy policy must preserve bytes for old callers"
+        );
         migrate_memory_fields(&path)?;
         let policy = Config::read(&path)?;
         assert_eq!(
@@ -1196,11 +1218,11 @@ mod tests {
             (
                 "quire",
                 "quire",
-                Some("0.53.3"),
+                Some("0.53.4"),
                 Some("@agent-ix/quire-cli"),
             ),
             ("quoin", "quoin", Some("0.37.0"), Some("@agent-ix/quoin")),
-            ("ix-board", "ix-board", Some("0.12.2"), None),
+            ("ix-board", "ix-board", Some("0.12.3"), None),
             (
                 "ix-flow",
                 "ix-flow",
@@ -1231,7 +1253,7 @@ mod tests {
             ToolPin {
                 name: "quire".to_owned(),
                 executable: "quire".to_owned(),
-                version: Some("0.53.3".to_owned()),
+                version: Some("0.53.4".to_owned()),
                 npm_package: Some("@agent-ix/quire-cli".to_owned()),
             },
             ToolPin {
@@ -1255,7 +1277,7 @@ mod tests {
                 "--global",
                 "--registry=https://registry.npmjs.org/",
                 "--@agent-ix:registry=https://registry.npmjs.org/",
-                "@agent-ix/quire-cli@0.53.3",
+                "@agent-ix/quire-cli@0.53.4",
                 "@agent-ix/quoin@0.37.0",
                 "@agent-ix/ix-flow@0.3.5",
             ]
@@ -1352,8 +1374,8 @@ mod tests {
     fn version_check_recognizes_cli_version_formats() {
         assert!(version_matches(
             "quire",
-            "0.53.3",
-            "quire 0.53.3 (engine 0.63.2)"
+            "0.53.4",
+            "quire 0.53.4 (engine 0.63.2)"
         ));
         assert!(version_matches("quoin", "0.37.0", "0.37.0"));
         assert!(!version_matches("quoin", "0.37.0", "quoin 0.37.0-rc.1"));
@@ -1364,16 +1386,16 @@ mod tests {
             "quoin 0.37.0+local"
         ));
         assert!(!version_matches("quoin", "0.37.0", "0.36.9"));
-        assert!(version_matches("ix-board", "0.12.2", "ix-board 0.12.3"));
-        assert!(!version_matches("ix-board", "0.12.2", "ix-board 0.12.1"));
-        assert!(version_matches("ix-board", "0.12.2", "ix-board 0.13.0"));
-        assert!(version_matches("ix-board", "0.12.2", "ix-board 1.0.0"));
-        assert!(version_matches("ix-board", "0.12.2", "ix-board 0.12.10"));
-        assert!(!version_matches("ix-board", "0.12.2", "ix-board unknown"));
+        assert!(version_matches("ix-board", "0.12.3", "ix-board 0.12.3"));
+        assert!(!version_matches("ix-board", "0.12.3", "ix-board 0.12.1"));
+        assert!(version_matches("ix-board", "0.12.3", "ix-board 0.13.0"));
+        assert!(version_matches("ix-board", "0.12.3", "ix-board 1.0.0"));
+        assert!(version_matches("ix-board", "0.12.3", "ix-board 0.12.10"));
+        assert!(!version_matches("ix-board", "0.12.3", "ix-board unknown"));
         assert!(!version_matches(
             "ix-board",
-            "0.12.2",
-            "ix-board 0.12.2-rc.1"
+            "0.12.3",
+            "ix-board 0.12.3-rc.1"
         ));
     }
 

@@ -11,6 +11,8 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::model::{RequestId, RequestNotice, State, WorkerClaim};
 use crate::process::{IdentityState, Processes};
 
+mod coexistence;
+
 const STATE_LIMIT: u64 = 32 * 1024 * 1024;
 const METRICS_FILE: &str = "metrics.json";
 
@@ -213,11 +215,14 @@ impl Store {
 
     pub(crate) fn snapshot(&self) -> Result<(State, Config)> {
         let config = Config::read(&self.config_path)?;
-        if let Ok(Some(snapshot)) =
-            self.read_member::<Snapshot>("snapshot.json", STATE_LIMIT * 2 + 4096)
+        let coexisting = self.coexisting()?;
+        if !coexisting
+            && let Ok(Some(snapshot)) =
+                self.read_member::<Snapshot>("snapshot.json", STATE_LIMIT * 2 + 4096)
             && FileStamp::read(&self.path.join("state.json")).ok().as_ref()
                 == Some(&snapshot.source_state)
-            && FileStamp::read(&self.path.join(METRICS_FILE)).ok() == snapshot.source_metrics
+            && FileStamp::read(&self.path.join(self.metrics_file()?)).ok()
+                == snapshot.source_metrics
         {
             let mut state = snapshot.state;
             state.metrics = snapshot.metrics;
@@ -235,7 +240,7 @@ impl Store {
         // Read metrics first, then the atomic state file, and reconcile only
         // when all intervening events remain available (including pruning).
         for _ in 0..3 {
-            let mut metrics = load_metrics(&self.path.join(METRICS_FILE))?;
+            let mut metrics = load_metrics(&self.path.join(self.metrics_file()?))?;
             let history = metrics.has_history();
             let mut state = match self.read_member::<State>("state.json", STATE_LIMIT)? {
                 Some(state) => state,
@@ -269,8 +274,13 @@ impl Store {
                 ));
             }
             metrics.bind_store(&state.store_id);
-            if !metrics.can_reconcile(&state) {
+            if !coexisting && !metrics.can_reconcile(&state) {
                 continue;
+            }
+            if coexisting {
+                let extra = coexistence::Extensions::load(self, &state)?;
+                extra.apply(&mut state);
+                metrics.allow_legacy_gaps(&state)?;
             }
             metrics.reconcile_events(&state.events, state.next_event)?;
             state.metrics = metrics;
@@ -308,11 +318,14 @@ impl Store {
     }
 
     fn publish_snapshot(&self, state: &State) -> Result<()> {
+        if self.coexisting()? {
+            return Ok(());
+        }
         let snapshot = Snapshot {
             state,
             metrics: &state.metrics,
             source_state: FileStamp::read(&self.path.join("state.json"))?,
-            source_metrics: FileStamp::read(&self.path.join(METRICS_FILE)).ok(),
+            source_metrics: FileStamp::read(&self.path.join(self.metrics_file()?)).ok(),
         };
         self.write_atomic("snapshot.json", &serde_json::to_vec(&snapshot)?)
     }
@@ -413,15 +426,29 @@ impl Store {
         }
         state.schema_version = 2;
         state.min_reader_version = 2;
+        let coexisting = self.coexisting()?;
+        let mut extensions = coexisting
+            .then(|| coexistence::Extensions::load(self, &state))
+            .transpose()?;
+        if let Some(extra) = &mut extensions {
+            extra.apply(&mut state);
+            extra.retain(&state);
+            extra.capture(&state);
+        }
         // The random store ID and host identify the queue, not the location
         // from which a lane happened to read identical host policy.
         let policy_path_changed = state.config_path != self.config_path;
         state.config_path = self.config_path.clone();
-        let metrics_path = self.path.join(METRICS_FILE);
+        let metrics_path = self.path.join(self.metrics_file()?);
         state.metrics = load_metrics(&metrics_path)?;
         let metrics_before = serde_json::to_vec(&state.metrics)?;
         let metrics_identity_changed = state.metrics.bind_store(&state.store_id);
-        if !state.metrics.can_reconcile(&state) {
+        if coexisting {
+            let mut metrics = std::mem::take(&mut state.metrics);
+            metrics.allow_legacy_gaps(&state)?;
+            state.metrics = metrics;
+        }
+        if !coexisting && !state.metrics.can_reconcile(&state) {
             return Err(Error::new(
                 ErrorCode::State,
                 "metrics ledger has a gap; restore metrics.json from backup",
@@ -514,7 +541,11 @@ impl Store {
             .metrics
             .reconcile_events(&state.events, state.next_event)?;
         state.validate(&config)?;
-        let before = serde_json::to_vec(&state)?;
+        let before = if coexisting {
+            ix_build::wire::persistence::to_vec(&state)?
+        } else {
+            serde_json::to_vec(&state)?
+        };
         let before_notices: std::collections::BTreeMap<_, _> = state
             .requests
             .iter()
@@ -535,7 +566,15 @@ impl Store {
             state.metrics.close_block(clock, now)?;
         }
         state.validate(&config)?;
-        let bytes = serde_json::to_vec(&state)?;
+        let bytes = if coexisting {
+            ix_build::wire::persistence::to_vec(&state)?
+        } else {
+            serde_json::to_vec(&state)?
+        };
+        if let Some(extra) = &mut extensions {
+            extra.capture(&state);
+            extra.save(self)?;
+        }
         let metrics_bytes = serde_json::to_vec(&state.metrics)?;
         let state_changed =
             policy_path_changed || bytes != before || !self.path.join("state.json").try_exists()?;
@@ -554,7 +593,7 @@ impl Store {
         }
         if previous_pruned != state.pruned_events {
             if metrics_changed {
-                self.write_atomic(METRICS_FILE, &metrics_bytes)?;
+                self.write_atomic(self.metrics_file()?, &metrics_bytes)?;
             }
             if state_changed {
                 self.write_atomic("state.json", &bytes)?;
@@ -563,7 +602,9 @@ impl Store {
             if state_changed {
                 self.write_atomic("state.json", &bytes)?;
             }
-            if metrics_changed && let Err(error) = self.write_atomic(METRICS_FILE, &metrics_bytes) {
+            if metrics_changed
+                && let Err(error) = self.write_atomic(self.metrics_file()?, &metrics_bytes)
+            {
                 eprintln!("ix-build: metrics sidecar update failed: {error}");
             }
         }
@@ -597,13 +638,25 @@ impl Store {
             .write(true)
             .mode(0o600)
             .open(self.path.join(&next))?;
-        let result = (|| {
+        let result: std::io::Result<()> = (|| {
             file.write_all(bytes)?;
             // Reconstructible caches need atomic visibility, not disk flushes.
-            if name == "state.json" || name == METRICS_FILE || name.ends_with(".launch.json") {
+            let durable = matches!(
+                name,
+                "state.json"
+                    | METRICS_FILE
+                    | "state-v2.json"
+                    | "metrics-v2.json"
+                    | "coexistence.json"
+            ) || name.ends_with(".launch.json");
+            if durable {
                 file.sync_all()?;
             }
-            fs::rename(self.path.join(&next), self.path.join(name))
+            fs::rename(self.path.join(&next), self.path.join(name))?;
+            if durable {
+                File::open(&self.path)?.sync_all()?;
+            }
+            Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(self.path.join(next));

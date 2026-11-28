@@ -361,9 +361,12 @@ impl Config {
     }
 
     pub(crate) fn read(path: &Path) -> Result<Self> {
-        let mut config: Self =
+        let mut value: serde_json::Value =
             serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(path)?))
                 .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
+        normalize_memory_fields(&mut value)?;
+        let mut config: Self = serde_json::from_value(value)
+            .map_err(|error| Error::new(ErrorCode::Configuration, error.to_string()))?;
         let directory = path
             .parent()
             .ok_or_else(|| Error::new(ErrorCode::Configuration, "policy path has no directory"))?;
@@ -712,6 +715,51 @@ impl HostSample {
         }
         BlockReason::select(&reasons).map(BlockReason::admission_reason)
     }
+}
+
+/// Interpret legacy combined memory policy without changing bytes seen by old callers.
+pub(crate) fn normalize_memory_fields(policy: &mut serde_json::Value) -> Result<bool> {
+    let fields = policy
+        .as_object_mut()
+        .ok_or_else(|| Error::new(ErrorCode::Configuration, "host policy must be an object"))?;
+    if fields.remove("memory_per_job_bytes").is_none() {
+        return Ok(false);
+    }
+    fields
+        .entry("memory_reserve_per_job_bytes")
+        .or_insert(3_000_000_000_u64.into());
+    fields
+        .entry("memory_limit_per_job_bytes")
+        .or_insert(8_000_000_000_u64.into());
+    // Preserve a deliberately smaller per-class cap without reserving more
+    // than it can enforce after the split.
+    let reserve = fields
+        .get("memory_reserve_per_job_bytes")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(3_000_000_000);
+    let overrides: Vec<_> = fields
+        .get("memory_per_job_by_class")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(class, limit)| {
+            limit
+                .as_u64()
+                .filter(|limit| *limit < reserve)
+                .map(|limit| (class.clone(), limit))
+        })
+        .collect();
+    if !overrides.is_empty() {
+        let reservations = fields
+            .entry("memory_reserve_per_job_by_class")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(reservations) = reservations.as_object_mut() {
+            for (class, bytes) in overrides {
+                reservations.entry(class).or_insert(bytes.into());
+            }
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

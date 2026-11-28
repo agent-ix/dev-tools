@@ -124,19 +124,19 @@ pub enum CacheWrapperStatus {
 #[serde(deny_unknown_fields)]
 pub struct LeaseRecord {
     /// Effective kache executable, absent when caching was skipped.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ix_build::wire::persistence::hide")]
     pub cache_wrapper: Option<PathBuf>,
     /// Why the per-request wrapper was selected or skipped.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ix_build::wire::persistence::hide")]
     pub cache_wrapper_status: CacheWrapperStatus,
     /// Exact systemd scope owned by this lease, excluding nested caller scopes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ix_build::wire::persistence::hide")]
     pub memory_scope: Option<String>,
     /// Observed kernel OOM-kill counter for this command's memory scope.
     #[serde(default)]
     pub oom_kill_count: u64,
     /// The owned systemd unit reported Result=oom-kill; not a counter sample.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ix_build::wire::persistence::hide")]
     pub scope_oom_killed: bool,
     /// Identity of the launched command; memory accounting starts here.
     #[serde(default)]
@@ -313,8 +313,12 @@ pub(crate) struct Request {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct State {
+    #[serde(serialize_with = "ix_build::wire::persistence::schema")]
     pub schema_version: u32,
-    #[serde(default = "legacy_reader_version")]
+    #[serde(
+        default = "legacy_reader_version",
+        skip_serializing_if = "ix_build::wire::persistence::hide"
+    )]
     pub min_reader_version: u32,
     pub store_id: String,
     pub config_path: PathBuf,

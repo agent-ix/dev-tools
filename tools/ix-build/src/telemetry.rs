@@ -154,6 +154,10 @@ fn bounded(value: &str) -> &str {
     }
 }
 impl Ledger {
+    pub(crate) fn legacy_gap(&mut self, count: u64) -> Result<()> {
+        add(self.family("ix_build_telemetry_dropped_total", "Unavailable new-version observations pruned by a legacy writer; legacy totals remain in metrics.json.", MetricKind::Counter), "", labels(&[("cause", "legacy_pruned_history")]), MetricValue::Integer(count))
+    }
+
     // Upgrade stored counters once. Changed histogram boundaries start a new epoch.
     // This preserves pruned lifetime totals without exporting retired families.
     fn upgrade(&mut self) -> Result<()> {

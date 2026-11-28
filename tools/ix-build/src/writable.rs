@@ -72,6 +72,11 @@ pub(crate) fn host_root(home: Option<&Path>) -> PathBuf {
     existing_root(root.join("ix-build"), root.join("locked-build"))
 }
 
+pub(crate) fn validated_host_root(home: Option<&Path>) -> Result<PathBuf> {
+    let root = home.map_or_else(|| PathBuf::from(".ix"), |home| home.join(".ix"));
+    shared_path_at(&root.join("ix-build"), &root.join("locked-build"))
+}
+
 // Until install-tools publishes the new alias, use the existing namespace.
 // Never open a second queue or lose the recorded rollout owner during upgrade.
 fn existing_root(new: PathBuf, old: PathBuf) -> PathBuf {
@@ -389,6 +394,23 @@ mod tests {
         assert_eq!(resolved, std::fs::canonicalize(&path)?);
         #[cfg(target_os = "macos")]
         assert!(resolved.starts_with("/private/tmp"));
+        Ok(())
+    }
+
+    /// Trace: FR-011-AC-7. Provenance: SWM-436.
+    #[test]
+    fn host_build_root_resolves_the_validated_migration_alias() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let legacy = private_directory(&home.path().join(".ix/locked-build"))?;
+        let new = home.path().join(".ix/ix-build");
+        std::os::unix::fs::symlink(&legacy, &new)?;
+        let resolved = validated_host_root(Some(home.path()))?;
+        assert_eq!(resolved, legacy);
+        assert_eq!(private_directory(&resolved)?, legacy);
+        fs::remove_file(&new)?;
+        let outside = private_directory(&home.path().join("outside"))?;
+        std::os::unix::fs::symlink(outside, new)?;
+        assert!(validated_host_root(Some(home.path())).is_err());
         Ok(())
     }
 
